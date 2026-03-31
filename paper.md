@@ -68,6 +68,8 @@ Axiom defines five standard categories, each extending the core:
 
 Each category uses its own `SECTION[N]{...}:` header, keeping schemas minimal and parse-friendly.
 
+Axiom also defines CACP (Context/Acceptance/Constraints/Protocol) as a second normative serialization, encoding rules as structured bullet lists (`- [CATEGORY] id: message (effect: value)`) for environments where tabular CSV is less natural, such as dispatcher integration with CACP-speaking agents.
+
 ## 4. Empirical Backing
 
 Four independent lines of evidence support the Axiom design:
@@ -93,6 +95,8 @@ Axiom is both a format and a compilation target. The pipeline:
                                            emit compiled.axiom
                                            (per-agent, budgeted)
 ```
+
+The compiler accepts markdown rule files with YAML frontmatter (`id`, `category`, `effect`, `priority`, `trigger`, etc.) as source input, enabling human-friendly authoring with full schema control before compilation.
 
 1. **Parse**: Extract rules from markdown prose, front-matter, and bullet lists.
 2. **Normalize**: Map each rule to the appropriate category schema (GOVERNANCE, CODING, etc.).

@@ -1,4 +1,4 @@
-# Axiom Specification v0.1.0
+# Axiom Specification v0.2.0
 
 ## 1. Overview
 
@@ -138,14 +138,161 @@ Additional columns:
 - `phase` — `planning`, `coding`, `review`, `deploy`
 - `actor` — `orchestrator`, `agent`, `reviewer`, `ci`
 
-## 9. File Extension
+## 9. Alternative Serializations
+
+TOON is the default and most compact Axiom serialization. CACP (Context/Acceptance/Constraints/Protocol) is defined as a second normative serialization for environments where structured bullet-list format is preferred over tabular CSV.
+
+### 9.1 CACP Encoding
+
+A CACP-encoded rule set uses four sections:
+
+```
+CONTEXT:Project rules compiled by <tool>
+SCOPE:<comma-separated category list>
+
+RULES:
+- [CATEGORY] id: message (effect: effect_value)
+- [CATEGORY] id: message (effect: effect_value)
+
+VERIFY:Apply all rules marked 'forbid'. Log rules marked 'prefer'.
+```
+
+**Rules:**
+- The `CONTEXT` line provides provenance (compiler name, agent role).
+- The `SCOPE` line lists all categories included.
+- Each rule is a bullet under `RULES:`, formatted as `- [CATEGORY] id: message (effect: effect_value)`.
+- Rules are grouped by category, with categories in alphabetical order.
+- The `VERIFY` line instructs the consuming agent on enforcement semantics.
+- CACP is approximately 2-3x more verbose than TOON for the same rule set but requires no CSV parsing.
+
+### 9.2 Choosing a Serialization
+
+| | TOON | CACP |
+|---|---|---|
+| Token cost | Minimal | 2-3x TOON |
+| Parse complexity | CSV-aware | Bullet-list |
+| Agent familiarity | Novel format | Familiar to CACP-speaking agents |
+| Use case | Token-constrained, compiled output | Dispatcher integration, debugging |
+
+Tools SHOULD default to TOON. Tools MAY offer a `--format cacp` flag.
+
+Reference implementation: [zenprocess/cacp](https://github.com/zenprocess/cacp).
+
+## 10. Pressure Zones
+
+Context window pressure determines how aggressively rules are compressed. Tools SHOULD implement pressure-aware compilation using the following graduated zones:
+
+| Zone | Context Usage | Behavior |
+|------|--------------|----------|
+| FRESH | 0-40% | All sections, all columns, full messages |
+| MODERATE | 40-70% | Drop `message` column, drop rules with `inform` effect |
+| DEPLETED | 70-90% | Only `critical` and `high` priority rules retained |
+| CRITICAL | 90%+ | Safety floor only: `critical` priority + `forbid` effect |
+
+**Rules:**
+- Zone boundaries are computed as `estimated_task_tokens / model_context_window`.
+- The safety floor (critical + forbid) MUST never be dropped regardless of pressure.
+- Within each zone, the drop order for effects is: `inform` first, then `discourage`, `prefer`, `allow`, `forbid` last.
+- Within each zone, the drop order for priorities is: `low` first, then `medium`, `high`, `critical` last.
+- Tools SHOULD report dropped rules and their reasons in a budget report.
+- Tools MAY truncate `message` fields before dropping entire rules.
+
+## 11. Conflict Resolution
+
+When multiple rules match the same trigger or context, conflicts are resolved using the following normative order:
+
+### 11.1 Resolution Cascade
+
+1. **Priority wins.** `critical` > `high` > `medium` > `low`. A `critical` rule always overrides a `low` rule on the same trigger.
+2. **Within same priority: more specific trigger wins.** Specificity ranking: `regex` > `keyword` > `wildcard` > `none` (no trigger).
+3. **Within same specificity: first-defined wins.** The rule appearing earlier in the source file takes precedence.
+
+### 11.2 Tool Behavior
+
+- Tools SHOULD warn on detected conflicts during compilation (e.g., `allow` and `forbid` on the same trigger at the same priority).
+- Tools MAY auto-resolve using this cascade, annotating the resolution in compiler output.
+- Tools MUST NOT silently discard conflicting rules without reporting.
+
+### 11.3 Example
+
+```
+GOVERNANCE[2]{id,effect,priority,domain,trigger,message}:
+no-force-push,forbid,critical,Git,push --force,Rewrites remote history
+allow-force-lease,allow,high,Git,push --force-with-lease,Safe alternative
+```
+
+Resolution: `no-force-push` wins on `push --force` (critical > high). `allow-force-lease` applies only to the more specific `push --force-with-lease` trigger.
+
+## 12. Source Format
+
+Axiom rules can be authored as markdown files with YAML frontmatter. This is the recommended source format for human authoring; compilation to Axiom (TOON or CACP) is performed by a compiler.
+
+### 12.1 Frontmatter Schema
+
+```yaml
+---
+id: no-force-push
+category: governance
+domain: Git
+effect: forbid
+priority: critical
+activation: always
+roles: [agent, reviewer]
+globs: ["*.sh", "Makefile"]
+trigger: push --force
+condition: branch:main
+---
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | No (derived from filename if absent) | Stable kebab-case identifier |
+| `category` | string | No (defaults to `governance`) | Target Axiom section |
+| `domain` | string | No | Scope: `Git`, `Python`, `Bash`, etc. |
+| `effect` | enum | No (defaults to `inform`) | `allow`, `forbid`, `prefer`, `discourage`, `inform` |
+| `priority` | enum | No (defaults to `medium`) | `critical`, `high`, `medium`, `low` |
+| `activation` | string | No | `always`, `on-demand`, or cron expression |
+| `roles` | list[string] | No | Agent roles this rule applies to |
+| `globs` | list[string] | No | File patterns that scope the rule |
+| `trigger` | string | No | Pattern or command that activates the rule |
+| `condition` | string | No | Narrowing predicate |
+
+All fields are optional. The body text (after the frontmatter) becomes the `message` field.
+
+### 12.2 Complete Example
+
+```markdown
+---
+id: no-force-push
+category: governance
+domain: Git
+effect: forbid
+priority: critical
+trigger: push --force
+condition: branch:main
+roles: [agent]
+---
+Never use `git push --force`. It rewrites remote history and can destroy
+other contributors' work. Use `--force-with-lease` instead.
+```
+
+### 12.3 Compilation Relationship
+
+```
+.claude/rules/*.md  →  Axiom compiler  →  compiled.axiom (TOON)
+                                        →  compiled.cacp  (CACP)
+```
+
+The compiler parses frontmatter, maps fields to the appropriate category schema, and emits the compiled format. Rules without frontmatter are treated as `inform` effect with `medium` priority.
+
+## 13. File Extension
 
 Axiom files use the `.axiom` extension. Compiled per-agent rule sets are conventionally named `compiled.axiom`.
 
-## 10. MIME Type
+## 14. MIME Type
 
 `text/x-axiom` (provisional).
 
-## 11. Versioning
+## 15. Versioning
 
-This specification is versioned using semantic versioning. The current version is `0.1.0`. The version is not embedded in the file format; it is tracked by the specification document.
+This specification is versioned using semantic versioning. The current version is `0.2.0`. The version is not embedded in the file format; it is tracked by the specification document.

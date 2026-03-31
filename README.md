@@ -46,6 +46,37 @@ value1,value2,value3,...
 | TESTING | `id, effect, target, threshold, action, message` |
 | WORKFLOW | `id, effect, phase, actor, condition, message` |
 
+## Serializations
+
+| Format | Use case | Token cost |
+|--------|----------|------------|
+| **TOON** (default) | Compiled output, token-constrained | Minimal |
+| **CACP** | Dispatcher integration, debugging | 2-3x TOON |
+
+## Source Format
+
+Rules are authored as markdown with YAML frontmatter:
+
+```markdown
+---
+id: no-force-push
+category: governance
+effect: forbid
+priority: critical
+trigger: push --force
+---
+Never use `git push --force`. Use `--force-with-lease` instead.
+```
+
+## Pressure Zones
+
+| Zone | Context | Behavior |
+|------|---------|----------|
+| FRESH | 0-40% | All rules |
+| MODERATE | 40-70% | Drop `inform`, drop `message` |
+| DEPLETED | 70-90% | Critical + high only |
+| CRITICAL | 90%+ | Safety floor (critical + forbid) |
+
 ## Reserved Effects
 
 `allow` | `forbid` | `prefer` | `discourage` | `inform`

@@ -4,9 +4,9 @@
 
 Axiom is a Rule Definition Language (RDL) for encoding AI agent rules in a compact, self-describing tabular format. Files use the `.axiom` extension.
 
-## 2. TOON Header Syntax
+## 2. [TOON](https://toonformat.dev) Header Syntax
 
-Each section begins with a header line:
+Each section begins with a [TOON (Typed Object-Oriented Notation)](https://toonformat.dev) header line:
 
 ```
 SECTION_NAME[N]{col1,col2,...}:
@@ -140,7 +140,7 @@ Additional columns:
 
 ## 9. Alternative Serializations
 
-TOON is the default and most compact Axiom serialization. CACP (Context/Acceptance/Constraints/Protocol) is defined as a second normative serialization for environments where structured bullet-list format is preferred over tabular CSV.
+[TOON](https://toonformat.dev) is the default and most compact Axiom serialization. CACP (Context/Acceptance/Constraints/Protocol) is defined as a second normative serialization for environments where structured bullet-list format is preferred over tabular CSV.
 
 ### 9.1 CACP Encoding
 

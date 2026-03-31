@@ -6,7 +6,7 @@
 
 ## Abstract
 
-Large language model (LLM) coding agents increasingly rely on rule files to encode project conventions, governance policies, and security constraints. These rules are typically authored as prose markdown, which is verbose, positionally fragile, and scales poorly as rule sets grow. We introduce Axiom, a Rule Definition Language (RDL) that compiles human-readable rules into a compact, self-describing tabular format based on TOON-style headers (`SECTION[N]{columns}:` followed by CSV rows). A ZenRule prototype demonstrates 20:1 compression (20k to 1k tokens) with no observed degradation in agent compliance. This result aligns with findings from LLMLingua (up to 20x compression, ~1.5-point accuracy loss), SWE-Pruner (21-54% token savings with quality improvement), and table-format benchmarks showing that structured tabular inputs outperform equivalent prose by over 15 percentage points on comprehension tasks. Axiom defines a universal core schema and per-category extensions, enabling static conflict detection, token budgeting, and deterministic compilation from markdown source files.
+Large language model (LLM) coding agents increasingly rely on rule files to encode project conventions, governance policies, and security constraints. These rules are typically authored as prose markdown, which is verbose, positionally fragile, and scales poorly as rule sets grow. We introduce Axiom, a Rule Definition Language (RDL) that compiles human-readable rules into a compact, self-describing tabular format based on [TOON](https://toonformat.dev)-style headers (`SECTION[N]{columns}:` followed by CSV rows). A ZenRule prototype demonstrates 20:1 compression (20k to 1k tokens) with no observed degradation in agent compliance. This result aligns with findings from LLMLingua (up to 20x compression, ~1.5-point accuracy loss), SWE-Pruner (21-54% token savings with quality improvement), and table-format benchmarks showing that structured tabular inputs outperform equivalent prose by over 15 percentage points on comprehension tasks. Axiom defines a universal core schema and per-category extensions, enabling static conflict detection, token budgeting, and deterministic compilation from markdown source files.
 
 ## 1. Introduction
 
@@ -22,7 +22,7 @@ These findings motivate a structured, compressed rule format designed specifical
 
 ## 2. Format Specification
 
-Axiom uses the TOON (Typed Object-Oriented Notation) tabular format. Each section begins with a self-describing header:
+Axiom uses the [TOON (Typed Object-Oriented Notation)](https://toonformat.dev) tabular format. Each section begins with a self-describing header:
 
 ```
 SECTION_NAME[N]{col1,col2,col3,...}:
@@ -78,7 +78,7 @@ Four independent lines of evidence support the Axiom design:
 
 **Context pruning improves quality.** Pichay's SWE-Pruner [2] finds 21-54% token savings on SWE-bench trajectories, with pruned outputs *preferred* over originals (37% vs 28%). The "Codified Context" approach to `.cursorrules` reports similar gains. Less noise means better signal.
 
-**Table formats outperform prose.** Benchmarks across 11 serialization formats [7, 8] show Markdown-KV achieving ~60.7% accuracy versus ~44% for CSV and ~52% for markdown tables on comprehension tasks. Formats with explicit column headers consistently outperform headerless data. TOON headers provide these semantics at minimal token cost.
+**Table formats outperform prose.** Benchmarks across 11 serialization formats [7, 8] show Markdown-KV achieving ~60.7% accuracy versus ~44% for CSV and ~52% for markdown tables on comprehension tasks. Formats with explicit column headers consistently outperform headerless data. [TOON](https://toonformat.dev) headers provide these semantics at minimal token cost.
 
 **Schema-first prompting.** Dynamic schema-aware prompting [3] shows that embedding explicit field names and types into prompts significantly reduces hallucination and improves task accuracy, supporting Axiom's self-describing header design.
 

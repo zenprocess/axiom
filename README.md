@@ -23,7 +23,7 @@ no-force-push,forbid,Git,push --force,Use --force-with-lease instead
 
 ## Format
 
-Axiom uses TOON-style self-describing tabular headers:
+Axiom uses [TOON](https://toonformat.dev)-style self-describing tabular headers:
 
 ```
 SECTION_NAME[N]{col1,col2,...}:

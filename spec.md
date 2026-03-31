@@ -1,4 +1,4 @@
-# Axiom Specification v0.2.0
+# Axiom Specification v0.3.0
 
 ## 1. Overview
 
@@ -285,14 +285,91 @@ other contributors' work. Use `--force-with-lease` instead.
 
 The compiler parses frontmatter, maps fields to the appropriate category schema, and emits the compiled format. Rules without frontmatter are treated as `inform` effect with `medium` priority.
 
-## 13. File Extension
+## 13. CLAUDE.md Compilation
+
+CLAUDE.md files are valid Axiom source documents. Because CLAUDE.md loads on every agent turn, it is the highest-leverage compression target in any project. The compiler maps each section of a CLAUDE.md to the appropriate Axiom representation using the following strategy.
+
+### 13.1 Section Mapping
+
+| CLAUDE.md Section Type | Axiom Representation |
+|------------------------|---------------------|
+| Status tables, endpoint lists, dispatch statuses | Standard TOON tables (e.g., `ENDPOINTS[N]{method,path,description}:`) |
+| Conventions, constraints, safety rules | `GOVERNANCE[N]{...}:`, `CODING[N]{...}:`, `SECURITY[N]{...}:` |
+| Command blocks (dev commands, CLI usage) | `COMMANDS[N]{cmd,description}:` |
+| File structure blocks (directory trees) | `STRUCTURE[N]{path,description}:` |
+| Narrative prose (architecture descriptions, explanations) | `PROSE[N]{}:` — literal text, no tabulation |
+
+### 13.2 PROSE Block
+
+The `PROSE` section type carries literal text that cannot be meaningfully tabulated without information loss. Its header uses an empty column set:
+
+```
+PROSE[N]{}:
+```
+
+Where `N` is the number of lines that follow. The block is terminated by the next section header or EOF. Lines are reproduced verbatim — no column parsing, no comma splitting. This preserves architecture narratives, design rationale, and other free-form content that loses meaning when forced into columns.
+
+### 13.3 Zero Information Loss
+
+CLAUDE.md compilation is **lossless structural compression**. Every piece of information in the source CLAUDE.md MUST appear in the compiled output. The compiler:
+
+1. Preserves all rules, commands, paths, descriptions, and prose.
+2. Eliminates only syntactic redundancy (markdown formatting, repeated headers, filler words).
+3. Reports any content that could not be mapped to a section type.
+
+### 13.4 Coexistence
+
+Compilation is optional. A project MAY have both `CLAUDE.md` and `CLAUDE.axiom` in the same directory. When both exist, tools SHOULD prefer the compiled `.axiom` version for context injection, falling back to the markdown original if the compiled version is stale or absent.
+
+### 13.5 Example
+
+**Before** (CLAUDE.md excerpt, 140 tokens):
+
+```markdown
+## Key Commands
+
+​```bash
+# Dev environment
+pip install -e ".[dev]"
+
+# Run tests
+PYTHONPATH=src pytest tests/
+
+# Dispatch a task
+zd dispatch --issue 1234
+​```
+
+## Development Conventions
+
+- Python 3.12+ with type hints on all function signatures
+- Pydantic v2 BaseModel for all data structures — never raw dicts
+- async def for all I/O
+- structlog for logging — never print()
+```
+
+**After** (CLAUDE.axiom excerpt, 55 tokens):
+
+```
+COMMANDS[3]{cmd,description}:
+pip install -e ".[dev]",Dev environment setup
+PYTHONPATH=src pytest tests/,Run tests
+zd dispatch --issue 1234,Dispatch a task
+
+CODING[4]{id,language,effect,pattern,fix_hint,severity}:
+type-hints,Python,prefer,function definition,Add type hints to all signatures,warning
+pydantic-models,Python,prefer,data structures,Use Pydantic v2 BaseModel not raw dicts,warning
+async-io,Python,prefer,I/O operations,Use async def for all I/O,warning
+structlog-only,Python,forbid,print(),Use structlog for logging,error
+```
+
+## 14. File Extension
 
 Axiom files use the `.axiom` extension. Compiled per-agent rule sets are conventionally named `compiled.axiom`.
 
-## 14. MIME Type
+## 15. MIME Type
 
 `text/x-axiom` (provisional).
 
-## 15. Versioning
+## 16. Versioning
 
-This specification is versioned using semantic versioning. The current version is `0.2.0`. The version is not embedded in the file format; it is tracked by the specification document.
+This specification is versioned using semantic versioning. The current version is `0.3.0`. The version is not embedded in the file format; it is tracked by the specification document.

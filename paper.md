@@ -110,6 +110,8 @@ The compiler provides deterministic, auditable mappings from source rules to age
 
 Axiom addresses a practical gap: AI coding agents need project rules, but the dominant format (prose markdown) wastes tokens and degrades at scale. By encoding rules in self-describing tabular sections with explicit schemas, Axiom achieves 20:1 compression while aligning with empirical findings on structured prompting, table comprehension, and context pruning. The format is simple enough to author by hand, structured enough to compile and analyze, and native enough for LLMs to interpret zero-shot.
 
+Notably, CLAUDE.md files — which load on every agent turn — are the highest-leverage compilation target; Axiom v0.3.0 defines a lossless mapping from CLAUDE.md sections to TOON tables, PROSE blocks, and standard category schemas, enabling projects to compress their most frequently loaded context without information loss.
+
 The specification, examples, and compiler will be available at [github.com/zenprocess/axiom](https://github.com/zenprocess/axiom).
 
 ## References

@@ -1,6 +1,6 @@
 # Axiom: A Compact Rule Definition Language for LLM-Native Context Engineering
 
-**V. Vladescu** (zenprocess)
+**V. Vladescu** ([@vvladescu](https://github.com/vvladescu), zenprocess), **Claude** (Anthropic)
 
 ---
 

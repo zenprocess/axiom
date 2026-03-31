@@ -1,0 +1,11 @@
+# Governance rules — guards on agent behavior and tool use
+
+GOVERNANCE[8]{id,effect,domain,trigger,condition,message}:
+no-force-push,forbid,Git,push --force,,Use --force-with-lease or revert
+no-main-commit,forbid,Git,commit on main/master,,Work on feature branches
+no-reset-hard,forbid,Git,reset --hard,,Prefer revert or stash
+no-secrets-commit,forbid,Git,commit .env or credentials,,Add to .gitignore
+no-rm-rf,forbid,Bash,rm -rf without explicit path,,Always specify full path
+no-sudo,discourage,Bash,sudo,,Avoid privilege escalation unless required
+prefer-structured-log,prefer,Python,logging or print,,Use structlog for all output
+require-pr-review,prefer,Git,merge to main,branch:main,All changes require PR review

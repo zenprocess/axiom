@@ -1,0 +1,32 @@
+# Full project ruleset — combines all categories
+# Project: Example Python web service
+
+GOVERNANCE[5]{id,effect,domain,trigger,condition,message}:
+no-force-push,forbid,Git,push --force,,Use --force-with-lease or revert
+no-main-commit,forbid,Git,commit on main/master,,Work on feature branches
+no-rm-rf,forbid,Bash,rm -rf without explicit path,,Always specify full path
+structured-logging,prefer,Python,print(),,Use structlog for all output
+branch-naming,prefer,Git,branch creation,,Use feat/ fix/ chore/ prefixes
+
+CODING[6]{id,language,scope,pattern,effect,fix_hint,severity}:
+type-hints,Python,project,function without type hints,prefer,Add type hints to all signatures,warning
+pydantic-models,Python,project,raw dict for structured data,prefer,Use Pydantic BaseModel,warning
+async-io,Python,project,sync I/O in async context,forbid,Use async equivalents,error
+no-print-debug,Python,project,print() for debugging,forbid,Use structlog,error
+error-handling,Python,project,bare except clause,forbid,Catch specific exceptions,error
+docstrings,Python,module,public function without docstring,prefer,Add Google-style docstring,info
+
+SECURITY[3]{id,risk_level,data_type,trigger,effect,response}:
+no-aws-keys,critical,key,AKIA[0-9A-Z]{16} in source,forbid,abort
+no-hardcoded-passwords,high,credential,password = literal string,forbid,warn
+no-pii-logging,high,pii,email or SSN in log output,forbid,redact
+
+TESTING[3]{id,effect,target,threshold,action,message}:
+unit-coverage,prefer,coverage,>=80%,recommend,Maintain test coverage above 80%
+integration-tests,prefer,integration,,recommend,Add integration tests for API endpoints
+no-skip-tests,discourage,unit,,enforce,Do not skip tests without documented reason
+
+WORKFLOW[3]{id,effect,phase,actor,condition,message}:
+pr-review,prefer,review,reviewer,branch:main,All PRs to main require review
+ci-pass,prefer,deploy,ci,,CI must pass before merge
+changelog,prefer,review,agent,label:feature,Update CHANGELOG for feature PRs

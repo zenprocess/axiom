@@ -1,0 +1,8 @@
+# Security rules — secret detection, access control, data safety
+
+SECURITY[5]{id,risk_level,data_type,trigger,effect,response}:
+no-aws-keys,critical,key,AKIA[0-9A-Z]{16} in source,forbid,abort
+no-private-keys,critical,key,BEGIN RSA PRIVATE KEY in source,forbid,abort
+no-hardcoded-passwords,high,credential,password = literal string,forbid,warn
+no-pii-logging,high,pii,email or SSN in log output,forbid,redact
+token-in-url,medium,token,API token in URL parameter,discourage,warn

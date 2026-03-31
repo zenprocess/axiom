@@ -1,0 +1,11 @@
+# Coding convention rules — language-specific style and quality
+
+CODING[8]{id,language,scope,pattern,effect,fix_hint,severity}:
+type-hints,Python,project,function without type hints,prefer,Add type hints to all signatures,warning
+no-print-debug,Python,project,print() for debugging,forbid,Use structlog or logging,error
+no-any-type,Python,project,Any type annotation,discourage,Use specific types or generics,warning
+pydantic-models,Python,project,raw dict for data,prefer,Use Pydantic BaseModel,warning
+async-io,Python,project,sync I/O in async context,forbid,Use async equivalents,error
+no-var,TypeScript,project,var declaration,forbid,Use const or let,error
+no-console-log,TypeScript,project,console.log in production,discourage,Use structured logger,warning
+error-handling,Python,project,bare except clause,forbid,Catch specific exceptions,error

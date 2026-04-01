@@ -1,0 +1,110 @@
+[
+  {
+    "task": "http-client",
+    "markdown": {
+      "compliance_rate": 0.9,
+      "scores": {
+        "no-print-debug": false,
+        "async-io": true,
+        "pydantic-models": true,
+        "structlog-only": true,
+        "type-hints": true,
+        "no-force-push": true,
+        "no-secrets": true,
+        "error-handling": true,
+        "no-star-import": true,
+        "docstrings": true
+      },
+      "tokens": 1195
+    },
+    "axiom": {
+      "compliance_rate": 0.9,
+      "scores": {
+        "no-print-debug": false,
+        "async-io": true,
+        "pydantic-models": true,
+        "structlog-only": true,
+        "type-hints": true,
+        "no-force-push": true,
+        "no-secrets": true,
+        "error-handling": true,
+        "no-star-import": true,
+        "docstrings": true
+      },
+      "tokens": 170
+    },
+    "token_savings_pct": 85.8
+  },
+  {
+    "task": "deploy-script",
+    "markdown": {
+      "compliance_rate": 1.0,
+      "scores": {
+        "no-print-debug": true,
+        "async-io": true,
+        "pydantic-models": true,
+        "structlog-only": true,
+        "type-hints": true,
+        "no-force-push": true,
+        "no-secrets": true,
+        "error-handling": true,
+        "no-star-import": true,
+        "docstrings": true
+      },
+      "tokens": 1195
+    },
+    "axiom": {
+      "compliance_rate": 1.0,
+      "scores": {
+        "no-print-debug": true,
+        "async-io": true,
+        "pydantic-models": true,
+        "structlog-only": true,
+        "type-hints": true,
+        "no-force-push": true,
+        "no-secrets": true,
+        "error-handling": true,
+        "no-star-import": true,
+        "docstrings": true
+      },
+      "tokens": 170
+    },
+    "token_savings_pct": 85.8
+  },
+  {
+    "task": "logging-system",
+    "markdown": {
+      "compliance_rate": 0.9,
+      "scores": {
+        "no-print-debug": true,
+        "async-io": true,
+        "pydantic-models": true,
+        "structlog-only": false,
+        "type-hints": true,
+        "no-force-push": true,
+        "no-secrets": true,
+        "error-handling": true,
+        "no-star-import": true,
+        "docstrings": true
+      },
+      "tokens": 1195
+    },
+    "axiom": {
+      "compliance_rate": 0.9,
+      "scores": {
+        "no-print-debug": true,
+        "async-io": true,
+        "pydantic-models": true,
+        "structlog-only": false,
+        "type-hints": true,
+        "no-force-push": true,
+        "no-secrets": true,
+        "error-handling": true,
+        "no-star-import": true,
+        "docstrings": true
+      },
+      "tokens": 170
+    },
+    "token_savings_pct": 85.8
+  }
+]

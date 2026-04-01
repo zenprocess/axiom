@@ -1,6 +1,22 @@
 # Axiom
 
-A compact Rule Definition Language (RDL) for AI coding agents. Compiles verbose markdown rules into self-describing tabular format with 20:1 token compression and no compliance degradation.
+A compact Rule Definition Language (RDL) for AI coding agents. Compiles verbose markdown rules into self-describing tabular format with 87% token reduction and no compliance degradation.
+
+## Empirical Results
+
+Tested across 20 A/B runs on 8 coding tasks with Claude Sonnet 4.6:
+
+| Metric | Markdown (1195 tok) | Axiom S/D (159 tok) |
+|--------|---------------------|---------------------|
+| Mean compliance | 91.0% | 90.5% |
+| Token savings | -- | 86.7% |
+| Wins / Losses / Ties | 5 / 5 / 10 | 5 / 5 / 10 |
+
+**Key finding**: Axiom achieves compliance parity at 87% token reduction. Same compliance, fraction of the cost.
+
+The path to 100%: static format (Axiom, ~91%) + dynamic PostToolUse compliance hook (~9% remaining) = ~100%.
+
+See [paper.md](paper.md) for the full research paper and [bench/](bench/) for the benchmark.
 
 ## Before & After
 
@@ -31,9 +47,9 @@ value1,value2,value3,...
 value1,value2,value3,...
 ```
 
-- `SECTION_NAME` — uppercase category (GOVERNANCE, CODING, SECURITY, etc.)
-- `[N]` — row count
-- `{col1,col2,...}` — inline column schema
+- `SECTION_NAME` -- uppercase category (GOVERNANCE, CODING, SECURITY, etc.)
+- `[N]` -- row count (optional, derivable from rows)
+- `{col1,col2,...}` -- inline column schema
 - Rows are CSV-like, one rule per line
 
 ## Core Schemas
@@ -45,13 +61,6 @@ value1,value2,value3,...
 | SECURITY | `id, risk_level, data_type, trigger, effect, response` |
 | TESTING | `id, effect, target, threshold, action, message` |
 | WORKFLOW | `id, effect, phase, actor, condition, message` |
-
-## Serializations
-
-| Format | Use case | Token cost |
-|--------|----------|------------|
-| **TOON** (default) | Compiled output, token-constrained | Minimal |
-| **CACP** | Dispatcher integration, debugging | 2-3x TOON |
 
 ## Source Format
 
@@ -71,8 +80,6 @@ when_to_use: When reviewing or executing git push commands
 Never use `git push --force`. Use `--force-with-lease` instead.
 ```
 
-`paths` is accepted as an alias for `globs` (CC compatibility).
-
 ## Pressure Zones
 
 | Zone | Context | Behavior |
@@ -82,29 +89,33 @@ Never use `git push --force`. Use `--force-with-lease` instead.
 | DEPLETED | 70-90% | Critical + high only |
 | CRITICAL | 90%+ | Safety floor (critical + forbid) |
 
-## Reserved Effects
+## How to Validate
 
-`allow` | `forbid` | `prefer` | `discourage` | `inform`
+Run the compliance benchmark yourself:
 
-## MCP Integration
+```bash
+# Install dependency
+pip install tiktoken
 
-Axiom content is accessible via [Model Context Protocol](https://modelcontextprotocol.io) resource URIs. Any Axiom-compatible MCP server can serve compiled rules, CLAUDE.md, and policy evaluations using the `axiom://` URI scheme:
+# Dry run (no Claude invocation, validates rules + format generation)
+python bench/runner.py --mode dry
 
+# Full A/B comparison (requires Claude CLI, costs money)
+python bench/runner.py --mode ab
+
+# Aggregate results from all runs
+python bench/aggregate.py
 ```
-axiom://rules                        — all compiled rules
-axiom://rules/{category}             — rules for a specific category
-axiom://claude-md                    — compiled CLAUDE.md
-axiom://policy/{action}/{resource}   — policy evaluation result
-axiom://meta/coverage                — rule coverage report
-```
 
-See [spec.md, section 16](spec.md#16-mcp-resource-uris) for the full URI scheme and MCP tool definition examples.
+See [bench/README.md](bench/README.md) for details.
 
 ## Documentation
 
-- [Specification](spec.md) — normative format definition
-- [Paper](paper.md) — research backing and design rationale
-- [Examples](examples/) — sample `.axiom` files
+- [Paper](paper.md) -- research paper with empirical results (arXiv-style)
+- [Specification](spec.md) -- normative format definition
+- [Benchmark](bench/) -- compliance benchmark (10 rules, 8 tasks, 20 runs)
+- [Compliance Hook](docs/compliance-hook.md) -- PostToolUse hook for ~100% compliance
+- [Examples](examples/) -- sample `.axiom` files
 
 ## License
 

@@ -1,0 +1,38 @@
+[
+  {
+    "task": "database-model",
+    "markdown": {
+      "compliance_rate": 0.9,
+      "scores": {
+        "no-print-debug": true,
+        "async-io": true,
+        "pydantic-models": true,
+        "structlog-only": true,
+        "type-hints": true,
+        "no-force-push": true,
+        "no-secrets": true,
+        "error-handling": true,
+        "no-star-import": true,
+        "docstrings": false
+      },
+      "tokens": 1195
+    },
+    "axiom": {
+      "compliance_rate": 1.0,
+      "scores": {
+        "no-print-debug": true,
+        "async-io": true,
+        "pydantic-models": true,
+        "structlog-only": true,
+        "type-hints": true,
+        "no-force-push": true,
+        "no-secrets": true,
+        "error-handling": true,
+        "no-star-import": true,
+        "docstrings": true
+      },
+      "tokens": 159
+    },
+    "token_savings_pct": 86.7
+  }
+]

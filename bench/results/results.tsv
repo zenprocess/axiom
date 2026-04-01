@@ -1,0 +1,28 @@
+commit	compliance_rate	token_count	status	description
+baseline	N/A	495	baseline	Default format: S+D rows, triggers, forbid/require/prefer/inform, 20/30 word budgets
+exp01	N/A	225	keep	S-only (no D rows): 81.2% savings, halved token count
+exp02	N/A	175	keep	S-only + no triggers: 85.4% savings
+exp03	N/A	177	keep	MUST/MUST_NOT/SHOULD/INFO effect vocab (RFC 2119 style): 85.2% savings
+exp04	N/A	178	discard	GOVERNANCE header + 'rule' column name: +1 token vs exp03, no benefit
+exp05	N/A	178	discard	PROJECT_RULES header: +1 token vs exp03, no benefit
+exp06	N/A	163	keep	Drop level+trigger columns (S-only, 3 columns): 86.4% savings
+exp07	N/A	163	neutral	15-word budget: no change (descriptions already <10 words)
+exp08	N/A	163	neutral	10-word budget: no change (descriptions already <10 words)
+exp09	N/A	163	keep	Group by severity (critical first): same tokens, primacy bias benefit
+exp10	N/A	185	discard	Add severity column: +22 tokens, redundant with effect (MUST_NOT=high/critical)
+exp11	N/A	172	discard	Row separator (---): +9 tokens, adds noise in S-only format
+exp12	N/A	175	keep	Preamble 'Comply with ALL rules below. Violations are failures.': +12 tokens, compliance priming
+exp13	N/A	170	keep	Shorter preamble 'STRICT: follow every rule.': +7 tokens vs no-preamble
+exp14	N/A	247	keep	Violation example column: +84 tokens but shows LLM exact patterns to avoid
+exp15	N/A	240	neutral	Examples only (no preamble): 240 tokens, examples cost +77 over minimal
+exp16	N/A	226	discard	Trigger+example columns: header/data mismatch, triggers shorter than examples
+exp17	N/A	162	keep	2-column (id,instruction) with embedded effect prefix: 162 tokens, most compact readable format
+exp18	N/A	171	discard	Numbered list format: +9 tokens vs TOON 2-col, loses schema context from header
+exp19	N/A	223	discard	2-col + trigger column: +61 tokens, triggers overlap with instruction text
+exp20	N/A	380	discard	S+D with examples: 380 tokens, redundant (examples in both S and D rows)
+exp21	N/A	160	keep	Lowercase effect vocab (forbid/require/prefer): 160 tokens, -2 vs MUST_NOT
+exp22	N/A	165	discard	NEVER/ALWAYS/SHOULD vocab: 165 tokens, 'NEVER: Never use...' redundancy, semantic mismatch on require rules
+exp23	N/A	159	keep	Remove count from header (RULES{id,instruction}:): 159 tokens, count derivable from rows
+exp24	N/A	154	discard	No schema header (RULES: only): 154 tokens min, but LLM loses column semantics
+exp25	N/A	158	discard	Pipe separator in header: header/data separator mismatch, -1 token marginal
+exp26	N/A	256	discard	D-rows only for critical/high: 256 tokens, D rows just repeat instruction

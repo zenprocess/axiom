@@ -1,0 +1,88 @@
+[
+  {
+    "task": "http-client",
+    "md": 0.9,
+    "axiom": 0.8,
+    "md_fails": [
+      "no-print-debug"
+    ],
+    "ax_fails": [
+      "no-print-debug",
+      "docstrings"
+    ]
+  },
+  {
+    "task": "deploy-script",
+    "md": 0.9,
+    "axiom": 1.0,
+    "md_fails": [
+      "no-print-debug"
+    ],
+    "ax_fails": []
+  },
+  {
+    "task": "logging-system",
+    "md": 1.0,
+    "axiom": 0.8,
+    "md_fails": [],
+    "ax_fails": [
+      "type-hints",
+      "docstrings"
+    ]
+  },
+  {
+    "task": "cli-tool",
+    "md": 1.0,
+    "axiom": 0.9,
+    "md_fails": [],
+    "ax_fails": [
+      "no-print-debug"
+    ]
+  },
+  {
+    "task": "database-model",
+    "md": 0.9,
+    "axiom": 0.9,
+    "md_fails": [
+      "error-handling"
+    ],
+    "ax_fails": [
+      "error-handling"
+    ]
+  },
+  {
+    "task": "git-workflow",
+    "md": 1.0,
+    "axiom": 1.0,
+    "md_fails": [],
+    "ax_fails": []
+  },
+  {
+    "task": "config-parser",
+    "md": 0.9,
+    "axiom": 0.9,
+    "md_fails": [
+      "no-print-debug"
+    ],
+    "ax_fails": [
+      "no-print-debug"
+    ]
+  },
+  {
+    "task": "test-framework",
+    "md": 0.6,
+    "axiom": 0.6,
+    "md_fails": [
+      "no-print-debug",
+      "pydantic-models",
+      "type-hints",
+      "docstrings"
+    ],
+    "ax_fails": [
+      "no-print-debug",
+      "pydantic-models",
+      "type-hints",
+      "docstrings"
+    ]
+  }
+]

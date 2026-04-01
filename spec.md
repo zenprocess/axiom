@@ -404,7 +404,7 @@ Axiom files use the `.axiom` extension. Compiled per-agent rule sets are convent
 
 ## 16. MCP Resource URIs
 
-Axiom content is accessible over the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) via a standard URI scheme. Any Axiom-compatible MCP server MAY serve these resources; [Sieeve](https://github.com/zenprocess/sieeve) is the reference implementation.
+Axiom content is accessible over the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) via a standard URI scheme. Any Axiom-compatible MCP server MAY serve these resources; a reference implementation is available separately.
 
 The URI scheme is part of this standard. Server implementations are not.
 

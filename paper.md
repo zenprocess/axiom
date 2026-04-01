@@ -6,7 +6,7 @@
 
 ## Abstract
 
-Large language model (LLM) coding agents rely on rule files (CLAUDE.md, .cursorrules) to encode project conventions, but these are typically authored as verbose prose markdown. We introduce Axiom, a Rule Definition Language (RDL) that compiles prose rules into a compact, self-describing tabular format. We evaluate Axiom and two compressed alternatives (TOON tabular and CACP structured fields) against conventional markdown on a compliance benchmark of 10 rules, 8 coding tasks, and 3 models (Claude Opus 4.6, Claude Sonnet 4.6, Hermes/qwen3-coder). Across 684 valid runs, compressed formats achieve compliance parity with markdown at 80-87% token savings. Opus is the only model where a compressed format (TOON, 91.6%) outperforms markdown (91.3%). Sonnet favors markdown by ~7 percentage points, while Hermes is format-agnostic (all formats within 2%). The compliance ceiling with static rules alone is approximately 91%; the remaining ~9% requires a dynamic PostToolUse compliance hook, yielding a three-layer architecture: static format (~91%), dynamic hook (~9%), and pre-merge gate.
+Large language model (LLM) coding agents rely on rule files (CLAUDE.md, .cursorrules) to encode project conventions, but these are typically authored as verbose prose markdown. We introduce Axiom, a Rule Definition Language (RDL) that compiles prose rules into a compact, self-describing tabular format. We evaluate Axiom and two compressed alternatives (TOON tabular and CACP structured fields) against conventional markdown on a compliance benchmark of 10 rules, 8 coding tasks, and 3 models (Claude Opus 4.6, Claude Sonnet 4.6, qwen3-coder). Across 684 valid runs, compressed formats achieve compliance parity with markdown at 80-87% token savings. Opus is the only model where a compressed format (TOON, 91.6%) outperforms markdown (91.3%). Sonnet favors markdown by ~7 percentage points, while qwen3-coder is format-agnostic (all formats within 2%). The compliance ceiling with static rules alone is approximately 91%; the remaining ~9% requires a dynamic PostToolUse compliance hook, yielding a three-layer architecture: static format (~91%), dynamic hook (~9%), and pre-merge gate.
 
 ## 1. Introduction
 
@@ -112,7 +112,7 @@ We designed a compliance benchmark (AxiomBench) to measure whether compressed ru
 - **10 compliance rules** with automated check functions (regex-based, deterministic). Rules span coding style (no-print-debug, type-hints, docstrings), architecture (async-io, pydantic-models, structlog-only), security (no-secrets, no-force-push), and practice (error-handling, no-star-import).
 - **8 coding tasks** designed to naturally tempt specific rule violations. For example, the "logging-system" task tempts `import logging` (violating structlog-only), and the "git-workflow" task tempts `git push --force` (violating no-force-push).
 - **3 rule formats**: verbose markdown (prose explanations, rationale, do/don't examples), TOON (Axiom S-only tabular), and CACP (structured labeled fields).
-- **3 models**: Claude Opus 4.6 (claude-opus-4-6-20250514), Claude Sonnet 4.6 (claude-sonnet-4-6-20250514), and Hermes/qwen3-coder (open-weight, locally hosted via vLLM).
+- **3 models**: Claude Opus 4.6 (claude-opus-4-6-20250514), Claude Sonnet 4.6 (claude-sonnet-4-6-20250514), and qwen3-coder (open-weight, locally hosted via vLLM).
 - **684 valid runs** across the full matrix (model x format x task), with per-cell sample sizes ranging from 30 to 153 runs.
 
 The compliance check for each run produces a score: rules_passed / rules_total (10 rules checked per run). A rule "passes" if the automated check function returns True on the generated code.
@@ -124,7 +124,7 @@ The compliance check for each run produces a score: rules_passed / rules_total (
 | Model | Markdown | TOON | CACP | N |
 |-------|----------|------|------|---|
 | Opus 4.6 | 91.3% +/-5.5 (n=30) | **91.6%** +/-4.9 (n=31) | 88.0% +/-5.1 (n=40) | 101 |
-| Hermes/qwen3-coder | **87.5%** +/-2.6 (n=153) | 85.8% +/-2.8 (n=152) | 87.1% +/-2.7 (n=147) | 452 |
+| qwen3-coder (vLLM) | **87.5%** +/-2.6 (n=153) | 85.8% +/-2.8 (n=152) | 87.1% +/-2.7 (n=147) | 452 |
 | Sonnet 4.6 | **90.7%** +/-4.4 (n=41) | 83.8% +/-5.7 (n=40) | 83.8% +/-5.1 (n=50) | 131 |
 
 ### 5.3 Per-Model Analysis
@@ -133,7 +133,7 @@ The compliance check for each run produces a score: rules_passed / rules_total (
 
 **Sonnet 4.6 (n=131): Markdown leads.** Sonnet shows the clearest format preference, with markdown (90.7%) outperforming both TOON (83.8%) and CACP (83.8%) by approximately 7 percentage points. The gap exceeds the confidence intervals and is statistically meaningful. Sonnet appears to benefit from the verbose explanations, examples, and rationale that markdown provides. This suggests that mid-tier models may need the redundancy of prose to achieve full rule comprehension -- the compression removes scaffolding that Sonnet relies on.
 
-**Hermes/qwen3-coder (n=452): Format-agnostic.** With the largest sample size and all three formats within a 2-percentage-point band (85.8%-87.5%), Hermes shows no meaningful format preference. This model achieves consistent compliance regardless of how rules are encoded, making format choice purely an efficiency decision. The practical implication is clear: use compressed formats for Hermes to save 80-87% of rule tokens at zero compliance cost.
+**qwen3-coder (n=452): Format-agnostic.** With the largest sample size and all three formats within a 2-percentage-point band (85.8%-87.5%), qwen3-coder shows no meaningful format preference. This model achieves consistent compliance regardless of how rules are encoded, making format choice purely an efficiency decision. The practical implication is clear: use compressed formats for qwen3-coder to save 80-87% of rule tokens at zero compliance cost.
 
 ### 5.4 Format Autoresearch
 
@@ -218,9 +218,9 @@ The hook uses the same rule definitions as the benchmark (deterministic regex ch
 
 The data does not support a universal claim that compressed formats improve compliance. What it shows is more nuanced and arguably more useful:
 
-1. **Compressed formats match markdown for most models.** Hermes achieves identical compliance regardless of format. Opus slightly favors TOON. Only Sonnet shows a meaningful preference for verbose markdown.
+1. **Compressed formats match markdown for most models.** qwen3-coder achieves identical compliance regardless of format. Opus slightly favors TOON. Only Sonnet shows a meaningful preference for verbose markdown.
 
-2. **The trade-off is model-dependent.** High-capability models (Opus) can extract rules from any format and may benefit from reduced noise. Mid-tier models (Sonnet) may rely on the redundancy of prose explanations. Open-weight models (Hermes) are indifferent.
+2. **The trade-off is model-dependent.** High-capability models (Opus) can extract rules from any format and may benefit from reduced noise. Mid-tier models (Sonnet) may rely on the redundancy of prose explanations. Open-weight models (qwen3-coder) are indifferent.
 
 3. **Token savings are universal.** Regardless of which model or format, compressed representations save 80-87% of rule tokens. For systems dispatching many agents concurrently, this translates to meaningful cost reduction.
 
@@ -238,7 +238,7 @@ For multi-agent dispatch systems where dozens of agents each load rules into the
 - **Budget headroom**: More context available for code, documentation, and reasoning
 - **Scalability**: Rule sets can grow without proportional context pressure
 - **Per-agent scoping**: Compiled rules can be filtered by category, domain, or priority for each agent's task
-- **Model-aware formatting**: Route Opus/Hermes agents through compressed formats; consider verbose for Sonnet
+- **Model-aware formatting**: Route Opus/qwen3-coder agents through compressed formats; consider verbose for Sonnet
 
 ### 7.4 Limitations
 
@@ -252,7 +252,7 @@ For multi-agent dispatch systems where dozens of agents each load rules into the
 
 We present Axiom, a Rule Definition Language that compiles verbose prose rules into compact tabular format. Our 684-run evaluation across 3 models, 3 formats, and 8 coding tasks yields an honest finding: compressed formats achieve compliance parity with markdown at 80-87% token savings, with model-dependent variation.
 
-Opus is the only model where compressed format (TOON, 91.6%) outperforms markdown (91.3%) -- a result consistent with the attention-concentration hypothesis but within confidence intervals. Sonnet favors verbose markdown by ~7 percentage points. Hermes is format-agnostic, making format choice purely an efficiency decision.
+Opus is the only model where compressed format (TOON, 91.6%) outperforms markdown (91.3%) -- a result consistent with the attention-concentration hypothesis but within confidence intervals. Sonnet favors verbose markdown by ~7 percentage points. qwen3-coder is format-agnostic, making format choice purely an efficiency decision.
 
 The compliance ceiling with static rules alone is approximately 91%. A three-layer architecture -- static format, dynamic PostToolUse hook, and pre-merge gate -- addresses the full compliance spectrum.
 
@@ -262,7 +262,7 @@ The specification, benchmark, and compiler are available at [github.com/zenproce
 
 ## Acknowledgments
 
-This work is part of the [standra.ai](https://standra.ai) ecosystem for AI-assisted software engineering.
+This work is part of [standra.ai](https://standra.ai), a collection of open standards for AI-assisted software engineering.
 
 **AI Disclosure**: Claude Code (Anthropic) was used to assist with experiment implementation, benchmark automation, and drafting. All hypotheses, experimental design, results analysis, and conclusions were independently formulated and validated by the author.
 

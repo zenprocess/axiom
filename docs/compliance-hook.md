@@ -113,19 +113,19 @@ if __name__ == "__main__":
     main()
 ```
 
-## Switchyard / Hermes Integration
+## Multi-Agent Integration
 
-For multi-agent dispatch systems using [Switchyard](https://github.com/zenprocess/switchyard), the compliance hook integrates at the Hermes engine level:
+For multi-agent dispatch systems with tool-calling loops, the compliance hook integrates at the engine level:
 
-1. **Hermes PostToolUse**: After each tool call in the Hermes tool-calling loop, run compliance checks on any files written. Inject correction into the next turn's messages if violations are found.
+1. **PostToolUse in Tool Loop**: After each tool call in the tool-calling engine, run compliance checks on any files written. Inject correction into the next turn's messages if violations are found.
 
-2. **Response Gate**: Switchyard's response gate already validates CACP responses. Add compliance checking as a gate criterion: if the final worktree contains files violating critical rules, demote the dispatch result.
+2. **Response Gate**: A response gate that validates structured responses can add compliance checking as a gate criterion: if the final worktree contains files violating critical rules, demote the dispatch result.
 
 3. **Telemetry**: Record compliance scores in dispatch telemetry for SLI monitoring. Track per-rule violation rates to identify rules that need stronger enforcement.
 
-## Sieeve ComplianceChecker
+## ComplianceChecker
 
-The compliance checking logic originates from [Sieeve](https://github.com/zenprocess/sieeve)'s `scripts/compliance/` module. The same `rules.py` and check functions are used in:
+The compliance checking logic is available in the `bench/v2/` directory of this repository. The same `rules.py` and check functions are used in:
 
 - The Axiom benchmark (`bench/rules.py`)
 - The PostToolUse hook (runtime enforcement)

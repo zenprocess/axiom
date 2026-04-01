@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+
 FORMATS: list[str] = ["markdown", "toon", "cacp"]
 
 MODELS: list[str] = ["sonnet", "opus", "hermes"]
@@ -12,12 +15,12 @@ MODEL_IDS: dict[str, str] = {
     "hermes": "qwen3-coder",
 }
 
-VLLM_ENDPOINT: str = "http://internal-ai-host:8000"
-HERMES_ENGINE: str = "./internal/engine.py"
+VLLM_ENDPOINT: str = os.environ.get("VLLM_ENDPOINT", "http://localhost:8000")
+HERMES_ENGINE: str = os.environ.get("HERMES_ENGINE", "hermes-engine.py")
 
 RUNS_PER_CELL: int = 5
 
-CLAUDE_BIN: str = "/home/vvladescu/.local/bin/claude"
+CLAUDE_BIN: str = os.environ.get("CLAUDE_BIN", shutil.which("claude") or "claude")
 
 CALL_TIMEOUT: int = 300  # seconds per Claude call
 
@@ -46,4 +49,4 @@ PHASES: dict[str, dict] = {
 }
 
 # Clean PATH to avoid RTK hook rewriting claude calls
-CLEAN_PATH: str = "/usr/local/bin:/usr/bin:/bin:/home/vvladescu/.local/bin"
+CLEAN_PATH: str = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")

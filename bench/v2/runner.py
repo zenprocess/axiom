@@ -24,7 +24,7 @@ _script_dir = Path(__file__).resolve().parent
 if str(_script_dir) not in sys.path:
     sys.path.insert(0, str(_script_dir))
 
-from config import CALL_TIMEOUT, CLAUDE_BIN, CLEAN_PATH, MODEL_IDS, PHASES
+from config import CALL_TIMEOUT, CLAUDE_BIN, CLEAN_PATH, MODEL_IDS, PHASES, VLLM_ENDPOINT
 from formats import generate_rules
 from rules import RULES, Rule
 from tasks import TASKS, Task
@@ -88,6 +88,55 @@ def invoke_claude(prompt: str, rules_text: str, model: str = "sonnet") -> tuple[
         return result.stdout, elapsed
     finally:
         os.unlink(rules_file)
+
+
+# ---------------------------------------------------------------------------
+# Hermes/vLLM invocation
+# ---------------------------------------------------------------------------
+
+
+def strip_think_tags(text: str) -> str:
+    """Strip <think>...</think> reasoning blocks from qwen3-coder output."""
+    import re
+
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+def invoke_hermes(prompt: str, rules_text: str) -> tuple[str, float]:
+    """Invoke vLLM directly via OpenAI-compatible API.
+
+    Uses /v1/chat/completions endpoint. No subprocess, no CLI.
+    Rules injected as system message. Think tags stripped from output.
+    """
+    import urllib.request
+
+    url = f"{VLLM_ENDPOINT}/v1/chat/completions"
+    payload = {
+        "model": "qwen3-coder",
+        "messages": [
+            {"role": "system", "content": rules_text},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 4096,
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    t0 = time.monotonic()
+    with urllib.request.urlopen(req, timeout=CALL_TIMEOUT) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    elapsed = time.monotonic() - t0
+
+    output = body["choices"][0]["message"]["content"]
+    output = strip_think_tags(output)
+    return output, elapsed
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +242,10 @@ def run_experiment(
                     )
 
                     try:
-                        output, elapsed = invoke_claude(task.prompt, rules_text, model)
+                        if model == "hermes":
+                            output, elapsed = invoke_hermes(task.prompt, rules_text)
+                        else:
+                            output, elapsed = invoke_claude(task.prompt, rules_text, model)
                         scores = check_compliance(output, rules)
                         rate = compliance_rate(scores)
                         status = "ok"
@@ -253,7 +305,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        choices=["sonnet", "opus"],
+        choices=["sonnet", "opus", "hermes"],
         default=None,
         help="Override model (default: use phase definition)",
     )

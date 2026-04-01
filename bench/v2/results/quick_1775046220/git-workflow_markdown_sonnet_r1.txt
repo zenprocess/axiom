@@ -1,0 +1,27 @@
+The script is ready. Here's a summary of what it does and the key decisions:
+
+**Structure**
+
+| Layer | What it does |
+|---|---|
+| `BranchConfig / CommitConfig / MergeRequestConfig / GitLabConfig` | Pydantic models for all inputs — validated at construction |
+| `create_branch / commit_changes / push_branch / rebase_onto` | Thin sync wrappers around `subprocess` |
+| `create_merge_request / rebase_and_update_mr` | Async HTTP via `httpx` |
+| `feature_branch_workflow / rebase_and_update_mr` | High-level orchestration |
+
+**Key design choices**
+
+- **`--force-with-lease` instead of `--force`** — your rules prohibit `git push --force`/`-f` (critical severity). `--force-with-lease` achieves the same goal for rebased branches but rejects the push if the remote has commits you haven't fetched, preventing accidental overwrites.
+- **GitLab** — uses "merge requests" terminology; token is read from `GITLAB_TOKEN` env var, never hardcoded.
+- **All I/O is `async`** — `create_merge_request` and `rebase_and_update_mr` are `async def` as required.
+- **structlog** throughout — no `print()` or `import logging`.
+- **Error handling** on all HTTP calls — catches `TimeoutException` and `HTTPStatusError` separately.
+
+**Usage**
+
+```bash
+export GITLAB_URL=https://gitlab.com
+export GITLAB_PROJECT_ID=myorg/myrepo
+export GITLAB_TOKEN=glpat-...
+python examples/git_workflow.py
+```

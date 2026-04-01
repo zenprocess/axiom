@@ -1,0 +1,277 @@
+Since you didn't grant write access, here's the complete implementation you can save wherever fits your project:
+
+---
+
+**`logger.py`** — core setup
+
+```python
+"""Structured logging setup for web applications using structlog."""
+
+from __future__ import annotations
+
+import logging
+import logging.handlers
+import sys
+from contextvars import ContextVar
+from pathlib import Path
+from typing import Any
+
+import structlog
+from pydantic import BaseModel, Field
+
+# ---------------------------------------------------------------------------
+# Correlation ID context
+# ---------------------------------------------------------------------------
+
+_correlation_id: ContextVar[str | None] = ContextVar("correlation_id", default=None)
+
+
+def set_correlation_id(value: str) -> None:
+    """Bind a correlation ID to the current async context."""
+    _correlation_id.set(value)
+
+
+def get_correlation_id() -> str | None:
+    """Return the correlation ID for the current async context."""
+    return _correlation_id.get()
+
+
+def _inject_correlation_id(
+    logger: Any, method_name: str, event_dict: dict[str, Any]
+) -> dict[str, Any]:
+    """structlog processor: inject correlation_id from context if present."""
+    cid = _correlation_id.get()
+    if cid is not None:
+        event_dict["correlation_id"] = cid
+    return event_dict
+
+
+# ---------------------------------------------------------------------------
+# Configuration model
+# ---------------------------------------------------------------------------
+
+
+class LogConfig(BaseModel):
+    """Configuration for the application logging system."""
+
+    level: str = Field(default="INFO", pattern=r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$")
+    json_output: bool = Field(default=True)
+    log_file: Path | None = Field(default=None)
+    rotation: str = Field(
+        default="midnight",
+        description="'midnight', 'h' (hourly), or 'size:<bytes>'",
+    )
+    backup_count: int = Field(default=7, ge=1)
+
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+
+
+def setup_logging(config: LogConfig = LogConfig()) -> None:
+    """Configure structlog and stdlib logging. Call once at startup."""
+    numeric_level = getattr(logging, config.level.upper())
+
+    shared_processors: list[Any] = [
+        structlog.contextvars.merge_contextvars,
+        _inject_correlation_id,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+    ]
+
+    renderer: Any = (
+        structlog.processors.JSONRenderer()
+        if config.json_output
+        else structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
+    )
+
+    structlog.configure(
+        processors=[
+            *shared_processors,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
+        cache_logger_on_first_use=True,
+    )
+
+    formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=shared_processors,
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            renderer,
+        ],
+    )
+
+    handlers: list[logging.Handler] = [_build_stream_handler(formatter)]
+    if config.log_file is not None:
+        handlers.append(_build_file_handler(config, formatter))
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    for h in handlers:
+        root.addHandler(h)
+    root.setLevel(numeric_level)
+
+    logging.getLogger("uvicorn.access").propagate = False
+
+
+def _build_stream_handler(formatter: logging.Formatter) -> logging.StreamHandler:
+    h = logging.StreamHandler(sys.stderr)
+    h.setFormatter(formatter)
+    return h
+
+
+def _build_file_handler(config: LogConfig, formatter: logging.Formatter) -> logging.Handler:
+    """Return a rotating file handler.
+
+    rotation='midnight'    — daily at midnight UTC
+    rotation='h'           — hourly
+    rotation='size:10MB'   — size-based at 10 485 760 bytes
+    """
+    config.log_file.parent.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+    rotation = config.rotation.lower()
+
+    if rotation.startswith("size:"):
+        max_bytes = int(rotation.removeprefix("size:"))
+        h: logging.Handler = logging.handlers.RotatingFileHandler(
+            filename=config.log_file,  # type: ignore[arg-type]
+            maxBytes=max_bytes,
+            backupCount=config.backup_count,
+            encoding="utf-8",
+        )
+    else:
+        h = logging.handlers.TimedRotatingFileHandler(
+            filename=config.log_file,  # type: ignore[arg-type]
+            when="h" if rotation == "h" else "midnight",
+            backupCount=config.backup_count,
+            encoding="utf-8",
+            utc=True,
+        )
+
+    h.setFormatter(formatter)
+    return h
+
+
+def get_logger(name: str) -> structlog.stdlib.BoundLogger:
+    """Return a structlog logger bound to *name*.
+
+    Example::
+
+        log = get_logger(__name__)
+        log.info("user_login", user_id=42, ip="1.2.3.4")
+    """
+    return structlog.get_logger(name)
+```
+
+---
+
+**`middleware.py`** — ASGI correlation ID middleware
+
+```python
+"""ASGI middleware that attaches a correlation ID to every request."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from starlette.requests import Request
+from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from .logger import get_logger, set_correlation_id
+
+REQUEST_ID_HEADER = "X-Request-ID"
+log = get_logger(__name__)
+
+
+class CorrelationIdMiddleware:
+    """Extract or generate a correlation ID for each request.
+
+    The ID is taken from the ``X-Request-ID`` request header when present,
+    otherwise a new UUID4 is generated. It is:
+
+    - Stored in the async context (visible to all log calls in the request)
+    - Echoed back in the ``X-Request-ID`` response header
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Process an ASGI request."""
+        if scope["type"] not in {"http", "websocket"}:
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope)
+        correlation_id = request.headers.get(REQUEST_ID_HEADER) or str(uuid.uuid4())
+        set_correlation_id(correlation_id)
+
+        log.debug("request_started", method=request.method, path=request.url.path)
+
+        async def send_with_header(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = dict(message.get("headers", []))
+                headers[REQUEST_ID_HEADER.lower().encode()] = correlation_id.encode()
+                message = {**message, "headers": list(headers.items())}
+            await send(message)
+
+        await self.app(scope, receive, send_with_header)
+```
+
+---
+
+**Usage**
+
+```python
+# main.py
+from fastapi import FastAPI
+from .logger import LogConfig, get_logger, setup_logging
+from .middleware import CorrelationIdMiddleware
+from pathlib import Path
+
+setup_logging(LogConfig(
+    level="INFO",
+    json_output=True,
+    log_file=Path("logs/app.log"),
+    rotation="midnight",
+    backup_count=14,
+))
+
+app = FastAPI()
+app.add_middleware(CorrelationIdMiddleware)
+
+log = get_logger(__name__)
+
+@app.get("/items/{item_id}")
+async def get_item(item_id: int):
+    log.info("item_fetched", item_id=item_id)   # correlation_id auto-injected
+    return {"id": item_id}
+```
+
+Sample JSON output:
+```json
+{"event": "item_fetched", "item_id": 42, "correlation_id": "f47ac10b-...", "level": "info", "logger": "app.routes", "timestamp": "2026-04-01T10:00:00Z"}
+```
+
+---
+
+**Dependencies** to add to `pyproject.toml`:
+```toml
+structlog>=24.0"
+pydantic>=2.0"
+starlette>=0.40"   # or fastapi, which bundles it
+```
+
+Key design decisions:
+- **Correlation ID** lives in a `ContextVar`, so it's isolated per async task with zero thread-safety concerns
+- **Rotation** supports three modes: daily (`midnight`), hourly (`h`), size-based (`size:<bytes>`)
+- **structlog** handles the entire formatting pipeline; stdlib `logging` is only used for I/O handlers and rotation (its intended role)
+- `LogConfig` validates the level string at construction time via Pydantic's `pattern=` constraint

@@ -1,0 +1,13 @@
+Here's the module — you'll need to approve the write permission. Key design decisions:
+
+**Models** (`Address`, `User`) — Pydantic `BaseModel` subclasses with `EmailStr` validation. `address` is optional since not all APIs guarantee nested fields.
+
+**`UserClient.fetch_user`** — `async def` using `httpx.AsyncClient`. Two distinct error paths:
+- `HTTPStatusError` — server returned 4xx/5xx; logs the status code before re-raising
+- `RequestError` — network/timeout failure; logs the error string before re-raising
+
+**Logging** — `structlog` throughout, no `print()` or stdlib `logging`.
+
+**`main()`** — `async def`, driven by `asyncio.run()` at the bottom so the file is both importable and directly runnable.
+
+Dependencies needed: `httpx`, `pydantic[email]`, `structlog`.

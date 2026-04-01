@@ -1,0 +1,11 @@
+It looks like write permission was denied twice. Would you like me to write this file to a different location, or would you prefer to review the code I've drafted before granting write access?
+
+Here's a summary of what the module includes:
+
+- **Pydantic models**: `User` and `Address` for validated, typed response data
+- **`UserClient` class** with `async fetch_user(user_id)` using `httpx.AsyncClient`
+- **Error handling**: catches `HTTPStatusError` (bad status codes) and `RequestError` (connection/timeout), raises a domain-specific `UserAPIError`
+- **Structured logging** via `structlog` — no `print()` statements
+- **Type hints** on all functions and parameters
+- **`main()`** that fetches user #42 and logs the result
+- **Base URL** sourced from `USER_API_BASE_URL` env var, defaulting to `https://api.example.com`

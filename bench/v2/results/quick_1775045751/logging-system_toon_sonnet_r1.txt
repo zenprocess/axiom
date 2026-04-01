@@ -1,0 +1,11 @@
+**Key design decisions:**
+
+| Feature | Mechanism |
+|---|---|
+| Structured JSON | `structlog.processors.JSONRenderer` |
+| Log levels | `structlog.make_filtering_bound_logger` + `LogLevel` enum |
+| Correlation IDs | `contextvars.ContextVar` + `structlog.contextvars.bind_contextvars` — safe across async tasks |
+| Log rotation | `logging.handlers.RotatingFileHandler` (size-based, configurable) |
+| Config | Pydantic `BaseModel` with validation |
+
+The correlation ID flows automatically: middleware extracts/generates it, binds it to `contextvars`, and `merge_contextvars` in the processor chain attaches it to every log line emitted during that request — no manual passing required.

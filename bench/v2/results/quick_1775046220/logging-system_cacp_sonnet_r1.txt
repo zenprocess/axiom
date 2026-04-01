@@ -1,0 +1,325 @@
+It looks like write permissions are being blocked. Let me present the complete implementation as code for you to create manually, or you can grant write access.
+
+Here is the full implementation — 4 files:
+
+---
+
+### `app_logging/config.py`
+
+```python
+"""Configuration models for the application logging system."""
+
+from enum import StrEnum
+from pathlib import Path
+
+from pydantic import BaseModel, Field, field_validator
+
+
+class LogLevel(StrEnum):
+    """Standard log severity levels."""
+
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+
+
+class RotationConfig(BaseModel):
+    """Settings for rotating log file output."""
+
+    enabled: bool = True
+    file_path: Path = Path("logs/app.log")
+    max_bytes: int = Field(default=10 * 1024 * 1024, gt=0)  # 10 MB
+    backup_count: int = Field(default=5, ge=0)
+
+    @field_validator("file_path")
+    @classmethod
+    def ensure_parent_exists(cls, v: Path) -> Path:
+        """Create the log directory if it does not exist."""
+        v.parent.mkdir(parents=True, exist_ok=True)
+        return v
+
+
+class LoggingConfig(BaseModel):
+    """Top-level logging configuration for a web application."""
+
+    level: LogLevel = LogLevel.INFO
+    json_output: bool = True
+    console_output: bool = True
+    rotation: RotationConfig = Field(default_factory=RotationConfig)
+    service_name: str = "web-app"
+    environment: str = "production"
+```
+
+---
+
+### `app_logging/logger.py`
+
+```python
+"""Core structlog configuration — JSON output, log levels, and file rotation."""
+
+import logging
+import logging.handlers
+import sys
+
+import structlog
+
+from app_logging.config import LoggingConfig
+
+
+def configure_logging(config: LoggingConfig) -> None:
+    """Set up structlog with JSON rendering, level filtering, and optional rotation.
+
+    Must be called once at application startup before any loggers are obtained.
+    """
+    handlers: list[logging.Handler] = []
+
+    if config.console_output:
+        handlers.append(logging.StreamHandler(sys.stdout))
+
+    if config.rotation.enabled:
+        handlers.append(
+            logging.handlers.RotatingFileHandler(
+                filename=config.rotation.file_path,
+                maxBytes=config.rotation.max_bytes,
+                backupCount=config.rotation.backup_count,
+                encoding="utf-8",
+            )
+        )
+
+    logging.basicConfig(
+        format="%(message)s",
+        level=config.level.value,
+        handlers=handlers,
+    )
+
+    shared_processors: list[structlog.types.Processor] = [
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+    ]
+
+    if config.json_output:
+        renderer: structlog.types.Processor = structlog.processors.JSONRenderer()
+    else:
+        renderer = structlog.dev.ConsoleRenderer(colors=True)
+
+    structlog.configure(
+        processors=[
+            *shared_processors,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+    formatter = structlog.stdlib.ProcessorFormatter(
+        processor=renderer,
+        foreign_pre_chain=shared_processors,
+    )
+
+    for handler in handlers:
+        handler.setFormatter(formatter)
+
+    # Stamp every log record with static service context
+    structlog.contextvars.bind_contextvars(
+        service=config.service_name,
+        environment=config.environment,
+    )
+
+
+def get_logger(name: str) -> structlog.stdlib.BoundLogger:
+    """Return a bound structlog logger for the given module name.
+
+    Args:
+        name: Typically ``__name__`` of the calling module.
+    """
+    return structlog.get_logger(name)
+```
+
+---
+
+### `app_logging/middleware.py`
+
+```python
+"""ASGI middleware for injecting per-request correlation IDs into log context."""
+
+import uuid
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
+
+import structlog
+from pydantic import BaseModel
+
+_correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="")
+
+_REQUEST_ID_HEADER = "X-Request-ID"
+_RESPONSE_ID_HEADER = "X-Request-ID"
+
+
+class RequestContext(BaseModel):
+    """Metadata extracted from an incoming HTTP request for logging."""
+
+    correlation_id: str
+    method: str
+    path: str
+    client_ip: str | None
+
+
+def bind_correlation_id(correlation_id: str) -> None:
+    """Store a correlation ID in the current async context and structlog contextvars.
+
+    Args:
+        correlation_id: Unique identifier for the request/task being processed.
+    """
+    _correlation_id_var.set(correlation_id)
+    structlog.contextvars.bind_contextvars(correlation_id=correlation_id)
+
+
+def get_correlation_id() -> str:
+    """Return the correlation ID bound to the current async context."""
+    return _correlation_id_var.get()
+
+
+class CorrelationIdMiddleware:
+    """ASGI middleware that attaches a correlation ID to every request.
+
+    Reads ``X-Request-ID`` from incoming headers or generates a UUID4.
+    The ID is propagated via structlog contextvars so all log statements
+    within the request lifecycle include it automatically.
+    """
+
+    def __init__(self, app: Callable) -> None:
+        self._app = app
+        self._log = structlog.get_logger(__name__)
+
+    async def __call__(
+        self,
+        scope: dict,
+        receive: Callable[[], Awaitable[dict]],
+        send: Callable[[dict], Awaitable[None]],
+    ) -> None:
+        """Handle an ASGI request, injecting a correlation ID before dispatch."""
+        if scope["type"] not in ("http", "websocket"):
+            await self._app(scope, receive, send)
+            return
+
+        structlog.contextvars.clear_contextvars()
+
+        correlation_id = _extract_correlation_id(scope)
+        bind_correlation_id(correlation_id)
+
+        ctx = _build_request_context(scope, correlation_id)
+        await self._log.ainfo("request.start", **ctx.model_dump())
+
+        async def send_with_header(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append(
+                    (_RESPONSE_ID_HEADER.encode(), correlation_id.encode())
+                )
+                message = {**message, "headers": headers}
+            await send(message)
+
+        try:
+            await self._app(scope, receive, send_with_header)
+        except Exception:
+            await self._log.aexception("request.error")
+            raise
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_correlation_id(scope: dict) -> str:
+    """Pull X-Request-ID from ASGI scope headers, or mint a fresh UUID4."""
+    headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
+    for key, value in headers:
+        if key.lower() == _REQUEST_ID_HEADER.lower().encode():
+            return value.decode()
+    return str(uuid.uuid4())
+
+
+def _build_request_context(scope: dict, correlation_id: str) -> RequestContext:
+    """Construct a RequestContext from an ASGI scope dict."""
+    client = scope.get("client")
+    return RequestContext(
+        correlation_id=correlation_id,
+        method=scope.get("method", ""),
+        path=scope.get("path", ""),
+        client_ip=client[0] if client else None,
+    )
+```
+
+---
+
+### `app_logging/__init__.py`
+
+```python
+"""Structured logging system for web applications."""
+
+from app_logging.config import LoggingConfig, LogLevel, RotationConfig
+from app_logging.logger import configure_logging, get_logger
+from app_logging.middleware import CorrelationIdMiddleware, bind_correlation_id, get_correlation_id
+
+__all__ = [
+    "LoggingConfig",
+    "LogLevel",
+    "RotationConfig",
+    "configure_logging",
+    "get_logger",
+    "CorrelationIdMiddleware",
+    "bind_correlation_id",
+    "get_correlation_id",
+]
+```
+
+---
+
+### Usage example
+
+```python
+from app_logging import LoggingConfig, RotationConfig, configure_logging, get_logger
+
+config = LoggingConfig(
+    service_name="payments-api",
+    environment="staging",
+    rotation=RotationConfig(file_path="logs/payments.log", max_bytes=5_000_000),
+)
+configure_logging(config)
+
+log = get_logger(__name__)
+log.info("server.started", port=8080)
+```
+
+**ASGI wiring (e.g. Starlette/FastAPI):**
+
+```python
+from app_logging import CorrelationIdMiddleware
+app.add_middleware(CorrelationIdMiddleware)
+```
+
+Every log line for that request will automatically include `correlation_id`, `service`, `environment`, `timestamp`, and `level` as JSON fields.
+
+---
+
+**Dependencies to add to `pyproject.toml`:**
+
+```toml
+[project.dependencies]
+structlog = ">=24.0"
+pydantic = ">=2.0"
+```
+
+**Key design decisions:**
+- `structlog.contextvars` — thread- and async-safe context propagation; no globals shared across requests
+- `RotatingFileHandler` as the stdlib sink — structlog renders to it via `ProcessorFormatter`
+- `CorrelationIdMiddleware` clears contextvars at request start to prevent leakage between requests
+- `RequestContext` is a Pydantic model so the structured fields are validated before logging

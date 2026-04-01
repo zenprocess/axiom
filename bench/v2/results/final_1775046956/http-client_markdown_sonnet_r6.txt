@@ -1,0 +1,97 @@
+Here's the module I'd write — `user_client.py`:
+
+```python
+"""Client for fetching user data from the example REST API."""
+
+import asyncio
+import os
+
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr
+
+log = structlog.get_logger()
+
+BASE_URL = os.environ.get("API_BASE_URL", "https://api.example.com")
+
+
+class Address(BaseModel):
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+    phone: str | None = None
+    address: Address | None = None
+
+
+class UserNotFoundError(Exception):
+    """Raised when the requested user does not exist."""
+
+
+class UserAPIError(Exception):
+    """Raised when the API returns an unexpected error."""
+
+
+class UserClient:
+    """Client for the /users REST API endpoint."""
+
+    def __init__(self, base_url: str = BASE_URL, timeout: float = 10.0) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
+
+    async def fetch_user(self, user_id: int) -> User:
+        url = f"{self._base_url}/users/{user_id}"
+        log.info("fetching_user", user_id=user_id, url=url)
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.get(url)
+        except httpx.TimeoutException as exc:
+            log.error("user_fetch_timeout", user_id=user_id)
+            raise UserAPIError(f"Request timed out for user {user_id}") from exc
+        except httpx.RequestError as exc:
+            log.error("user_fetch_connection_error", user_id=user_id, error=str(exc))
+            raise UserAPIError(f"Connection error fetching user {user_id}: {exc}") from exc
+
+        if response.status_code == 404:
+            log.warning("user_not_found", user_id=user_id)
+            raise UserNotFoundError(f"User {user_id} not found")
+
+        if response.status_code != 200:
+            log.error("user_fetch_unexpected_status", user_id=user_id, status_code=response.status_code)
+            raise UserAPIError(f"Unexpected status {response.status_code} fetching user {user_id}")
+
+        user = User.model_validate(response.json())
+        log.info("user_fetched", user_id=user_id, name=user.name)
+        return user
+
+
+async def main() -> None:
+    client = UserClient()
+    try:
+        user = await client.fetch_user(42)
+        log.info("result", id=user.id, name=user.name, email=user.email)
+    except UserNotFoundError:
+        log.warning("user_does_not_exist", user_id=42)
+    except UserAPIError as exc:
+        log.error("failed_to_fetch_user", user_id=42, error=str(exc))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design decisions per the project rules:
+
+- **`async def fetch_user`** — all I/O is async using `httpx.AsyncClient` (`async-io` rule)
+- **`User` / `Address` as Pydantic `BaseModel`** — validated with `.model_validate()` (`pydantic-models` rule)
+- **`structlog`** — all logging goes through `log = structlog.get_logger()`, no `print()` or stdlib `logging` (`structlog-only`, `no-print-debug` rules)
+- **Error handling** — `TimeoutException`, `RequestError`, 404, and non-2xx status codes are all caught and mapped to typed domain exceptions (`error-handling` rule)
+- **`API_BASE_URL` env var** — base URL is configurable via environment, never hardcoded (`no-secrets` rule)
+- **Full type hints** on all signatures (`type-hints` rule)

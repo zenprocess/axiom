@@ -1,0 +1,172 @@
+It looks like write permission wasn't granted. Here's the complete module — you can save it yourself as `user_management.py`:
+
+```python
+"""User management data models with validation, serialization, and DB fetch."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+from uuid import UUID, uuid4
+
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+log = structlog.get_logger(__name__)
+
+
+class PermissionAction(str, Enum):
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Permission(BaseModel):
+    """A single action on a named resource."""
+
+    id: UUID = Field(default_factory=uuid4)
+    resource: str = Field(..., min_length=1, max_length=128)
+    action: PermissionAction
+
+    model_config = {"frozen": True}
+
+    def __str__(self) -> str:
+        return f"{self.resource}:{self.action}"
+
+
+class Role(BaseModel):
+    """A named collection of permissions."""
+
+    id: UUID = Field(default_factory=uuid4)
+    name: str = Field(..., min_length=1, max_length=64)
+    description: str = Field(default="", max_length=256)
+    permissions: list[Permission] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def name_must_be_slug(cls, v: str) -> str:
+        """Ensure role name is lowercase and contains only alphanumeric + hyphens."""
+        normalized = v.lower().replace(" ", "-")
+        if not all(c.isalnum() or c == "-" for c in normalized):
+            raise ValueError("Role name must be alphanumeric (hyphens allowed)")
+        return normalized
+
+    def has_permission(self, resource: str, action: PermissionAction) -> bool:
+        """Check whether this role grants the given action on a resource."""
+        return any(
+            p.resource == resource and p.action == action for p in self.permissions
+        )
+
+
+class UserStatus(str, Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    SUSPENDED = "suspended"
+
+
+class User(BaseModel):
+    """An authenticated user account."""
+
+    id: UUID = Field(default_factory=uuid4)
+    username: str = Field(..., min_length=3, max_length=32)
+    email: EmailStr
+    display_name: str = Field(default="", max_length=128)
+    status: UserStatus = UserStatus.ACTIVE
+    roles: list[Role] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+
+    @field_validator("username")
+    @classmethod
+    def username_no_spaces(cls, v: str) -> str:
+        """Reject usernames containing whitespace."""
+        if any(c.isspace() for c in v):
+            raise ValueError("Username must not contain spaces")
+        return v.lower()
+
+    def is_active(self) -> bool:
+        """Return True if the user account is active."""
+        return self.status == UserStatus.ACTIVE
+
+    def has_permission(self, resource: str, action: PermissionAction) -> bool:
+        """Return True if any assigned role grants the action on the resource."""
+        return any(role.has_permission(resource, action) for role in self.roles)
+
+    def all_permissions(self) -> set[str]:
+        """Return a flat set of 'resource:action' strings across all roles."""
+        return {str(p) for role in self.roles for p in role.permissions}
+
+
+class UserListResponse(BaseModel):
+    """Paginated response envelope returned by the user database API."""
+
+    users: list[User]
+    total: int
+    page: int
+    page_size: int
+
+
+async def fetch_users(
+    db_url: str,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    timeout: float = 10.0,
+) -> UserListResponse:
+    """Fetch a paginated list of users from a database REST endpoint.
+
+    Args:
+        db_url: Base URL of the user database API.
+        page: 1-based page number.
+        page_size: Records per page (capped at 200).
+        timeout: Request timeout in seconds.
+
+    Returns:
+        UserListResponse with users and pagination metadata.
+
+    Raises:
+        httpx.HTTPStatusError: On non-2xx responses.
+        httpx.RequestError: On network failures.
+    """
+    params = {"page": page, "page_size": min(page_size, 200)}
+    logger = log.bind(db_url=db_url, page=page, page_size=page_size)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(f"{db_url}/users", params=params)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "user_fetch_http_error",
+            status_code=exc.response.status_code,
+            detail=exc.response.text,
+        )
+        raise
+    except httpx.RequestError as exc:
+        logger.error("user_fetch_network_error", error=str(exc))
+        raise
+
+    payload = response.json()
+    logger.info("user_fetch_ok", total=payload.get("total"))
+    return UserListResponse.model_validate(payload)
+```
+
+**Key design decisions:**
+
+| Concern | Choice |
+|---|---|
+| Models | Pydantic `BaseModel` with `Field` constraints |
+| Logging | `structlog` with bound context per call |
+| I/O | `async def` + `httpx.AsyncClient` |
+| Error handling | Separate `HTTPStatusError` / `RequestError` branches |
+| `Permission` | Frozen model (immutable, hashable) |
+| Serialization | `model_validate()` / `.model_dump()` (Pydantic v2) |
+
+**Validation highlights:**
+- `username` — no spaces, auto-lowercased, 3–32 chars
+- `Role.name` — slugified, alphanumeric + hyphens only
+- `email` — `EmailStr` (requires `pydantic[email]`)
+- `page_size` — server-side cap of 200 regardless of caller input

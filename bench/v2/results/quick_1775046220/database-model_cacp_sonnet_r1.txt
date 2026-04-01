@@ -1,0 +1,216 @@
+It looks like write permission to that path isn't granted. Here's the complete module — you can save it as `user_management.py`:
+
+```python
+"""User management data models and database access utilities."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+from uuid import UUID, uuid4
+
+import structlog
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+logger = structlog.get_logger(__name__)
+
+
+class PermissionScope(str, Enum):
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Permission(BaseModel):
+    """Represents a single permission granted to a role."""
+
+    id: UUID = Field(default_factory=uuid4)
+    name: str = Field(min_length=1, max_length=128)
+    scope: PermissionScope
+    resource: str = Field(min_length=1, max_length=256)
+    description: Optional[str] = Field(default=None, max_length=512)
+
+    model_config = {"frozen": True}
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, v: str) -> str:
+        """Lowercase and strip permission names for consistency."""
+        return v.strip().lower()
+
+
+class Role(BaseModel):
+    """Represents a role that aggregates permissions."""
+
+    id: UUID = Field(default_factory=uuid4)
+    name: str = Field(min_length=1, max_length=64)
+    permissions: list[Permission] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    model_config = {"frozen": True}
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, v: str) -> str:
+        """Uppercase and strip role names for consistency."""
+        return v.strip().upper()
+
+    def has_permission(self, scope: PermissionScope, resource: str) -> bool:
+        """Return True if this role grants the given scope on the given resource."""
+        return any(
+            p.scope == scope and p.resource == resource for p in self.permissions
+        )
+
+
+class UserStatus(str, Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    SUSPENDED = "suspended"
+
+
+class User(BaseModel):
+    """Represents an application user with roles and metadata."""
+
+    id: UUID = Field(default_factory=uuid4)
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_\-]+$")
+    email: EmailStr
+    display_name: Optional[str] = Field(default=None, max_length=128)
+    status: UserStatus = UserStatus.ACTIVE
+    roles: list[Role] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @field_validator("username")
+    @classmethod
+    def lowercase_username(cls, v: str) -> str:
+        """Enforce lowercase usernames."""
+        return v.strip().lower()
+
+    def has_permission(self, scope: PermissionScope, resource: str) -> bool:
+        """Return True if any of the user's roles grant the given scope on the resource."""
+        return any(role.has_permission(scope, resource) for role in self.roles)
+
+    def is_active(self) -> bool:
+        """Return True if the user account is currently active."""
+        return self.status == UserStatus.ACTIVE
+
+
+class UserList(BaseModel):
+    """Paginated list of users returned from a data source."""
+
+    items: list[User]
+    total: int
+    page: int = 1
+    page_size: int = 50
+
+
+async def fetch_users(
+    db_url: str,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    status_filter: Optional[UserStatus] = None,
+) -> UserList:
+    """Fetch a paginated list of users from the given database URL.
+
+    Args:
+        db_url: Connection URL for the database.
+        page: 1-based page number to retrieve.
+        page_size: Number of users per page (max 200).
+        status_filter: If provided, only return users with this status.
+
+    Returns:
+        A UserList with matching users and pagination metadata.
+
+    Raises:
+        ValueError: If page or page_size are out of range.
+        RuntimeError: If the database query fails.
+    """
+    if page < 1:
+        raise ValueError(f"page must be >= 1, got {page}")
+    if not (1 <= page_size <= 200):
+        raise ValueError(f"page_size must be between 1 and 200, got {page_size}")
+
+    log = logger.bind(page=page, page_size=page_size, status_filter=status_filter)
+
+    try:
+        import asyncpg  # type: ignore[import]
+
+        offset = (page - 1) * page_size
+        query = "SELECT * FROM users"
+        params: list[object] = []
+
+        if status_filter is not None:
+            query += " WHERE status = $1"
+            params.append(status_filter.value)
+
+        query += f" LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        params.extend([page_size, offset])
+
+        count_query = "SELECT COUNT(*) FROM users"
+        count_params: list[object] = [status_filter.value] if status_filter else []
+        if status_filter:
+            count_query += " WHERE status = $1"
+
+        async with asyncpg.create_pool(db_url) as pool:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(query, *params)
+                total: int = await conn.fetchval(count_query, *count_params)
+
+        users = [User(**dict(row)) for row in rows]
+        log.info("users.fetched", count=len(users), total=total)
+        return UserList(items=users, total=total, page=page, page_size=page_size)
+
+    except Exception as exc:
+        log.error("users.fetch_failed", error=str(exc), exc_info=True)
+        raise RuntimeError(f"Failed to fetch users from database: {exc}") from exc
+
+
+async def fetch_user_by_id(db_url: str, user_id: UUID) -> Optional[User]:
+    """Fetch a single user by UUID from the database.
+
+    Args:
+        db_url: Connection URL for the database.
+        user_id: UUID of the user to retrieve.
+
+    Returns:
+        The matching User, or None if not found.
+
+    Raises:
+        RuntimeError: If the database query fails.
+    """
+    log = logger.bind(user_id=str(user_id))
+
+    try:
+        import asyncpg  # type: ignore[import]
+
+        async with asyncpg.create_pool(db_url) as pool:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT * FROM users WHERE id = $1", str(user_id)
+                )
+
+        if row is None:
+            log.info("users.not_found")
+            return None
+
+        user = User(**dict(row))
+        log.info("users.fetched_by_id", username=user.username)
+        return user
+
+    except Exception as exc:
+        log.error("users.fetch_by_id_failed", error=str(exc), exc_info=True)
+        raise RuntimeError(f"Failed to fetch user {user_id}: {exc}") from exc
+```
+
+---
+
+**Key design decisions:**
+
+- **`Permission`** — frozen (immutable), validator normalizes name to lowercase. Fields: `scope` (enum), `resource` (what it applies to).
+- **`Role`** — frozen, aggregates permissions, exposes `has_permission(scope, resource)` for clean authorization checks. Name normalized to uppercase.
+- **`User`** — mutable model (can update `status`, `roles`), `username` forced lowercase, delegates permission checks to roles, `EmailStr` validates email format.
+- **`UserList`** — pagination envelope for database results.
+- **`fetch_users` / `fetch_user_by_id`** — `async def`, parameterized queries (no SQL injection), `try/except` around all DB calls, `structlog` for observability, no hardcoded credentials. Uses `asyncpg` but the import is deferred so you can swap in any async DB driver.

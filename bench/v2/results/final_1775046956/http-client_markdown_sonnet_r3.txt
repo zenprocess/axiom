@@ -1,0 +1,22 @@
+Here's what the module includes:
+
+**Data models** (`User`, `Address`) — Pydantic `BaseModel` subclasses with optional nested address.
+
+**`UserClient` class** — async `fetch_user(user_id)` method using `httpx.AsyncClient` with:
+- 10s timeout
+- `raise_for_status()` to catch 4xx/5xx responses
+- Separate handling for `HTTPStatusError` vs `RequestError` with structured logging via `structlog`
+
+**`main()`** — async entry point that fetches user #42.
+
+Dependencies needed:
+```
+httpx
+pydantic
+structlog
+```
+
+Install with:
+```bash
+pip install httpx pydantic structlog
+```

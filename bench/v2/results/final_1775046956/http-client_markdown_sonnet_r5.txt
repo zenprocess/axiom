@@ -1,0 +1,19 @@
+Here's what the module contains — I'll create the file once you approve the write:
+
+**`user_client.py`** — key design decisions:
+
+| Rule | What I did |
+|---|---|
+| `async-io` | `fetch_user` is `async def`, uses `httpx.AsyncClient` |
+| `pydantic-models` | `User` and `Address` are `BaseModel` subclasses |
+| `structlog-only` | All logging via `structlog.get_logger()` |
+| `error-handling` | Catches `TimeoutException`, `RequestError`, 404, and non-2xx separately |
+| `type-hints` | Every function is fully annotated |
+| `no-secrets` | Base URL read from `API_BASE_URL` env var |
+| `docstrings` | All public classes and methods documented |
+
+**Domain exceptions:**
+- `UserNotFoundError` — 404 responses
+- `UserAPIError` — timeouts, network errors, other bad statuses
+
+**`main()`** calls `client.fetch_user(42)` and handles both exception types gracefully via structlog.

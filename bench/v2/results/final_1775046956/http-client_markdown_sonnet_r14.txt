@@ -1,0 +1,26 @@
+Here's what the module contains — let me know if you'd like me to write it to a different location or adjust anything:
+
+**`user_client.py`**
+
+**Data models** (`pydantic.BaseModel`):
+- `Address` — street, city, state, zip
+- `User` — id, name, email, optional address/phone
+
+**Custom exceptions**:
+- `UserNotFoundError` — for HTTP 404
+- `UserAPIError` — for timeouts, network failures, other non-2xx responses
+
+**`UserClient.get_user(user_id)`** — async, uses `httpx.AsyncClient`, handles:
+- `httpx.TimeoutException` → `UserAPIError`
+- `httpx.RequestError` (DNS, connection refused, etc.) → `UserAPIError`
+- HTTP 404 → `UserNotFoundError`
+- Other non-2xx → `UserAPIError`
+
+**`main()`** — async, fetches user #42, logs the result with `structlog`
+
+Dependencies needed:
+```bash
+pip install httpx pydantic structlog
+```
+
+The base URL defaults to `https://api.example.com` but can be overridden via `API_BASE_URL` env var (no hardcoded config, follows the no-secrets rule).

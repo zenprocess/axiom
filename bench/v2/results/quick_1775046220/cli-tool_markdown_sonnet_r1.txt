@@ -1,0 +1,220 @@
+It looks like write permissions aren't granted for this directory. Here's the complete tool — you can save it wherever you like:
+
+```python
+#!/usr/bin/env python3
+"""CSV filter CLI — read a CSV, filter rows by column value, output results."""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import Iterator
+
+import structlog
+
+log = structlog.get_logger()
+
+
+def iter_csv_rows(path: Path) -> Iterator[dict[str, str]]:
+    """Yield rows from a CSV file as dicts.
+
+    Args:
+        path: Path to the CSV file.
+    Yields:
+        Each row as a dict mapping header -> value.
+    Raises:
+        ValueError: If the file has no header row.
+        PermissionError: If the file cannot be read.
+        csv.Error: If the file is not valid CSV.
+    """
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        if reader.fieldnames is None:
+            raise ValueError("CSV file is empty or has no header row")
+        yield from reader
+
+
+def filter_rows(
+    rows: Iterator[dict[str, str]],
+    column: str,
+    value: str,
+    *,
+    case_sensitive: bool,
+) -> tuple[list[dict[str, str]], int]:
+    """Filter rows where column matches value.
+
+    Args:
+        rows: Iterator of CSV row dicts.
+        column: Column name to filter on.
+        value: Value to match against.
+        case_sensitive: Whether comparison is case-sensitive.
+    Returns:
+        Tuple of (matched rows, total rows read).
+    """
+    matched: list[dict[str, str]] = []
+    total = 0
+    column_missing_warned = False
+
+    for row in rows:
+        total += 1
+        if column not in row:
+            if not column_missing_warned:
+                column_missing_warned = True
+                log.warning("column_not_found_in_row", column=column, row_number=total)
+            continue
+
+        cell = row[column]
+        needle = value
+
+        if not case_sensitive:
+            cell = cell.casefold()
+            needle = needle.casefold()
+
+        if cell == needle:
+            matched.append(row)
+
+        if total % 10_000 == 0:
+            log.info("progress", rows_read=total, matches_so_far=len(matched))
+
+    return matched, total
+
+
+def write_output(
+    rows: list[dict[str, str]],
+    fieldnames: list[str],
+    output_path: Path | None,
+) -> None:
+    """Write filtered rows as CSV to a file or stdout.
+
+    Args:
+        rows: Filtered rows to write.
+        fieldnames: Ordered column names.
+        output_path: Destination file, or None for stdout.
+    """
+    if output_path:
+        dest = output_path.open("w", newline="", encoding="utf-8")
+        try:
+            writer = csv.DictWriter(dest, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        finally:
+            dest.close()
+    else:
+        writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="csv_filter",
+        description="Filter rows in a CSV file by a column value.",
+    )
+    parser.add_argument("file", type=Path, help="Path to the input CSV file")
+    parser.add_argument("column", help="Column name to filter on")
+    parser.add_argument("value", help="Value to match (exact match by default)")
+    parser.add_argument(
+        "--output", "-o", type=Path, default=None,
+        help="Write results to this file instead of stdout",
+    )
+    parser.add_argument(
+        "--ignore-case", "-i", action="store_true",
+        help="Case-insensitive comparison",
+    )
+    return parser
+
+
+def main() -> int:
+    """Entry point. Returns exit code."""
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty()),
+        ],
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+
+    parser = build_parser()
+    args = parser.parse_args()
+    input_path: Path = args.file
+
+    if not input_path.exists():
+        log.error("file_not_found", path=str(input_path))
+        return 1
+    if not input_path.is_file():
+        log.error("not_a_file", path=str(input_path))
+        return 1
+
+    log.info("starting", file=str(input_path), column=args.column, value=args.value)
+
+    try:
+        rows_iter = iter_csv_rows(input_path)
+        first = next(rows_iter, None)
+        if first is None:
+            log.warning("empty_file", path=str(input_path))
+            return 0
+
+        fieldnames: list[str] = list(first.keys())
+        if args.column not in fieldnames:
+            log.error("column_not_in_header", column=args.column, available=fieldnames)
+            return 1
+
+        def rows_with_first() -> Iterator[dict[str, str]]:
+            yield first
+            yield from rows_iter
+
+        matched, total = filter_rows(
+            rows_with_first(),
+            column=args.column,
+            value=args.value,
+            case_sensitive=not args.ignore_case,
+        )
+
+    except PermissionError:
+        log.error("permission_denied", path=str(input_path))
+        return 1
+    except (csv.Error, ValueError) as exc:
+        log.error("csv_parse_error", path=str(input_path), detail=str(exc))
+        return 1
+
+    log.info("done", total_rows=total, matched_rows=len(matched),
+             output=str(args.output) if args.output else "stdout")
+
+    if not matched:
+        log.warning("no_matches", column=args.column, value=args.value)
+        return 0
+
+    try:
+        write_output(matched, fieldnames, args.output)
+    except PermissionError:
+        log.error("output_permission_denied", path=str(args.output))
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+**Usage:**
+
+```bash
+# Filter to stdout
+python csv_filter.py data.csv status active
+
+# Case-insensitive, write to file
+python csv_filter.py data.csv country "united states" -i -o filtered.csv
+
+# Help
+python csv_filter.py --help
+```
+
+**Key design decisions:**
+
+- All progress/errors go to **stderr** via `structlog`, so stdout stays clean CSV-only — safe to pipe
+- Progress logged every 10,000 rows (useful for large files)
+- Column validated against the header before iterating the full file
+- Reads the file as a lazy iterator — memory usage scales with matches, not total rows
+- Dependency: `structlog` (`pip install structlog`)

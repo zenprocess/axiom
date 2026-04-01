@@ -1,0 +1,103 @@
+It looks like write permission was denied. Here's the module I'd create at `examples/user_client.py`:
+
+```python
+"""Client module for fetching user data from a REST API."""
+
+import asyncio
+import os
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+API_BASE_URL = os.environ.get("USER_API_BASE_URL", "https://api.example.com")
+
+
+class Address(BaseModel):
+    """A user's physical address."""
+
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    """Response model for the /users/{id} endpoint."""
+
+    id: int
+    name: str
+    email: str
+    address: Address | None = None
+
+
+class UserClient:
+    """Async client for the users REST API."""
+
+    def __init__(self, base_url: str = API_BASE_URL) -> None:
+        """Initialize the client.
+
+        Args:
+            base_url: Base URL of the API server.
+        """
+        self.base_url = base_url
+
+    async def fetch_user(self, user_id: int) -> User:
+        """Fetch a single user by ID.
+
+        Args:
+            user_id: The numeric user identifier.
+
+        Returns:
+            A validated User model.
+
+        Raises:
+            httpx.HTTPStatusError: If the API returns a non-2xx status.
+            httpx.RequestError: If a connection or timeout error occurs.
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=30)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            log.error(
+                "api_http_error",
+                url=url,
+                status_code=exc.response.status_code,
+                detail=exc.response.text,
+            )
+            raise
+        except httpx.RequestError as exc:
+            log.error("api_request_failed", url=url, error=str(exc))
+            raise
+
+        user = User.model_validate(response.json())
+        log.info("user_fetched", user_id=user.id, email=user.email)
+        return user
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    user = await client.fetch_user(42)
+    log.info("main_complete", user=user.model_dump())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design choices per project rules:
+
+- **async-io**: `fetch_user` is `async def` using `httpx.AsyncClient`
+- **pydantic-models**: `User` and `Address` are `BaseModel` subclasses for validated, typed responses
+- **structlog-only**: all logging via `structlog.get_logger()`, no `print()` or stdlib `logging`
+- **error-handling**: `try/except` around the HTTP call catches `HTTPStatusError` (4xx/5xx) and `RequestError` (connection/timeout), logs context, and re-raises
+- **no-secrets**: base URL comes from an env var with a safe default
+- **type-hints**: full annotations on all signatures and return types
+- **docstrings**: on all public classes and methods
+
+Would you like me to try writing the file again, or place it somewhere else?

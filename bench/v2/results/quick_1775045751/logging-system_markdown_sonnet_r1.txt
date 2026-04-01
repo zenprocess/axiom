@@ -1,0 +1,350 @@
+Since file writes aren't currently permitted, here's the complete logging system you can create manually. It's organized as `examples/webapp_logging/` with 4 files:
+
+---
+
+### `examples/webapp_logging/config.py`
+Pydantic config models.
+
+```python
+"""Pydantic configuration models for the logging system."""
+
+from enum import StrEnum
+from pathlib import Path
+
+from pydantic import BaseModel, Field, field_validator
+
+
+class LogLevel(StrEnum):
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+
+
+class RotationConfig(BaseModel):
+    """Configuration for log file rotation."""
+
+    enabled: bool = True
+    file_path: Path = Path("logs/app.log")
+    max_bytes: int = Field(default=10 * 1024 * 1024, gt=0)  # 10 MB
+    backup_count: int = Field(default=5, ge=0)
+
+    @field_validator("file_path")
+    @classmethod
+    def ensure_parent_exists(cls, v: Path) -> Path:
+        v.parent.mkdir(parents=True, exist_ok=True)
+        return v
+
+
+class LoggingConfig(BaseModel):
+    """Top-level logging configuration."""
+
+    level: LogLevel = LogLevel.INFO
+    json_output: bool = True
+    include_caller_info: bool = False
+    rotation: RotationConfig = Field(default_factory=RotationConfig)
+```
+
+---
+
+### `examples/webapp_logging/context.py`
+Correlation ID management via `contextvars`.
+
+```python
+"""Request-scoped context variables for log correlation."""
+
+import uuid
+from contextvars import ContextVar
+
+_correlation_id: ContextVar[str] = ContextVar("correlation_id", default="")
+_request_path: ContextVar[str] = ContextVar("request_path", default="")
+_user_id: ContextVar[str] = ContextVar("user_id", default="")
+
+
+def set_correlation_id(value: str | None = None) -> str:
+    """Set (or generate) a correlation ID for the current request context."""
+    cid = value or str(uuid.uuid4())
+    _correlation_id.set(cid)
+    return cid
+
+
+def get_correlation_id() -> str:
+    """Return the current correlation ID, or empty string if unset."""
+    return _correlation_id.get()
+
+
+def set_request_context(path: str, user_id: str = "") -> None:
+    """Bind request metadata to the current context."""
+    _request_path.set(path)
+    _user_id.set(user_id)
+
+
+def inject_context(logger: object, method: str, event_dict: dict) -> dict:
+    """structlog processor that injects correlation context into every log record."""
+    cid = _correlation_id.get()
+    if cid:
+        event_dict["correlation_id"] = cid
+    path = _request_path.get()
+    if path:
+        event_dict["request_path"] = path
+    uid = _user_id.get()
+    if uid:
+        event_dict["user_id"] = uid
+    return event_dict
+```
+
+---
+
+### `examples/webapp_logging/setup.py`
+structlog pipeline with JSON rendering and rotating file handler.
+
+```python
+"""Configure structlog with JSON output, log levels, and file rotation."""
+
+import logging
+import logging.handlers
+import sys
+
+import structlog
+
+from .config import LoggingConfig, LogLevel
+from .context import inject_context
+
+_LEVEL_MAP: dict[LogLevel, int] = {
+    LogLevel.DEBUG: logging.DEBUG,
+    LogLevel.INFO: logging.INFO,
+    LogLevel.WARNING: logging.WARNING,
+    LogLevel.ERROR: logging.ERROR,
+    LogLevel.CRITICAL: logging.CRITICAL,
+}
+
+
+def _build_stdlib_handler(config: LoggingConfig) -> logging.Handler:
+    """Return a StreamHandler or RotatingFileHandler per config."""
+    rot = config.rotation
+    if rot.enabled:
+        handler: logging.Handler = logging.handlers.RotatingFileHandler(
+            filename=rot.file_path,
+            maxBytes=rot.max_bytes,
+            backupCount=rot.backup_count,
+            encoding="utf-8",
+        )
+    else:
+        handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    return handler
+
+
+def configure_logging(config: LoggingConfig | None = None) -> None:
+    """
+    Configure structlog and the stdlib root logger.
+
+    Call once at application startup, before any log calls.
+
+    Args:
+        config: LoggingConfig instance. Defaults to INFO-level JSON stdout.
+    """
+    if config is None:
+        config = LoggingConfig()
+
+    stdlib_level = _LEVEL_MAP[config.level]
+
+    shared_processors: list = [
+        structlog.contextvars.merge_contextvars,
+        inject_context,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        structlog.processors.StackInfoRenderer(),
+    ]
+
+    if config.include_caller_info:
+        shared_processors.append(structlog.processors.CallsiteParameterAdder(
+            [
+                structlog.processors.CallsiteParameter.FILENAME,
+                structlog.processors.CallsiteParameter.LINENO,
+                structlog.processors.CallsiteParameter.FUNC_NAME,
+            ]
+        ))
+
+    if config.json_output:
+        renderer = structlog.processors.JSONRenderer()
+    else:
+        renderer = structlog.dev.ConsoleRenderer(colors=True)
+
+    structlog.configure(
+        processors=shared_processors + [
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.make_filtering_bound_logger(stdlib_level),
+        cache_logger_on_first_use=True,
+    )
+
+    formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=shared_processors,
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            renderer,
+        ],
+    )
+
+    handler = _build_stdlib_handler(config)
+    handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.addHandler(handler)
+    root_logger.setLevel(stdlib_level)
+```
+
+---
+
+### `examples/webapp_logging/middleware.py`
+ASGI middleware that stamps every request with a correlation ID.
+
+```python
+"""ASGI middleware for request correlation ID injection."""
+
+from collections.abc import Awaitable, Callable
+
+import structlog
+
+from .context import set_correlation_id, set_request_context
+
+log = structlog.get_logger()
+
+ASGIScope = dict
+ASGIReceive = Callable[[], Awaitable[dict]]
+ASGISend = Callable[[dict], Awaitable[None]]
+
+
+class CorrelationIdMiddleware:
+    """
+    ASGI middleware that binds a correlation ID to every incoming request.
+
+    Reads `X-Correlation-ID` from request headers, or generates a UUID.
+    Adds `X-Correlation-ID` to the response headers.
+    """
+
+    def __init__(self, app: Callable) -> None:
+        """
+        Args:
+            app: The ASGI application to wrap.
+        """
+        self.app = app
+
+    async def __call__(
+        self,
+        scope: ASGIScope,
+        receive: ASGIReceive,
+        send: ASGISend,
+    ) -> None:
+        """Process an ASGI request, injecting correlation context."""
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        incoming = headers.get(b"x-correlation-id", b"").decode()
+        cid = set_correlation_id(incoming or None)
+
+        path = scope.get("path", "")
+        set_request_context(path=path)
+
+        log.info(
+            "request_started",
+            method=scope.get("method", ""),
+            path=path,
+            correlation_id=cid,
+        )
+
+        async def send_with_header(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                headers_list: list = list(message.get("headers", []))
+                headers_list.append(
+                    (b"x-correlation-id", cid.encode())
+                )
+                message = {**message, "headers": headers_list}
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_header)
+        except Exception:
+            log.exception("request_failed", path=path, correlation_id=cid)
+            raise
+```
+
+---
+
+### `examples/webapp_logging/__init__.py`
+Public API.
+
+```python
+"""Structured JSON logging for web applications."""
+
+from .config import LoggingConfig, LogLevel, RotationConfig
+from .context import get_correlation_id, inject_context, set_correlation_id, set_request_context
+from .middleware import CorrelationIdMiddleware
+from .setup import configure_logging
+
+__all__ = [
+    "LoggingConfig",
+    "LogLevel",
+    "RotationConfig",
+    "CorrelationIdMiddleware",
+    "configure_logging",
+    "get_correlation_id",
+    "inject_context",
+    "set_correlation_id",
+    "set_request_context",
+]
+```
+
+---
+
+### Usage
+
+```python
+# main.py (FastAPI / Starlette example)
+from fastapi import FastAPI
+from webapp_logging import LoggingConfig, LogLevel, RotationConfig, configure_logging, CorrelationIdMiddleware
+import structlog
+
+configure_logging(LoggingConfig(
+    level=LogLevel.INFO,
+    json_output=True,
+    rotation=RotationConfig(file_path="logs/app.log", max_bytes=20_000_000, backup_count=7),
+))
+
+log = structlog.get_logger()
+
+app = FastAPI()
+app.add_middleware(CorrelationIdMiddleware)
+
+@app.get("/users/{user_id}")
+async def get_user(user_id: int):
+    log.info("fetching_user", user_id=user_id)
+    ...
+```
+
+**Sample JSON output:**
+```json
+{"event": "fetching_user", "user_id": 42, "correlation_id": "c3d4e5f6-...", "request_path": "/users/42", "log_level": "info", "logger": "main", "timestamp": "2026-04-01T10:00:00Z"}
+```
+
+---
+
+**Key design decisions:**
+
+| Concern | Approach |
+|---|---|
+| Structured logging | `structlog` with a processor chain |
+| Log levels | `structlog.make_filtering_bound_logger` — zero overhead for suppressed levels |
+| Correlation IDs | `contextvars.ContextVar` — async-safe, no thread-local issues |
+| Log rotation | stdlib `RotatingFileHandler` wired into structlog's formatter |
+| Config | Pydantic `BaseModel` with validation |
+| ASGI integration | Middleware reads/writes `X-Correlation-ID` header |
+
+Dependencies needed: `structlog>=24`, `pydantic>=2`.

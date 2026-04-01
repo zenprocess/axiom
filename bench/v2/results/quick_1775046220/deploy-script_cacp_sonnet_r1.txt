@@ -1,0 +1,181 @@
+It looks like write permission isn't being granted. Here's the complete script — you can create it yourself:
+
+```bash
+#!/usr/bin/env bash
+# deploy.sh — build, push, tag, deploy, rollback
+# Usage:
+#   ./deploy.sh [VERSION]          — deploy (default: version from pyproject.toml)
+#   ./deploy.sh rollback [VERSION] — rollback to a previous image tag
+#
+# Env vars:
+#   REGISTRY, IMAGE_NAME, DEPLOY_HOST, DEPLOY_DIR, DOCKER_PLATFORM, SSH_KEY
+
+set -euo pipefail
+
+REGISTRY="${REGISTRY:-ghcr.io/zenprocess}"
+IMAGE_NAME="${IMAGE_NAME:-axiom-rdl}"
+DEPLOY_HOST="${DEPLOY_HOST:-}"
+DEPLOY_DIR="${DEPLOY_DIR:-/opt/axiom}"
+DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
+SSH_KEY="${SSH_KEY:-}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE="${REGISTRY}/${IMAGE_NAME}"
+
+log() { echo "[$(date -u '+%H:%M:%S')] $*"; }
+err() { echo "[ERROR] $*" >&2; }
+die() { err "$*"; exit 1; }
+
+ssh_cmd() {
+    local key_flag=""
+    [[ -n "${SSH_KEY}" ]] && key_flag="-i ${SSH_KEY}"
+    # shellcheck disable=SC2086
+    ssh ${key_flag} -o StrictHostKeyChecking=no "${DEPLOY_HOST}" "$@"
+}
+
+get_version_from_pyproject() {
+    grep -E '^version\s*=' "${SCRIPT_DIR}/pyproject.toml" \
+        | head -1 \
+        | sed 's/.*=\s*"\(.*\)"/\1/'
+}
+
+require_clean_git() {
+    if ! git -C "${SCRIPT_DIR}" diff --quiet HEAD; then
+        die "Working directory has uncommitted changes. Commit or stash first."
+    fi
+}
+
+tag_exists_remotely() {
+    git -C "${SCRIPT_DIR}" ls-remote --tags origin "refs/tags/$1" | grep -q "$1"
+}
+
+build_image() {
+    local tag="$1"
+    log "Building ${IMAGE}:${tag} (platform: ${DOCKER_PLATFORM})"
+    docker build \
+        --platform "${DOCKER_PLATFORM}" \
+        --label "org.opencontainers.image.version=${tag}" \
+        --label "org.opencontainers.image.revision=$(git -C "${SCRIPT_DIR}" rev-parse HEAD)" \
+        --label "org.opencontainers.image.created=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        -t "${IMAGE}:${tag}" \
+        -t "${IMAGE}:latest" \
+        "${SCRIPT_DIR}"
+}
+
+push_image() {
+    local tag="$1"
+    log "Pushing ${IMAGE}:${tag}"
+    docker push "${IMAGE}:${tag}"
+    docker push "${IMAGE}:latest"
+}
+
+create_git_tag() {
+    local tag="$1"
+    if tag_exists_remotely "v${tag}"; then
+        log "Git tag v${tag} already exists remotely — skipping"
+        return
+    fi
+    log "Creating git tag v${tag}"
+    git -C "${SCRIPT_DIR}" tag -a "v${tag}" -m "Release v${tag}"
+    git -C "${SCRIPT_DIR}" push origin "v${tag}"
+}
+
+deploy_to_production() {
+    local tag="$1"
+    if [[ -z "${DEPLOY_HOST}" ]]; then
+        log "DEPLOY_HOST not set — skipping remote deploy"
+        log "To deploy manually: docker pull ${IMAGE}:${tag}"
+        return
+    fi
+
+    log "Deploying ${tag} to ${DEPLOY_HOST}:${DEPLOY_DIR}"
+
+    local previous_tag
+    previous_tag=$(ssh_cmd "cat ${DEPLOY_DIR}/.current_tag 2>/dev/null || echo ''")
+    if [[ -n "${previous_tag}" ]]; then
+        ssh_cmd "echo '${previous_tag}' > ${DEPLOY_DIR}/.previous_tag"
+        log "Saved rollback target: ${previous_tag}"
+    fi
+
+    ssh_cmd "
+        set -euo pipefail
+        cd ${DEPLOY_DIR}
+        docker pull ${IMAGE}:${tag}
+        IMAGE_TAG=${tag} docker compose up -d --remove-orphans
+        echo '${tag}' > .current_tag
+    "
+    log "Deploy complete: ${tag}"
+}
+
+rollback() {
+    local target_tag="${1:-}"
+    [[ -z "${DEPLOY_HOST}" ]] && die "DEPLOY_HOST not set"
+
+    if [[ -z "${target_tag}" ]]; then
+        target_tag=$(ssh_cmd "cat ${DEPLOY_DIR}/.previous_tag 2>/dev/null || echo ''")
+        [[ -z "${target_tag}" ]] && die "No previous tag found. Use: ./deploy.sh rollback <VERSION>"
+    fi
+
+    log "Rolling back to ${target_tag}"
+    ssh_cmd "
+        set -euo pipefail
+        cd ${DEPLOY_DIR}
+        docker pull ${IMAGE}:${target_tag}
+        IMAGE_TAG=${target_tag} docker compose up -d --remove-orphans
+        echo '${target_tag}' > .current_tag
+    "
+    log "Rollback complete: now running ${target_tag}"
+}
+
+main() {
+    case "${1:-deploy}" in
+        rollback) rollback "${2:-}" ;;
+        *)
+            local version="${1:-}"
+            [[ "${version}" == "deploy" ]] && version=""
+            [[ -z "${version}" ]] && version=$(get_version_from_pyproject)
+            [[ -z "${version}" ]] && die "Could not determine version from pyproject.toml"
+            log "Deploying version: ${version}"
+            require_clean_git
+            build_image          "${version}"
+            push_image           "${version}"
+            create_git_tag       "${version}"
+            deploy_to_production "${version}"
+            log "All steps complete."
+            ;;
+    esac
+}
+
+main "$@"
+```
+
+Then `chmod +x deploy.sh`.
+
+---
+
+**How it works:**
+
+| Step | What happens |
+|------|-------------|
+| `require_clean_git` | Aborts if you have uncommitted changes — prevents tagging dirty state |
+| `build_image` | Builds with OCI labels (version, git SHA, timestamp) and tags both `:<version>` and `:latest` |
+| `push_image` | Pushes both tags to the registry |
+| `create_git_tag` | Creates annotated `v<version>` tag and pushes; skips if it already exists |
+| `deploy_to_production` | SSHs to prod, saves current tag to `.previous_tag`, pulls and restarts via `docker compose` |
+| `rollback` | Restores `.previous_tag` (or any tag you pass) without going through build/push |
+
+**Usage:**
+```bash
+./deploy.sh               # uses version from pyproject.toml (0.6.0)
+./deploy.sh 0.7.0         # deploy a specific version
+./deploy.sh rollback      # roll back to previous
+./deploy.sh rollback 0.5.0  # roll back to explicit version
+```
+
+**Configure via env:**
+```bash
+export REGISTRY=ghcr.io/zenprocess
+export DEPLOY_HOST=user@prod.example.com
+export SSH_KEY=~/.ssh/deploy_key
+./deploy.sh
+```

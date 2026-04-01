@@ -1,0 +1,126 @@
+It seems write permissions weren't granted. Here's the complete module you can save as `user_client.py`:
+
+```python
+"""REST API client for fetching user data."""
+
+import asyncio
+import os
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr
+
+log = structlog.get_logger()
+
+BASE_URL = os.environ.get("API_BASE_URL", "https://api.example.com")
+
+
+class Address(BaseModel):
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+    username: str
+    phone: Optional[str] = None
+    address: Optional[Address] = None
+
+
+class UserNotFoundError(Exception):
+    """Raised when the requested user does not exist."""
+
+
+class UserAPIError(Exception):
+    """Raised when the API returns an unexpected error."""
+
+
+class UserClient:
+    """Client for the user REST API."""
+
+    def __init__(self, base_url: str = BASE_URL, timeout: float = 10.0) -> None:
+        """Initialize the client.
+
+        Args:
+            base_url: Base URL of the API.
+            timeout: Request timeout in seconds.
+        """
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
+
+    async def get_user(self, user_id: int) -> User:
+        """Fetch a single user by ID.
+
+        Args:
+            user_id: The numeric user identifier.
+
+        Returns:
+            A validated User model.
+
+        Raises:
+            UserNotFoundError: If the user does not exist (HTTP 404).
+            UserAPIError: If the API returns any other error.
+        """
+        url = f"{self._base_url}/users/{user_id}"
+        log.info("fetching_user", user_id=user_id, url=url)
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.get(url)
+        except httpx.TimeoutException as exc:
+            log.error("request_timeout", user_id=user_id, url=url, error=str(exc))
+            raise UserAPIError(f"Request timed out for user {user_id}") from exc
+        except httpx.RequestError as exc:
+            log.error("request_failed", user_id=user_id, url=url, error=str(exc))
+            raise UserAPIError(f"Network error fetching user {user_id}") from exc
+
+        if response.status_code == 404:
+            log.warning("user_not_found", user_id=user_id)
+            raise UserNotFoundError(f"User {user_id} not found")
+
+        if response.status_code != 200:
+            log.error(
+                "unexpected_status",
+                user_id=user_id,
+                status_code=response.status_code,
+                body=response.text[:200],
+            )
+            raise UserAPIError(
+                f"Unexpected status {response.status_code} for user {user_id}"
+            )
+
+        user = User.model_validate(response.json())
+        log.info("user_fetched", user_id=user.id, username=user.username)
+        return user
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    try:
+        user = await client.get_user(42)
+        log.info("result", id=user.id, name=user.name, email=user.email)
+    except UserNotFoundError as exc:
+        log.warning("not_found", error=str(exc))
+    except UserAPIError as exc:
+        log.error("api_error", error=str(exc))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Key design decisions:**
+
+- **`httpx` + `async def`** — all I/O is async, avoiding event loop blocking
+- **Two Pydantic models** — `Address` (nested) and `User` with `EmailStr` validation; `model_validate()` gives runtime type checking on the response
+- **Two domain exceptions** — `UserNotFoundError` (404) vs `UserAPIError` (network/other HTTP errors), so callers can distinguish "doesn't exist" from "something broke"
+- **`structlog`** — structured key=value logging throughout, no `print()`
+- **`API_BASE_URL` env var** — base URL is configurable without touching code
+
+**Dependencies:** `httpx`, `pydantic[email]`, `structlog`

@@ -1,0 +1,23 @@
+I need your approval to write these two files. Let me show you what each contains first, then you can approve:
+
+**`Dockerfile`** — multi-stage Python 3.12 build for `axiom-rdl`.
+
+**`deploy.sh`** — full pipeline with these commands:
+
+| Command | What it does |
+|---|---|
+| `./deploy.sh all` | Build → push → tag → deploy (full pipeline) |
+| `./deploy.sh build` | Docker build only |
+| `./deploy.sh push` | Push to registry |
+| `./deploy.sh tag` | Create + push `vX.Y.Z` git tag |
+| `./deploy.sh deploy` | SSH to prod, `docker compose pull` + `up -d` |
+| `./deploy.sh rollback` | Restore the previously running image on prod |
+
+**Key design decisions:**
+- Version pulled from `pyproject.toml` at runtime — no hardcoded values
+- Three image tags per release: `v0.6.0`, `<short-sha>`, `latest`
+- Rollback saves the current image tag to `.rollback_tag` on the remote *before* deploying, then restores it on `rollback`
+- All config via env vars (`REGISTRY`, `PROD_HOST`, `PROD_COMPOSE_DIR`) — no secrets in the script
+- `set -euo pipefail` throughout; SSH remote scripts also use it
+
+Please approve the file writes and I'll create both files.

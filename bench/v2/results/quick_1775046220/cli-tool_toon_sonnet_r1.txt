@@ -1,0 +1,181 @@
+It seems write permissions aren't being granted. Here's the complete tool — you can save it as `csv_filter.py`:
+
+```python
+#!/usr/bin/env python3
+"""CLI tool to filter CSV rows by a column value."""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for the CSV filter operation."""
+
+    csv_file: Path
+    column: str
+    value: str
+    output_file: Path | None = None
+    case_sensitive: bool = True
+
+
+def parse_args() -> FilterConfig:
+    """Parse and validate CLI arguments into a FilterConfig."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  %(prog)s data.csv --column status --value active
+  %(prog)s data.csv -c country -v Canada -o results.csv
+  %(prog)s data.csv -c name -v alice --ignore-case
+        """,
+    )
+    parser.add_argument("csv_file", type=Path, help="Input CSV file path")
+    parser.add_argument("--column", "-c", required=True, help="Column name to filter on")
+    parser.add_argument("--value", "-v", required=True, help="Value to match")
+    parser.add_argument("--output", "-o", type=Path, help="Output file (default: stdout)")
+    parser.add_argument(
+        "--ignore-case", "-i", action="store_true", help="Case-insensitive matching"
+    )
+
+    args = parser.parse_args()
+    return FilterConfig(
+        csv_file=args.csv_file,
+        column=args.column,
+        value=args.value,
+        output_file=args.output,
+        case_sensitive=not args.ignore_case,
+    )
+
+
+def filter_csv(config: FilterConfig) -> list[dict]:
+    """Read CSV file and return rows where column matches value."""
+    if not config.csv_file.exists():
+        log.error("File not found", path=str(config.csv_file))
+        sys.exit(1)
+
+    if not config.csv_file.is_file():
+        log.error("Path is not a file", path=str(config.csv_file))
+        sys.exit(1)
+
+    matched: list[dict] = []
+    total = 0
+
+    try:
+        with open(config.csv_file, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+
+            if reader.fieldnames is None:
+                log.error("CSV file is empty or missing a header row", path=str(config.csv_file))
+                sys.exit(1)
+
+            if config.column not in reader.fieldnames:
+                log.error(
+                    "Column not found in CSV",
+                    column=config.column,
+                    available=list(reader.fieldnames),
+                )
+                sys.exit(1)
+
+            log.info(
+                "Filtering CSV",
+                file=str(config.csv_file),
+                column=config.column,
+                value=config.value,
+                case_sensitive=config.case_sensitive,
+            )
+
+            for row in reader:
+                total += 1
+                cell = row[config.column]
+                target = config.value
+
+                if not config.case_sensitive:
+                    cell = cell.casefold()
+                    target = target.casefold()
+
+                if cell == target:
+                    matched.append(row)
+
+                if total % 1000 == 0:
+                    log.info("Progress", rows_read=total, matches=len(matched))
+
+    except PermissionError:
+        log.error("Permission denied reading file", path=str(config.csv_file))
+        sys.exit(1)
+    except UnicodeDecodeError as exc:
+        log.error(
+            "Encoding error — file may not be UTF-8",
+            path=str(config.csv_file),
+            detail=str(exc),
+        )
+        sys.exit(1)
+
+    log.info("Filtering complete", total_rows=total, matched_rows=len(matched))
+    return matched
+
+
+def write_output(rows: list[dict], config: FilterConfig) -> None:
+    """Write matched rows to output file or stdout."""
+    if not rows:
+        log.warning("No rows matched the filter — nothing to write")
+        return
+
+    fieldnames = list(rows[0].keys())
+
+    if config.output_file:
+        try:
+            with open(config.output_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            log.info("Results written", path=str(config.output_file), rows=len(rows))
+        except PermissionError:
+            log.error("Permission denied writing output", path=str(config.output_file))
+            sys.exit(1)
+    else:
+        writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def main() -> None:
+    """Entry point."""
+    structlog.configure(
+        processors=[
+            structlog.stdlib.add_log_level,
+            structlog.dev.ConsoleRenderer(),
+        ],
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+
+    config = parse_args()
+    matched = filter_csv(config)
+    write_output(matched, config)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+**Design decisions:**
+
+- `FilterConfig` (Pydantic) validates all args at parse time — bad paths and types fail early with clear messages
+- All progress/errors go to **stderr** via structlog; matched CSV rows go to **stdout** — these are separate streams so piping works correctly
+- Progress logs every 1000 rows so large files don't go silent
+- `--ignore-case` uses `.casefold()` (handles Unicode better than `.lower()`)
+- Distinct error messages for: missing file, wrong path type, missing column, permission errors, encoding errors, and zero matches
+
+**Usage:**
+```bash
+python csv_filter.py data.csv -c status -v active
+python csv_filter.py data.csv -c country -v canada --ignore-case -o filtered.csv
+python csv_filter.py data.csv -c name -v "John Doe" | wc -l
+```

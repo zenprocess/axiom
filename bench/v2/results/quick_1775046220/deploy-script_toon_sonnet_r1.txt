@@ -1,0 +1,25 @@
+The user needs to approve the write. Once approved, here's what the script does:
+
+**Structure:**
+- `./deploy.sh` — full deploy pipeline
+- `./deploy.sh rollback [TAG]` — roll back to a specific or previous tag
+- Flags: `--version`, `--registry`, `--env`
+
+**Four stages:**
+1. **Build** — `docker build` with git metadata labels, tags both `VERSION` and `latest`
+2. **Push** — pushes both tags to the registry
+3. **Git tag** — creates `vX.Y.Z` annotated tag and pushes it (idempotent — skips if tag exists)
+4. **Deploy** — pluggable `deploy_to_env()` supporting SSH+docker-compose, kubectl, or local compose
+
+**Rollback:**
+- `./deploy.sh rollback v0.5.0` — deploys that specific image
+- `./deploy.sh rollback` — auto-detects the previous git tag
+
+**Safety checks (preflight):**
+- Requires `docker` and `git`
+- Aborts if working tree is dirty
+- Aborts if `Dockerfile` or `pyproject.toml` is missing
+
+**Config via env vars:** `REGISTRY`, `IMAGE_NAME`, `DEPLOY_ENV`, `GIT_REMOTE`, `DEPLOY_HOST`, `K8S_DEPLOYMENT`
+
+You'll also need a `Dockerfile` — want me to generate one for this Python library project?

@@ -1,0 +1,293 @@
+It looks like write permissions aren't granted for this directory. Here's the complete logging system — you can save it wherever fits your project:
+
+```python
+# logging_system.py
+"""
+Structured logging system for web applications.
+
+Usage:
+    from logging_system import configure_logging, get_logger, correlation_id_ctx
+
+    configure_logging(level="INFO", log_file="app.log")
+    log = get_logger(__name__)
+
+    token = correlation_id_ctx.set("req-abc-123")
+    try:
+        log.info("handling_request", path="/api/users")
+    finally:
+        correlation_id_ctx.reset(token)
+"""
+from __future__ import annotations
+
+import logging
+import logging.handlers
+import sys
+import uuid
+from contextvars import ContextVar
+from typing import Any
+
+import structlog
+from pydantic import BaseModel, field_validator
+
+# ---------------------------------------------------------------------------
+# Context variable — holds the current request's correlation ID
+# ---------------------------------------------------------------------------
+
+correlation_id_ctx: ContextVar[str] = ContextVar("correlation_id", default="")
+
+# ---------------------------------------------------------------------------
+# Configuration model
+# ---------------------------------------------------------------------------
+
+VALID_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+
+class LogConfig(BaseModel):
+    """Configuration for the logging system.
+
+    Attributes:
+        level: Minimum log level (DEBUG / INFO / WARNING / ERROR / CRITICAL).
+        log_file: Optional path to a rotating log file. None = stdout only.
+        max_bytes: Rotation threshold per file (default 10 MB).
+        backup_count: Number of rotated backup files to keep (default 5).
+        json_console: Emit JSON to stdout when True; colored text when False.
+    """
+
+    level: str = "INFO"
+    log_file: str | None = None
+    max_bytes: int = 10 * 1024 * 1024
+    backup_count: int = 5
+    json_console: bool = True
+
+    @field_validator("level")
+    @classmethod
+    def validate_level(cls, v: str) -> str:
+        """Reject unrecognised level names at construction time."""
+        upper = v.upper()
+        if upper not in VALID_LEVELS:
+            raise ValueError(f"level must be one of {VALID_LEVELS}, got {v!r}")
+        return upper
+
+
+# ---------------------------------------------------------------------------
+# Custom structlog processor
+# ---------------------------------------------------------------------------
+
+def _inject_correlation_id(
+    logger: Any,
+    method: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Inject the active request correlation ID into every log record.
+
+    Args:
+        logger: Underlying logger (unused).
+        method: Log method name (unused).
+        event_dict: Mutable structlog event dict.
+
+    Returns:
+        event_dict updated with ``correlation_id`` when one is set.
+    """
+    cid = correlation_id_ctx.get()
+    if cid:
+        event_dict["correlation_id"] = cid
+    return event_dict
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def configure_logging(
+    level: str = "INFO",
+    log_file: str | None = None,
+    max_bytes: int = 10 * 1024 * 1024,
+    backup_count: int = 5,
+    json_console: bool = True,
+) -> None:
+    """Configure structlog and the stdlib root logger. Call once at startup.
+
+    Args:
+        level: Minimum log level (case-insensitive).
+        log_file: Optional file path for a rotating log sink.
+        max_bytes: Rotation threshold in bytes for the file sink.
+        backup_count: Number of backup files retained after rotation.
+        json_console: JSON output on stdout when True, colored text when False.
+
+    Raises:
+        pydantic.ValidationError: If any configuration value is invalid.
+    """
+    cfg = LogConfig(
+        level=level,
+        log_file=log_file,
+        max_bytes=max_bytes,
+        backup_count=backup_count,
+        json_console=json_console,
+    )
+
+    # --- stdlib root logger -------------------------------------------------
+    root = logging.getLogger()
+    root.setLevel(cfg.level)
+    root.handlers.clear()
+
+    plain = logging.Formatter("%(message)s")
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(plain)
+    root.addHandler(console)
+
+    if cfg.log_file:
+        fh = logging.handlers.RotatingFileHandler(
+            cfg.log_file,
+            maxBytes=cfg.max_bytes,
+            backupCount=cfg.backup_count,
+            encoding="utf-8",
+        )
+        fh.setFormatter(plain)
+        root.addHandler(fh)
+
+    # --- structlog pipeline -------------------------------------------------
+    shared: list[Any] = [
+        structlog.contextvars.merge_contextvars,
+        _inject_correlation_id,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+    ]
+
+    final_renderer: Any = (
+        structlog.processors.JSONRenderer()
+        if cfg.json_console
+        else structlog.dev.ConsoleRenderer(colors=True)
+    )
+
+    structlog.configure(
+        processors=[*shared, structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+    # Both handlers share the same final renderer.
+    formatter = structlog.stdlib.ProcessorFormatter(
+        processor=final_renderer,
+        foreign_pre_chain=shared,
+    )
+    for handler in root.handlers:
+        handler.setFormatter(formatter)
+
+
+def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
+    """Return a named structlog bound logger.
+
+    Args:
+        name: Typically ``__name__``. None uses the root logger.
+
+    Returns:
+        A structlog BoundLogger.
+    """
+    return structlog.get_logger(name)
+
+
+def generate_correlation_id() -> str:
+    """Generate a UUIDv4 correlation ID string.
+
+    Returns:
+        A UUID4 string.
+    """
+    return str(uuid.uuid4())
+
+
+# ---------------------------------------------------------------------------
+# Framework-agnostic middleware helper
+# ---------------------------------------------------------------------------
+
+class CorrelationIDMiddleware:
+    """Extracts or generates a correlation ID from request headers.
+
+    Example (FastAPI / Starlette):
+        middleware = CorrelationIDMiddleware()
+
+        @app.middleware("http")
+        async def correlate(request: Request, call_next):
+            cid = middleware.extract_or_generate(dict(request.headers))
+            token = correlation_id_ctx.set(cid)
+            try:
+                response = await call_next(request)
+                response.headers["X-Request-ID"] = cid
+                return response
+            finally:
+                correlation_id_ctx.reset(token)
+    """
+
+    def __init__(self, header: str = "X-Request-ID") -> None:
+        """Initialise the helper.
+
+        Args:
+            header: HTTP header name that carries an inbound correlation ID.
+        """
+        self.header = header
+
+    def extract_or_generate(self, headers: dict[str, str]) -> str:
+        """Return the inbound correlation ID or generate a fresh one.
+
+        Args:
+            headers: HTTP header name→value mapping.
+
+        Returns:
+            A correlation ID string.
+        """
+        return headers.get(self.header) or generate_correlation_id()
+
+
+# ---------------------------------------------------------------------------
+# Demo
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    configure_logging(level="DEBUG", log_file="app.log", json_console=False)
+    log = get_logger(__name__)
+
+    log.info("app_started", version="1.0.0")
+
+    middleware = CorrelationIDMiddleware()
+    cid = middleware.extract_or_generate({"X-Request-ID": "demo-001"})
+    token = correlation_id_ctx.set(cid)
+    try:
+        log.info("request_received", method="GET", path="/api/health")
+        log.debug("db_query", table="users", duration_ms=4.2)
+        log.warning("cache_miss", key="user:42")
+        try:
+            raise ValueError("something went wrong")
+        except ValueError:
+            log.error("unhandled_exception", exc_info=True)
+    finally:
+        correlation_id_ctx.reset(token)
+
+    log.info("app_shutdown")
+```
+
+---
+
+**Dependencies** — add to `pyproject.toml` or `requirements.txt`:
+```
+structlog>=24.0
+pydantic>=2.0
+```
+
+---
+
+**Key design decisions:**
+
+| Feature | Mechanism |
+|---|---|
+| Structured JSON | `structlog.processors.JSONRenderer` — every field is a key/value pair, not an interpolated string |
+| Log levels | Validated via `LogConfig` (Pydantic); passed through to stdlib root logger so third-party libs respect it |
+| Correlation IDs | `ContextVar` — automatically thread/asyncio-safe; set at request ingress, reset in a `finally` block |
+| Log rotation | `logging.handlers.RotatingFileHandler` — rotates at `max_bytes`, keeps `backup_count` files |
+| Human-readable dev mode | `json_console=False` switches to `structlog.dev.ConsoleRenderer` with colors |
+| Exception tracing | `format_exc_info` processor serialises tracebacks into the JSON `exception` field |
+
+**`CorrelationIDMiddleware`** is framework-agnostic — the FastAPI/Starlette wiring example is in the docstring. The same pattern works with Django middleware or any WSGI wrapper.

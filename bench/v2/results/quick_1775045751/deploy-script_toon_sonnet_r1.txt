@@ -1,0 +1,24 @@
+The user needs to approve the file write. The script is ready — here's what it does once approved:
+
+**Flow: `./deploy.sh [VERSION]`**
+1. **Build** — `docker build` with `latest` + versioned tags, stamped with git commit/branch/date labels
+2. **Push** — both `:VERSION` and `:latest` to the registry
+3. **Git tag** — creates and pushes `vVERSION` (skips if already exists)
+4. **Deploy** — SSH to `DEPLOY_HOST`, pulls image, stops/removes old container, starts new one
+
+**Rollback:**
+```bash
+./deploy.sh --rollback 0.5.0    # roll back to a specific tag
+./deploy.sh --rollback --list   # show recent deploy history
+```
+
+**Configuration** (env vars at the top, no edits needed):
+| Variable | Default | Purpose |
+|---|---|---|
+| `REGISTRY` | `docker.io` | Container registry |
+| `IMAGE_NAME` | `zenprocess/axiom` | Image name from `pyproject.toml` |
+| `DEPLOY_HOST` | *(unset)* | `user@host` for SSH deploy; runs locally if unset |
+| `DEPLOY_SERVICE` | `axiom` | Container name on the host |
+| `DOCKERFILE` | `Dockerfile` | Path to Dockerfile |
+
+One thing to note: this project currently has no `Dockerfile`. The script will fail at step 1 with a clear error until you create one. Want me to scaffold a minimal `Dockerfile` for this Python library/service as well?

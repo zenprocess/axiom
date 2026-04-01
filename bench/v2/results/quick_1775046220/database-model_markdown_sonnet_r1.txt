@@ -1,0 +1,232 @@
+It seems write access to that path isn't permitted. Here's the complete module — you can save it wherever fits your project:
+
+```python
+"""User management data models with validation, serialization, and async DB fetching."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+from uuid import UUID, uuid4
+
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+log = structlog.get_logger()
+
+
+class PermissionAction(str, Enum):
+    """Enumeration of allowed permission actions."""
+
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Permission(BaseModel):
+    """A single permission granting an action on a resource.
+
+    Attributes:
+        id: Unique permission identifier.
+        action: The action this permission grants.
+        resource: The resource this permission applies to (e.g. 'users', 'reports').
+    """
+
+    id: UUID = Field(default_factory=uuid4)
+    action: PermissionAction
+    resource: str = Field(min_length=1, max_length=128)
+
+    @field_validator("resource")
+    @classmethod
+    def resource_must_be_slug(cls, v: str) -> str:
+        """Ensure resource is a lowercase slug with optional colons for namespacing."""
+        if not v.replace(":", "_").replace("-", "_").replace("_", "").isalnum():
+            raise ValueError(
+                f"resource '{v}' must be alphanumeric with colons/hyphens/underscores"
+            )
+        return v.lower()
+
+    def __str__(self) -> str:
+        return f"{self.action.value}:{self.resource}"
+
+
+class Role(BaseModel):
+    """A named set of permissions that can be assigned to users.
+
+    Attributes:
+        id: Unique role identifier.
+        name: Human-readable role name.
+        description: Optional description of what this role grants.
+        permissions: Permissions included in this role.
+        created_at: UTC timestamp when the role was created.
+    """
+
+    id: UUID = Field(default_factory=uuid4)
+    name: str = Field(min_length=1, max_length=64)
+    description: Optional[str] = Field(default=None, max_length=256)
+    permissions: list[Permission] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    def has_permission(self, action: PermissionAction, resource: str) -> bool:
+        """Check whether this role grants the given action on the given resource.
+
+        Args:
+            action: The action to check.
+            resource: The resource to check.
+
+        Returns:
+            True if any permission in this role matches; False otherwise.
+        """
+        resource = resource.lower()
+        return any(
+            p.action == action and p.resource == resource for p in self.permissions
+        )
+
+
+class UserStatus(str, Enum):
+    """Lifecycle status of a user account."""
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    SUSPENDED = "suspended"
+    PENDING = "pending"
+
+
+class User(BaseModel):
+    """A user account in the system.
+
+    Attributes:
+        id: Unique user identifier.
+        username: Unique login handle.
+        email: Verified email address.
+        display_name: Optional public display name.
+        status: Current account status.
+        roles: Roles assigned to this user.
+        created_at: UTC timestamp when the account was created.
+        last_login: UTC timestamp of the most recent successful login, if any.
+    """
+
+    id: UUID = Field(default_factory=uuid4)
+    username: str = Field(min_length=3, max_length=32)
+    email: EmailStr
+    display_name: Optional[str] = Field(default=None, max_length=128)
+    status: UserStatus = UserStatus.PENDING
+    roles: list[Role] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_login: Optional[datetime] = None
+
+    @field_validator("username")
+    @classmethod
+    def username_must_be_slug(cls, v: str) -> str:
+        """Enforce lowercase alphanumeric usernames with hyphens/underscores."""
+        if not v.replace("-", "").replace("_", "").isalnum():
+            raise ValueError(
+                f"username '{v}' may only contain letters, digits, hyphens, and underscores"
+            )
+        return v.lower()
+
+    def has_permission(self, action: PermissionAction, resource: str) -> bool:
+        """Check whether any of the user's roles grant the given permission.
+
+        Args:
+            action: The action to check.
+            resource: The resource to check.
+
+        Returns:
+            True if at least one role grants the permission; False otherwise.
+        """
+        return any(role.has_permission(action, resource) for role in self.roles)
+
+    def is_active(self) -> bool:
+        """Return True if the account is in ACTIVE status."""
+        return self.status == UserStatus.ACTIVE
+
+
+class UserListResponse(BaseModel):
+    """Paginated response envelope returned by the user listing endpoint.
+
+    Attributes:
+        users: The users on the current page.
+        total: Total number of users matching the query.
+        page: Current page index (1-based).
+        page_size: Number of users per page.
+    """
+
+    users: list[User]
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=500)
+
+
+async def fetch_users(
+    db_url: str,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    status: Optional[UserStatus] = None,
+    timeout: float = 10.0,
+) -> UserListResponse:
+    """Fetch a page of users from a remote database API.
+
+    Args:
+        db_url: Base URL of the user database REST endpoint.
+        page: Page number to retrieve (1-based).
+        page_size: Number of records per page.
+        status: Optional status filter; omit to return users of any status.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        A UserListResponse containing the requested page of users.
+
+    Raises:
+        httpx.HTTPStatusError: If the server responds with a 4xx or 5xx status.
+        httpx.RequestError: On network-level failures (timeout, DNS, etc.).
+    """
+    params: dict[str, str | int] = {"page": page, "page_size": page_size}
+    if status is not None:
+        params["status"] = status.value
+
+    log.info("fetching_users", db_url=db_url, page=page, page_size=page_size, status=status)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(db_url, params=params)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        log.error(
+            "fetch_users_http_error",
+            db_url=db_url,
+            status_code=exc.response.status_code,
+            detail=exc.response.text[:200],
+        )
+        raise
+    except httpx.RequestError as exc:
+        log.error("fetch_users_request_error", db_url=db_url, error=str(exc))
+        raise
+
+    payload = response.json()
+    result = UserListResponse.model_validate(payload)
+    log.info("fetch_users_ok", total=result.total, returned=len(result.users))
+    return result
+```
+
+---
+
+**Design decisions worth noting:**
+
+**Models**
+- `Permission` — action + resource pair; `resource` is validated to a lowercase slug (e.g. `users`, `reports:export`). `__str__` gives `read:users` for easy comparison.
+- `Role` — aggregates permissions; `has_permission()` does an O(n) scan (fine for typical role sizes of <50 permissions).
+- `User` — holds a list of `Role` objects; `has_permission()` delegates down the chain. `EmailStr` from pydantic-email-validator handles email normalization automatically.
+- `UserListResponse` — typed envelope for paginated results so callers get `total`/`page` metadata, not just a bare list.
+
+**`fetch_users`**
+- `async def` with `httpx.AsyncClient` — non-blocking, compatible with any asyncio event loop.
+- Separates `HTTPStatusError` (bad response from server) from `RequestError` (network failure) so callers can handle them differently.
+- Logs structured context at both call-site and response (`structlog`, no `print`).
+- No secrets hardcoded — the URL comes from the caller, who should source it from `os.environ`.
+
+**Dependencies:** `pydantic[email]`, `httpx`, `structlog`.

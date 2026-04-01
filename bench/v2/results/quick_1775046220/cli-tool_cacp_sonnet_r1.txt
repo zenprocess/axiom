@@ -1,0 +1,214 @@
+It seems write permission to `examples/` was denied. Here's the complete tool — you can save it wherever you'd like:
+
+```python
+# examples/csv_filter.py
+"""CSV filter CLI — reads a CSV, filters rows by column value, outputs results."""
+
+import argparse
+import asyncio
+import csv
+import sys
+from pathlib import Path
+
+import structlog
+from pydantic import BaseModel, field_validator
+
+log = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for the CSV filter operation."""
+
+    input_path: Path
+    column: str
+    value: str
+    output_path: Path | None = None
+    case_sensitive: bool = True
+
+    @field_validator("input_path")
+    @classmethod
+    def input_must_exist(cls, v: Path) -> Path:
+        """Validate that the input file exists."""
+        if not v.exists():
+            raise ValueError(f"Input file not found: {v}")
+        if not v.is_file():
+            raise ValueError(f"Input path is not a file: {v}")
+        return v
+
+
+class FilterResult(BaseModel):
+    """Result of a filter operation."""
+
+    total_rows: int
+    matched_rows: int
+    output_path: Path | None
+
+
+async def read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """Read a CSV file and return headers and rows."""
+    log.info("reading_csv", path=str(path))
+    try:
+        return await asyncio.to_thread(_read_csv_sync, path)
+    except OSError as exc:
+        log.error("csv_read_failed", path=str(path), error=str(exc))
+        raise
+
+
+def _read_csv_sync(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        if reader.fieldnames is None:
+            return [], []
+        headers = list(reader.fieldnames)
+        rows = list(reader)
+    return headers, rows
+
+
+async def filter_rows(
+    rows: list[dict[str, str]],
+    column: str,
+    value: str,
+    case_sensitive: bool = True,
+) -> list[dict[str, str]]:
+    """Filter rows where column matches value."""
+    log.info("filtering_rows", column=column, value=value, total=len(rows))
+
+    if not case_sensitive:
+        value_cmp = value.lower()
+        matched = [r for r in rows if r.get(column, "").lower() == value_cmp]
+    else:
+        matched = [r for r in rows if r.get(column) == value]
+
+    log.info("filter_complete", matched=len(matched), total=len(rows))
+    return matched
+
+
+async def write_output(
+    headers: list[str],
+    rows: list[dict[str, str]],
+    output_path: Path | None,
+) -> None:
+    """Write filtered rows to a file or stdout."""
+    if output_path is not None:
+        log.info("writing_output", path=str(output_path), rows=len(rows))
+        try:
+            await asyncio.to_thread(_write_csv_sync, headers, rows, output_path)
+            log.info("output_written", path=str(output_path))
+        except OSError as exc:
+            log.error("write_failed", path=str(output_path), error=str(exc))
+            raise
+    else:
+        _write_csv_to_stream(headers, rows, sys.stdout)
+
+
+def _write_csv_sync(headers: list[str], rows: list[dict[str, str]], path: Path) -> None:
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        _write_csv_to_stream(headers, rows, fh)
+
+
+def _write_csv_to_stream(headers: list[str], rows: list[dict[str, str]], stream: object) -> None:
+    writer = csv.DictWriter(stream, fieldnames=headers)
+    writer.writeheader()
+    writer.writerows(rows)
+
+
+async def run_filter(config: FilterConfig) -> FilterResult:
+    """Execute the full filter pipeline."""
+    headers, rows = await read_csv(config.input_path)
+
+    if not headers:
+        log.warning("empty_csv", path=str(config.input_path))
+        return FilterResult(total_rows=0, matched_rows=0, output_path=config.output_path)
+
+    if config.column not in headers:
+        log.error("column_not_found", column=config.column, available=headers)
+        raise ValueError(
+            f"Column '{config.column}' not found. Available: {', '.join(headers)}"
+        )
+
+    matched = await filter_rows(rows, config.column, config.value, config.case_sensitive)
+    await write_output(headers, matched, config.output_path)
+
+    return FilterResult(
+        total_rows=len(rows),
+        matched_rows=len(matched),
+        output_path=config.output_path,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the argument parser."""
+    parser = argparse.ArgumentParser(prog="csv-filter", description="Filter CSV rows by column value.")
+    parser.add_argument("input", metavar="FILE", help="Input CSV file path")
+    parser.add_argument("--column", "-c", required=True, help="Column name to filter on")
+    parser.add_argument("--value", "-v", required=True, help="Value to match")
+    parser.add_argument("--output", "-o", metavar="FILE", help="Output CSV file (default: stdout)")
+    parser.add_argument("--ignore-case", "-i", action="store_true", help="Case-insensitive matching")
+    return parser
+
+
+def main() -> None:
+    """Entry point for the csv-filter CLI."""
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty()),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(20),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+
+    parser = build_parser()
+    args = parser.parse_args()
+
+    try:
+        config = FilterConfig(
+            input_path=Path(args.input),
+            column=args.column,
+            value=args.value,
+            output_path=Path(args.output) if args.output else None,
+            case_sensitive=not args.ignore_case,
+        )
+    except ValueError as exc:
+        log.error("invalid_config", error=str(exc))
+        sys.exit(1)
+
+    try:
+        result = asyncio.run(run_filter(config))
+    except ValueError as exc:
+        log.error("filter_error", error=str(exc))
+        sys.exit(1)
+    except OSError as exc:
+        log.error("io_error", error=str(exc))
+        sys.exit(1)
+
+    log.info(
+        "done",
+        total_rows=result.total_rows,
+        matched_rows=result.matched_rows,
+        output=str(result.output_path) if result.output_path else "stdout",
+    )
+
+
+if __name__ == "__main__":
+    main()
+```
+
+**Usage:**
+```bash
+# Filter to stdout
+python csv_filter.py data.csv --column status --value active
+
+# Case-insensitive, write to file
+python csv_filter.py data.csv -c country -v "canada" -i -o out.csv
+```
+
+**Design decisions:**
+
+- **`FilterConfig` / `FilterResult`** — Pydantic models; `input_must_exist` validator catches bad paths before any I/O runs.
+- **Async I/O** — `read_csv` and `write_output` are `async def`; the synchronous `csv` stdlib calls are offloaded via `asyncio.to_thread` so the event loop is never blocked.
+- **structlog only** — all progress/error output goes to `stderr` via structlog's `ConsoleRenderer` (colored when a TTY); CSV data goes to `stdout`, so they can be piped independently.
+- **Error handling** — `OSError` wraps all file ops; `ValueError` surfaces config/column errors; both are caught in `main()` with a `sys.exit(1)`.
+- **No `print()`** — progress is `log.info`, errors are `log.error`.

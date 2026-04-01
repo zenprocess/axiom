@@ -1,0 +1,150 @@
+The write was blocked. Here's the script — you can save it manually as `deploy.sh`:
+
+```bash
+#!/usr/bin/env bash
+# deploy.sh — build, push, tag, deploy, rollback
+#
+# Required env vars:
+#   REGISTRY        e.g. ghcr.io/zenprocess
+#   DEPLOY_HOST     SSH target, e.g. user@prod.example.com
+#   DEPLOY_DIR      Remote dir containing docker-compose.yml
+#
+# Optional env vars:
+#   IMAGE_NAME      default: axiom-rdl
+#   DOCKER_PLATFORM default: linux/amd64
+#
+# Usage:
+#   ./deploy.sh [VERSION]           deploy (VERSION defaults to pyproject.toml value)
+#   ./deploy.sh rollback [VERSION]  roll back to a specific tag
+
+set -euo pipefail
+
+IMAGE_NAME="${IMAGE_NAME:-axiom-rdl}"
+DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
+REGISTRY="${REGISTRY:?REGISTRY env var is required (e.g. ghcr.io/zenprocess)}"
+DEPLOY_HOST="${DEPLOY_HOST:?DEPLOY_HOST env var is required}"
+DEPLOY_DIR="${DEPLOY_DIR:?DEPLOY_DIR env var is required}"
+FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}"
+
+log()  { echo "[$(date '+%H:%M:%S')] $*"; }
+die()  { echo "[ERROR] $*" >&2; exit 1; }
+
+get_version_from_pyproject() {
+    grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/'
+}
+
+tag_exists_remote() {
+    docker manifest inspect "${FULL_IMAGE}:${1}" &>/dev/null
+}
+
+git_tag_exists() {
+    git tag --list "v$1" | grep -q "v$1"
+}
+
+cmd_deploy() {
+    local version="${1:-$(get_version_from_pyproject)}"
+    [[ -n "$version" ]] || die "Could not determine version"
+
+    local image_tag="${FULL_IMAGE}:${version}"
+    local image_latest="${FULL_IMAGE}:latest"
+
+    log "Deploying version: ${version}"
+
+    # 1. Build
+    log "Building Docker image..."
+    docker build \
+        --platform "${DOCKER_PLATFORM}" \
+        --label "git.commit=$(git rev-parse --short HEAD)" \
+        --label "build.version=${version}" \
+        -t "${image_tag}" \
+        -t "${image_latest}" \
+        .
+
+    # 2. Push
+    log "Pushing to registry..."
+    docker push "${image_tag}"
+    docker push "${image_latest}"
+
+    # 3. Git tag
+    if git_tag_exists "${version}"; then
+        log "Git tag v${version} already exists — skipping"
+    else
+        log "Creating git tag v${version}..."
+        git tag -a "v${version}" -m "Release v${version}"
+        git push origin "v${version}"
+    fi
+
+    # 4. Deploy via SSH
+    log "Deploying to ${DEPLOY_HOST}..."
+    ssh "${DEPLOY_HOST}" "bash -s" <<REMOTE
+set -euo pipefail
+cd "${DEPLOY_DIR}"
+PREVIOUS=\$(docker inspect --format='{{index .Config.Labels "build.version"}}' \
+    \$(docker compose ps -q app 2>/dev/null || echo "") 2>/dev/null || echo "unknown")
+echo "\${PREVIOUS}" > .previous_version
+IMAGE_TAG="${image_tag}" docker compose pull app
+IMAGE_TAG="${image_tag}" docker compose up -d --no-deps app
+echo "Deployed ${version} (previous: \${PREVIOUS})"
+REMOTE
+
+    log "Deploy complete: ${version}"
+}
+
+cmd_rollback() {
+    local version="${1:-}"
+
+    if [[ -z "$version" ]]; then
+        version=$(ssh "${DEPLOY_HOST}" "cat ${DEPLOY_DIR}/.previous_version 2>/dev/null || echo ''")
+        [[ -n "$version" && "$version" != "unknown" ]] || \
+            die "No rollback target found. Pass a version: ./deploy.sh rollback 0.5.0"
+    fi
+
+    tag_exists_remote "${version}" || die "Image ${FULL_IMAGE}:${version} not in registry"
+
+    log "Rolling back to ${version}..."
+    ssh "${DEPLOY_HOST}" "bash -s" <<REMOTE
+set -euo pipefail
+cd "${DEPLOY_DIR}"
+IMAGE_TAG="${FULL_IMAGE}:${version}" docker compose pull app
+IMAGE_TAG="${FULL_IMAGE}:${version}" docker compose up -d --no-deps app
+echo "Rolled back to ${version}"
+REMOTE
+
+    log "Rollback complete: ${version}"
+}
+
+case "${1:-deploy}" in
+    deploy)   cmd_deploy   "${2:-}" ;;
+    rollback) cmd_rollback "${2:-}" ;;
+    *)        die "Unknown command '${1}'. Use: deploy [VERSION] | rollback [VERSION]" ;;
+esac
+```
+
+---
+
+**Key design decisions:**
+
+| Concern | Approach |
+|---|---|
+| Version source | Reads from `pyproject.toml` automatically; can be overridden |
+| Rollback target | Saves previous version to `.previous_version` on remote before each deploy |
+| Git tag | Idempotent — skips if tag already exists |
+| Registry auth | Delegated to `docker login` (run beforehand or in CI) |
+| Remote deploy | SSH + `docker compose up -d --no-deps app` — zero-downtime for the app container |
+
+**What you'll need to add:**
+- A `Dockerfile` (this project has none currently)
+- A `docker-compose.yml` on the remote host with an `app` service that accepts `IMAGE_TAG` as an env var
+- SSH key access to `DEPLOY_HOST`
+
+**Usage:**
+```bash
+export REGISTRY=ghcr.io/zenprocess
+export DEPLOY_HOST=user@prod.example.com
+export DEPLOY_DIR=/opt/axiom
+
+./deploy.sh              # deploy current version from pyproject.toml
+./deploy.sh deploy 0.7.0 # deploy specific version
+./deploy.sh rollback     # roll back to previous
+./deploy.sh rollback 0.5.0  # roll back to specific version
+```

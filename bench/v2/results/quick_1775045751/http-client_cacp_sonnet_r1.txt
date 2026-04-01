@@ -1,0 +1,17 @@
+Here's the module — approve the write to save it, or I can adjust first.
+
+**What it includes:**
+
+- **`User` / `Address` Pydantic models** — typed response structure with optional fields
+- **`UserClient`** — async class wrapping `httpx`; single public method `get_user(id)`
+- **Error handling** — distinct `UserNotFoundError` (404) and `UserAPIError` (network/other); timeout handled separately
+- **`structlog` logging** — structured context bound per-request, no `print()`
+- **`main()`** — fetches user #42, handles both error types gracefully
+- Full type hints and docstrings on all public surfaces
+
+**Dependencies needed:**
+```
+httpx
+structlog
+pydantic
+```

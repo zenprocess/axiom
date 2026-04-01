@@ -1,0 +1,46 @@
+It seems write permissions aren't being granted for the examples directory. Here's the complete script — you can save it yourself:
+
+---
+
+**`examples/git_workflow.py`** — key design decisions:
+
+**Force-push**: `--force` is omitted intentionally (prohibited by project rules). `--force-with-lease` is provided via `push --rebased` — it's the safe alternative that aborts if someone else pushed since your last fetch.
+
+**Commands:**
+```bash
+# Create a feature branch off main
+python git_workflow.py create-branch feature/my-thing --base main
+
+# Stage specific files and commit
+python git_workflow.py commit -m "feat: add thing" src/foo.py
+
+# Stage all tracked files and commit
+python git_workflow.py commit -m "feat: add thing" --all
+
+# Push (normal)
+python git_workflow.py push
+
+# Push after a rebase (--force-with-lease)
+python git_workflow.py push --rebased
+
+# Open a GitLab MR
+python git_workflow.py mr --title "My feature" --target main --draft
+
+# Full workflow in one shot
+python git_workflow.py full --branch feature/x --title "Add X" --target main
+```
+
+**Environment:**
+```bash
+export GITLAB_TOKEN=glpat-...
+export GITLAB_URL=https://gitlab.com   # or self-hosted URL
+```
+
+**Dependencies:**
+```
+httpx
+structlog
+pydantic>=2
+```
+
+The script follows your project rules: Pydantic models for all data, `structlog` (no `print`/`logging`), `async def` for the HTTP call, `try/except` around every `httpx` call, full type hints, and docstrings on all public functions.

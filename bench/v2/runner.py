@@ -222,6 +222,8 @@ def run_experiment(
 
     results: list[dict] = []
     cell_num = done_count
+    consecutive_errors = 0
+    MAX_CONSECUTIVE_ERRORS = 3  # stop after 3 consecutive failures (quota exhausted)
 
     for task in tasks:
         for fmt in formats:
@@ -250,6 +252,7 @@ def run_experiment(
                         rate = compliance_rate(scores)
                         status = "ok"
                         error = ""
+                        consecutive_errors = 0  # reset on success
                     except Exception as e:
                         output = ""
                         elapsed = 0.0
@@ -257,7 +260,18 @@ def run_experiment(
                         rate = 0.0
                         status = "error"
                         error = str(e)[:500]
-                        _log(f"  ERROR: {error}")
+                        consecutive_errors += 1
+                        _log(f"  ERROR ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {error}")
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                            _log(f"\n*** STOPPING: {MAX_CONSECUTIVE_ERRORS} consecutive errors — likely quota exhausted ***")
+                            _log(f"*** Resume later with same command (will pick up where it left off) ***")
+                            save_result(output_dir, {
+                                "task": task.id, "format": fmt, "model": model, "run": run,
+                                "status": "error", "compliance_rate": 0.0, "scores": scores,
+                                "rules_tokens_approx": rules_tokens, "elapsed_seconds": 0.0,
+                                "timestamp": time.time(), "error": error,
+                            })
+                            return results
 
                     record = {
                         "task": task.id,

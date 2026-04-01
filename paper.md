@@ -6,7 +6,7 @@
 
 ## Abstract
 
-Large language model (LLM) coding agents increasingly rely on rule files to encode project conventions, governance policies, and security constraints. These rules are typically authored as prose markdown, which is verbose, positionally fragile, and scales poorly as rule sets grow. We introduce Axiom, a Rule Definition Language (RDL) that compiles human-readable rules into a compact, self-describing tabular format based on [TOON](https://toonformat.dev)-style headers (`SECTION[N]{columns}:` followed by CSV rows). A ZenRule prototype demonstrates 20:1 compression (20k to 1k tokens) with no observed degradation in agent compliance. This result aligns with findings from LLMLingua (up to 20x compression, ~1.5-point accuracy loss), SWE-Pruner (21-54% token savings with quality improvement), and table-format benchmarks showing that structured tabular inputs outperform equivalent prose by over 15 percentage points on comprehension tasks. Axiom defines a universal core schema and per-category extensions, enabling static conflict detection, token budgeting, and deterministic compilation from markdown source files.
+Large language model (LLM) coding agents increasingly rely on rule files to encode project conventions, governance policies, and security constraints. These rules are typically authored as prose markdown, which is verbose, positionally fragile, and scales poorly as rule sets grow. We introduce Axiom, a Rule Definition Language (RDL) that compiles human-readable rules into a compact, self-describing tabular format based on [TOON](https://toonformat.dev)-style headers (`SECTION[N]{columns}:` followed by CSV rows). A ZenRule prototype demonstrates 20:1 compression (20k to 1k tokens) with no observed degradation in agent compliance. The v0.5.0 hierarchical S/D (Summary/Detail) row format extends this to 15x (full S+D) to 46x (summary-only) compression, enabling pressure-adaptive rule loading. This result aligns with findings from LLMLingua (up to 20x compression, ~1.5-point accuracy loss), SWE-Pruner (21-54% token savings with quality improvement), and table-format benchmarks showing that structured tabular inputs outperform equivalent prose by over 15 percentage points on comprehension tasks. Axiom defines a universal core schema and per-category extensions, enabling static conflict detection, token budgeting, and deterministic compilation from markdown source files.
 
 ## 1. Introduction
 
@@ -74,7 +74,7 @@ Axiom also defines CACP (Context/Acceptance/Constraints/Protocol) as a second no
 
 Four independent lines of evidence support the Axiom design:
 
-**Prompt compression.** LLMLingua [5, 6] achieves up to 20x compression with ~1.5-point accuracy loss by removing low-importance tokens. This confirms that verbose prompts contain substantial redundancy. Axiom eliminates this redundancy at authoring time rather than at inference time.
+**Prompt compression.** LLMLingua [5, 6] achieves up to 20x compression with ~1.5-point accuracy loss by removing low-importance tokens. This confirms that verbose prompts contain substantial redundancy. Axiom eliminates this redundancy at authoring time rather than at inference time. The v0.5.0 S/D (Summary/Detail) row format pushes this further: summary-only loading achieves 46x compression versus prose, while full S+D loading achieves 15x — giving tools a graduated compression dial tied to context pressure.
 
 **Context pruning improves quality.** Pichay's SWE-Pruner [2] finds 21-54% token savings on SWE-bench trajectories, with pruned outputs *preferred* over originals (37% vs 28%). The "Codified Context" approach to `.cursorrules` reports similar gains. Less noise means better signal.
 
@@ -108,7 +108,7 @@ The compiler provides deterministic, auditable mappings from source rules to age
 
 ## 6. Conclusion
 
-Axiom addresses a practical gap: AI coding agents need project rules, but the dominant format (prose markdown) wastes tokens and degrades at scale. By encoding rules in self-describing tabular sections with explicit schemas, Axiom achieves 20:1 compression while aligning with empirical findings on structured prompting, table comprehension, and context pruning. The format is simple enough to author by hand, structured enough to compile and analyze, and native enough for LLMs to interpret zero-shot.
+Axiom addresses a practical gap: AI coding agents need project rules, but the dominant format (prose markdown) wastes tokens and degrades at scale. By encoding rules in self-describing tabular sections with explicit schemas, Axiom achieves 15-46x compression (depending on S/D loading depth) while aligning with empirical findings on structured prompting, table comprehension, and context pruning. The format is simple enough to author by hand, structured enough to compile and analyze, and native enough for LLMs to interpret zero-shot.
 
 Notably, CLAUDE.md files — which load on every agent turn — are the highest-leverage compilation target; Axiom v0.3.0 defines a lossless mapping from CLAUDE.md sections to TOON tables, PROSE blocks, and standard category schemas, enabling projects to compress their most frequently loaded context without information loss.
 

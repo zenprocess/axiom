@@ -1,4 +1,4 @@
-# Axiom Specification v0.4.0
+# Axiom Specification v0.5.0
 
 ## 1. Overview
 
@@ -21,55 +21,89 @@ The header is immediately followed by `N` data rows.
 
 ## 3. Row Format
 
-Each data row is a comma-separated list of values, one rule per line:
+Each data row is a comma-separated list of values, one rule per line. All rule sections use a **universal column schema** with a hierarchical **S/D (Summary/Detail)** row format.
+
+### 3.1 Universal Column Schema
+
+Every rule section uses the same five columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | string | Rule identifier (stable, short, kebab-case) |
+| `level` | enum | `S` (summary — always loaded) or `D` (detail — loaded on demand) |
+| `effect` | enum | `forbid`, `require`, `prefer`, `inform` |
+| `instruction` | string | Imperative command, max 20 words |
+| `trigger` | string | When this applies (tool name, file pattern, condition) |
+
+The header for any rule section is:
 
 ```
-value1,value2,value3,...
+SECTION_NAME[N]{id,level,effect,instruction,trigger}:
 ```
+
+### 3.2 S/D Hierarchical Rows
+
+Each rule has two rows — **S** (summary) and **D** (detail):
+
+- **S row** (~15 tokens): Always loaded. Captures the essential constraint in one imperative sentence.
+- **D row** (~30 tokens): Loaded on demand. Provides specifics, exceptions, safe alternatives, or detection patterns.
+
+```
+RULES[4]{id,level,effect,instruction,trigger}:
+no-gold-plating,S,forbid,Build ONLY acceptance criteria items,Write/Edit
+no-gold-plating,D,forbid,No extra helpers or error handling for unchanged code,FILES_CREATED not in AC
+bash-safety,S,forbid,No git stash -u | git clean | rm -rf | git reset --hard,Bash
+bash-safety,D,forbid,Safe: git stash (tracked) | git checkout -- file | rm by name,Bash blocked command
+```
+
+The section name (GOVERNANCE, CODING, SECURITY, etc.) provides grouping; the level provides loading priority.
+
+### 3.3 CSV Rules
 
 **Rules:**
 - Fields are separated by commas with no spaces after the delimiter (unless the space is part of the value).
 - Values MUST NOT contain unescaped commas. To include a comma in a value, wrap the entire value in double quotes: `"value with, comma"`.
 - To include a double quote inside a quoted value, escape it as `""`.
-- Empty values are represented as empty strings between delimiters: `id,,domain,trigger,,message`.
+- Empty values are represented as empty strings between delimiters: `id,,effect,instruction,trigger`.
 - Rows MUST have exactly as many fields as columns declared in the header.
 - Blank lines between rows are ignored.
 - Lines beginning with `#` are comments and are ignored.
 
 ## 4. Sections
 
-Multiple sections can appear in a single `.axiom` file. Sections are separated by blank lines (optional but recommended for readability). Each section has its own header and column schema.
+Multiple sections can appear in a single `.axiom` file. Sections are separated by blank lines (optional but recommended for readability). All sections use the same universal column schema (`{id,level,effect,instruction,trigger}`).
 
 ```
-GOVERNANCE[2]{id,effect,domain,trigger,message}:
-no-force-push,forbid,Git,push --force,Rewrites remote history
-no-main-commit,forbid,Git,commit on main,Use feature branches
+GOVERNANCE[4]{id,level,effect,instruction,trigger}:
+no-force-push,S,forbid,Never git push --force,Bash
+no-force-push,D,forbid,Safe: git push --force-with-lease for history correction,push --force
+no-main-commit,S,forbid,Never commit directly on main/master,Git commit
+no-main-commit,D,forbid,Create feature branch from main before committing,branch:main
 
-CODING[1]{id,language,effect,pattern,fix_hint,severity}:
-no-print-debug,Python,forbid,print() for debugging,Use structlog,warning
+CODING[2]{id,level,effect,instruction,trigger}:
+no-print-debug,S,forbid,No print() for debugging,Python
+no-print-debug,D,forbid,Use structlog for all logging output,print() in *.py
 ```
 
-## 5. Universal Core Columns
+## 5. Universal Column Schema
 
-All categories SHOULD include these columns (though only `id` and `effect` are REQUIRED):
+All sections use the same five columns (see Section 3.1). This replaces the per-category column schemas from earlier versions. The section name provides semantic grouping; the schema is universal.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | string | Unique, stable, kebab-case identifier |
-| `effect` | enum | One of: `allow`, `forbid`, `prefer`, `discourage`, `inform` |
-| `domain` | string | Scope: `Git`, `Bash`, `Python`, `TypeScript`, `API`, `Docs`, etc. |
-| `trigger` | string | Pattern, command, event, or context that activates the rule |
-| `condition` | string | Optional predicate narrowing when the rule applies |
-| `message` | string | Brief natural-language rationale for the agent |
+| Column | Type | Required | Description |
+|--------|------|----------|-------------|
+| `id` | string | Yes | Rule identifier (stable, short, kebab-case) |
+| `level` | enum | Yes | `S` (summary) or `D` (detail) |
+| `effect` | enum | Yes | `forbid`, `require`, `prefer`, `inform` |
+| `instruction` | string | Yes | Imperative command, max 20 words |
+| `trigger` | string | Yes | When this applies (tool name, file pattern, condition) |
 
 ## 6. Reserved Effects
 
 | Effect | Semantics |
 |--------|-----------|
-| `allow` | Explicitly permitted (overrides a broader `discourage`) |
 | `forbid` | MUST NOT do this. Hard constraint. |
+| `require` | MUST do this. Hard constraint. |
 | `prefer` | SHOULD do this when applicable. Soft recommendation. |
-| `discourage` | SHOULD NOT do this. Soft constraint. |
 | `inform` | No behavioral constraint; informational context for the agent. |
 
 ## 7. Priority Levels
@@ -83,60 +117,19 @@ When categories include a `priority` or `severity` column, the following levels 
 | `medium` | Default. Violations are warnings. |
 | `low` | Advisory. Best-effort compliance. |
 
-## 8. Standard Category Schemas
+## 8. Standard Categories
 
-### 8.1 GOVERNANCE
+All categories use the universal column schema `{id,level,effect,instruction,trigger}`. The category name provides semantic grouping only.
 
-```
-GOVERNANCE[N]{id,effect,domain,trigger,condition,message}:
-```
+| Category | Purpose |
+|----------|---------|
+| `GOVERNANCE` | Guards on agent behavior, tool use, and process adherence |
+| `CODING` | Language conventions, patterns, and style enforcement |
+| `SECURITY` | Secret detection, access control, data handling |
+| `TESTING` | Quality gates, coverage thresholds, test requirements |
+| `WORKFLOW` | Process, CI, and phase-gating rules |
 
-Guards on agent behavior, tool use, and process adherence.
-
-### 8.2 CODING
-
-```
-CODING[N]{id,language,scope,pattern,effect,fix_hint,severity}:
-```
-
-Additional columns:
-- `language` — programming language (`Python`, `TypeScript`, `Go`, etc.)
-- `scope` — `project`, `module`, `file`, `function`
-- `pattern` — code pattern or description to match
-- `fix_hint` — what to do instead
-- `severity` — `info`, `warning`, `error`
-
-### 8.3 SECURITY
-
-```
-SECURITY[N]{id,risk_level,data_type,trigger,effect,response}:
-```
-
-Additional columns:
-- `risk_level` — `low`, `medium`, `high`, `critical`
-- `data_type` — `secret`, `pii`, `key`, `token`, `credential`
-- `response` — `abort`, `redact`, `warn`, `notify`
-
-### 8.4 TESTING
-
-```
-TESTING[N]{id,effect,target,threshold,action,message}:
-```
-
-Additional columns:
-- `target` — `unit`, `integration`, `e2e`, `coverage`
-- `threshold` — quantitative gate (e.g., `>=80%`)
-- `action` — `enforce`, `recommend`
-
-### 8.5 WORKFLOW
-
-```
-WORKFLOW[N]{id,effect,phase,actor,condition,message}:
-```
-
-Additional columns:
-- `phase` — `planning`, `coding`, `review`, `deploy`
-- `actor` — `orchestrator`, `agent`, `reviewer`, `ci`
+Category-specific semantics (language, risk level, threshold, etc.) are encoded in the `instruction` and `trigger` fields rather than as separate columns. This keeps the schema universal and parsing trivial.
 
 ## 9. Alternative Serializations
 
@@ -180,22 +173,21 @@ Reference implementation: [zenprocess/cacp](https://github.com/zenprocess/cacp).
 
 ## 10. Pressure Zones
 
-Context window pressure determines how aggressively rules are compressed. Tools SHOULD implement pressure-aware compilation using the following graduated zones:
+Context window pressure determines which S/D rows are loaded. Tools SHOULD implement pressure-aware loading using the following graduated zones:
 
 | Zone | Context Usage | Behavior |
 |------|--------------|----------|
-| FRESH | 0-40% | All sections, all columns, full messages |
-| MODERATE | 40-70% | Drop `message` column, drop rules with `inform` effect |
-| DEPLETED | 70-90% | Only `critical` and `high` priority rules retained |
-| CRITICAL | 90%+ | Safety floor only: `critical` priority + `forbid` effect |
+| FRESH | 0-40% | S + D rows for all matched rules |
+| MODERATE | 40-70% | S rows for all, D rows for high-relevance only |
+| DEPLETED | 70-90% | S rows only |
+| CRITICAL | 90%+ | S rows for `critical` + `forbid` only |
 
 **Rules:**
 - Zone boundaries are computed as `estimated_task_tokens / model_context_window`.
-- The safety floor (critical + forbid) MUST never be dropped regardless of pressure.
-- Within each zone, the drop order for effects is: `inform` first, then `discourage`, `prefer`, `allow`, `forbid` last.
-- Within each zone, the drop order for priorities is: `low` first, then `medium`, `high`, `critical` last.
+- The safety floor (S rows with `forbid` effect on critical rules) MUST never be dropped regardless of pressure.
+- Within each zone, the drop order for effects is: `inform` first, then `prefer`, `require`, `forbid` last.
+- D rows are always dropped before S rows of the same rule.
 - Tools SHOULD report dropped rules and their reasons in a budget report.
-- Tools MAY truncate `message` fields before dropping entire rules.
 
 ## 11. Conflict Resolution
 
@@ -216,12 +208,14 @@ When multiple rules match the same trigger or context, conflicts are resolved us
 ### 11.3 Example
 
 ```
-GOVERNANCE[2]{id,effect,priority,domain,trigger,message}:
-no-force-push,forbid,critical,Git,push --force,Rewrites remote history
-allow-force-lease,allow,high,Git,push --force-with-lease,Safe alternative
+GOVERNANCE[4]{id,level,effect,instruction,trigger}:
+no-force-push,S,forbid,Never git push --force,Bash
+no-force-push,D,forbid,Safe: git push --force-with-lease for history correction,push --force
+allow-force-lease,S,prefer,Use --force-with-lease when rewriting remote history,Git push
+allow-force-lease,D,inform,Only after confirming no shared commits will be lost,push --force-with-lease
 ```
 
-Resolution: `no-force-push` wins on `push --force` (critical > high). `allow-force-lease` applies only to the more specific `push --force-with-lease` trigger.
+Resolution: `no-force-push` wins on `push --force` (forbid > prefer). `allow-force-lease` applies only to the more specific `push --force-with-lease` trigger.
 
 ## 12. Source Format
 
@@ -389,11 +383,15 @@ pip install -e ".[dev]",Dev environment setup
 PYTHONPATH=src pytest tests/,Run tests
 zd dispatch --issue 1234,Dispatch a task
 
-CODING[4]{id,language,effect,pattern,fix_hint,severity}:
-type-hints,Python,prefer,function definition,Add type hints to all signatures,warning
-pydantic-models,Python,prefer,data structures,Use Pydantic v2 BaseModel not raw dicts,warning
-async-io,Python,prefer,I/O operations,Use async def for all I/O,warning
-structlog-only,Python,forbid,print(),Use structlog for logging,error
+CODING[8]{id,level,effect,instruction,trigger}:
+type-hints,S,require,Add type hints to all function signatures,Python function def
+type-hints,D,require,Return types and parameter types on every def,*.py
+pydantic-models,S,require,Use Pydantic v2 BaseModel for all data structures,Python
+pydantic-models,D,forbid,No raw dicts for structured data,dict literal
+async-io,S,require,Use async def for all I/O operations,Python I/O
+async-io,D,require,subprocess + file + network calls must be async,sync I/O call
+structlog-only,S,forbid,No print() — use structlog for all logging,Python
+structlog-only,D,forbid,Replace print/logging.info with structlog bound logger,print() in *.py
 ```
 
 ## 14. File Extension
@@ -473,4 +471,4 @@ An MCP server exposing Axiom resources declares them as standard MCP resources:
 
 ## 17. Versioning
 
-This specification is versioned using semantic versioning. The current version is `0.4.0`. The version is not embedded in the file format; it is tracked by the specification document.
+This specification is versioned using semantic versioning. The current version is `0.5.0`. The version is not embedded in the file format; it is tracked by the specification document.

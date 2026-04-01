@@ -1,0 +1,149 @@
+```python
+"""User management data models with validation and database integration."""
+
+from typing import List, Optional
+from datetime import datetime
+import os
+import structlog
+import httpx
+from pydantic import BaseModel, EmailStr, validator, Field
+
+log = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    id: int = Field(..., ge=1, description="Unique identifier for the permission")
+    name: str = Field(..., min_length=1, max_length=50, description="Permission name")
+    description: Optional[str] = Field(None, max_length=200, description="Permission description")
+
+    class Config:
+        extra = "forbid"
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+    id: int = Field(..., ge=1, description="Unique identifier for the role")
+    name: str = Field(..., min_length=1, max_length=50, description="Role name")
+    permissions: List[Permission] = Field(default_factory=list, description="List of permissions assigned to this role")
+    description: Optional[str] = Field(None, max_length=200, description="Role description")
+
+    @validator('name')
+    def name_must_be_valid(cls, v):
+        """Validate role name format."""
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Role name must contain only alphanumeric characters and underscores')
+        return v
+
+    class Config:
+        extra = "forbid"
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int = Field(..., ge=1, description="Unique identifier for the user")
+    email: EmailStr = Field(..., description="User's email address")
+    username: str = Field(..., min_length=3, max_length=30, description="User's username")
+    full_name: Optional[str] = Field(None, max_length=100, description="User's full name")
+    role: Role = Field(..., description="User's role")
+    is_active: bool = Field(default=True, description="Whether the user is active")
+    created_at: Optional[datetime] = Field(None, description="When the user was created")
+    updated_at: Optional[datetime] = Field(None, description="When the user was last updated")
+
+    @validator('username')
+    def username_must_be_valid(cls, v):
+        """Validate username format."""
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username must contain only alphanumeric characters and underscores')
+        return v
+
+    class Config:
+        extra = "forbid"
+
+
+class UserListResponse(BaseModel):
+    """Response model for user list."""
+    users: List[User] = Field(..., description="List of users")
+    total: int = Field(..., ge=0, description="Total number of users")
+    page: int = Field(..., ge=1, description="Current page number")
+    page_size: int = Field(..., ge=1, le=100, description="Number of users per page")
+
+
+async def fetch_users(database_url: str, page: int = 1, page_size: int = 20) -> UserListResponse:
+    """
+    Fetch users from a database API endpoint.
+
+    Args:
+        database_url: Base URL of the database API (e.g., 'https://api.example.com/users')
+        page: Page number (default: 1)
+        page_size: Number of results per page (default: 20)
+
+    Returns:
+        UserListResponse containing paginated users
+
+    Raises:
+        ValueError: If page or page_size are invalid
+        httpx.HTTPError: If the HTTP request fails
+        Exception: For unexpected errors during processing
+    """
+    # Validate pagination parameters
+    if page < 1:
+        raise ValueError("Page number must be at least 1")
+    if not (1 <= page_size <= 100):
+        raise ValueError("Page size must be between 1 and 100")
+
+    # Construct URL with pagination parameters
+    url = f"{database_url.rstrip('/')}/?page={page}&page_size={page_size}"
+
+    try:
+        log.info("fetching_users", url=url, page=page, page_size=page_size)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            
+            data = response.json()
+            # Parse users from response
+            users = [User(**user_data) for user_data in data.get("results", data.get("users", []))]
+            total = data.get("count", data.get("total", len(users)))
+            
+            return UserListResponse(
+                users=users,
+                total=total,
+                page=page,
+                page_size=page_size
+            )
+            
+    except httpx.HTTPError as e:
+        log.error("http_error", url=url, error=str(e))
+        raise
+    except Exception as e:
+        log.error("unexpected_error", url=url, error=str(e))
+        raise
+```
+
+This module implements:
+
+1. **Permission model** with ID, name, and description validation
+2. **Role model** with name validation (alphanumeric and underscores only) and permission list
+3. **User model** with:
+   - Email validation using `EmailStr`
+   - Username validation (alphanumeric and underscores)
+   - Required role association
+   - Timestamp fields for created/updated times
+4. **UserListResponse model** for paginated results
+5. **fetch_users function** that:
+   - Uses async I/O as required
+   - Validates pagination parameters
+   - Handles HTTP errors properly with logging
+   - Uses structlog for structured logging
+   - Returns validated User objects
+   - Includes proper error handling and documentation
+
+The module follows all the specified rules:
+- Uses Pydantic models for data structures
+- Uses structlog for logging
+- Uses async I/O for database operations
+- Includes type hints and docstrings
+- Validates all input data
+- Avoids hardcoded secrets (database_url is passed as parameter)
+- Includes proper error handling for external API calls

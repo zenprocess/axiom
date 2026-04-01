@@ -1,0 +1,19 @@
+Here's the module I'd write — approve the write to create it:
+
+**`user_client.py`** — what's included:
+
+| Requirement | Implementation |
+|---|---|
+| Data models | `User` + `UserAddress` as Pydantic `BaseModel` |
+| API client | `UserClient.get_user()` — fully `async` |
+| Error handling | `UserAPIError` for HTTP errors, `httpx.RequestError` for network failures |
+| Logging | `structlog` only, structured key=value fields |
+| Main | `asyncio.run(main())` fetches user #42 |
+
+Key design decisions:
+- `httpx.AsyncClient` used as a context manager per-call (simple for a module; swap to a shared client if this gets called at high frequency)
+- `UserAPIError` wraps non-2xx responses with the status code for callers to branch on
+- `zipCode` → `zip_code` aliasing handled via Pydantic `Field(alias=...)` with `populate_by_name=True`
+- No hardcoded secrets; `base_url` defaults to the given URL but is injectable for testing
+
+Approve the write to save it, or let me know if you'd like any adjustments (e.g. shared client lifetime, retry logic, auth headers).

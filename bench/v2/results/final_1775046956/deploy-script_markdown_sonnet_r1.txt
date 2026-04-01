@@ -1,0 +1,255 @@
+It looks like write permissions aren't granted. Here's the full content for both files — you can create them manually or re-run with write permissions allowed.
+
+---
+
+**`Dockerfile`** (multi-stage, non-root user):
+
+```dockerfile
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir hatchling
+
+COPY pyproject.toml README.md ./
+COPY axiom/ ./axiom/
+
+RUN pip install --no-cache-dir .
+
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /app /app
+
+RUN useradd --no-create-home --shell /bin/false appuser
+USER appuser
+
+LABEL org.opencontainers.image.title="axiom-rdl" \
+      org.opencontainers.image.description="A compact Rule Definition Language for AI coding agents" \
+      org.opencontainers.image.source="https://github.com/zenprocess/axiom"
+```
+
+---
+
+**`deploy.sh`**:
+
+```bash
+#!/usr/bin/env bash
+# deploy.sh — Build, push, tag, deploy, and rollback for axiom-rdl
+# Usage: ./deploy.sh [--rollback [TAG]]
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Configuration (override via environment variables)
+# ---------------------------------------------------------------------------
+APP_NAME="${APP_NAME:-axiom-rdl}"
+REGISTRY="${REGISTRY:-ghcr.io/zenprocess}"
+PRODUCTION_HOST="${PRODUCTION_HOST:-}"          # e.g. user@prod.example.com
+PRODUCTION_DIR="${PRODUCTION_DIR:-/opt/axiom}"  # remote deploy directory
+SSH_KEY="${SSH_KEY:-}"                           # path to SSH key (optional)
+DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
+
+PROJECT_VERSION="$(grep '^version' pyproject.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')"
+IMAGE="${REGISTRY}/${APP_NAME}"
+GIT_SHA="$(git rev-parse --short HEAD)"
+TIMESTAMP="$(date +%Y%m%d%H%M%S)"
+
+# ---------------------------------------------------------------------------
+# Logging helpers
+# ---------------------------------------------------------------------------
+log()  { echo "[$(date +%H:%M:%S)] $*"; }
+info() { log "INFO  $*"; }
+warn() { log "WARN  $*"; }
+die()  { log "ERROR $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Prerequisite checks
+# ---------------------------------------------------------------------------
+check_deps() {
+    local missing=()
+    for cmd in docker git; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    [[ ${#missing[@]} -eq 0 ]] || die "Missing required tools: ${missing[*]}"
+    [[ -f pyproject.toml ]] || die "Must be run from the project root"
+    [[ -n "${REGISTRY}" ]]  || die "REGISTRY is not set"
+}
+
+# ---------------------------------------------------------------------------
+# Step 1: Build Docker image
+# ---------------------------------------------------------------------------
+build_image() {
+    local tag="${IMAGE}:${PROJECT_VERSION}"
+    info "Building image: ${tag}"
+    docker build \
+        --platform "${DOCKER_PLATFORM}" \
+        --label "git.sha=${GIT_SHA}" \
+        --label "build.timestamp=${TIMESTAMP}" \
+        -t "${tag}" \
+        -t "${IMAGE}:${GIT_SHA}" \
+        -t "${IMAGE}:latest" \
+        .
+    info "Image built: ${tag} (also tagged :${GIT_SHA} and :latest)"
+}
+
+# ---------------------------------------------------------------------------
+# Step 2: Push to registry
+# ---------------------------------------------------------------------------
+push_image() {
+    info "Pushing to registry..."
+    docker push "${IMAGE}:${PROJECT_VERSION}"
+    docker push "${IMAGE}:${GIT_SHA}"
+    docker push "${IMAGE}:latest"
+    info "Push complete"
+}
+
+# ---------------------------------------------------------------------------
+# Step 3: Create and push git tag
+# ---------------------------------------------------------------------------
+tag_release() {
+    local version_tag="v${PROJECT_VERSION}"
+    if git rev-parse "${version_tag}" &>/dev/null; then
+        warn "Git tag ${version_tag} already exists — skipping"
+        return
+    fi
+    info "Creating git tag: ${version_tag}"
+    git tag -a "${version_tag}" -m "Release ${version_tag} (sha: ${GIT_SHA})"
+    if git remote get-url origin &>/dev/null; then
+        git push origin "${version_tag}"
+        info "Pushed tag ${version_tag} to origin"
+    else
+        warn "No remote 'origin' — tag created locally only"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Step 4: Deploy to production
+# ---------------------------------------------------------------------------
+deploy_to_production() {
+    local image_tag="${IMAGE}:${PROJECT_VERSION}"
+    if [[ -z "${PRODUCTION_HOST}" ]]; then
+        warn "PRODUCTION_HOST not set — skipping remote deploy"
+        info "To deploy manually:"
+        echo "    docker pull ${image_tag}"
+        echo "    docker stop axiom 2>/dev/null || true"
+        echo "    docker run -d --name axiom --restart unless-stopped ${image_tag}"
+        return
+    fi
+
+    local ssh_opts=(-o StrictHostKeyChecking=no -o BatchMode=yes)
+    [[ -n "${SSH_KEY}" ]] && ssh_opts+=(-i "${SSH_KEY}")
+
+    info "Deploying ${image_tag} to ${PRODUCTION_HOST}:${PRODUCTION_DIR}"
+    ssh "${ssh_opts[@]}" "${PRODUCTION_HOST}" bash <<EOF
+set -euo pipefail
+mkdir -p ${PRODUCTION_DIR}
+cd ${PRODUCTION_DIR}
+# Record current image for rollback
+if docker inspect axiom &>/dev/null 2>&1; then
+    docker inspect axiom --format '{{index .Config.Image}}' > previous_image.txt || true
+fi
+docker pull ${image_tag}
+docker stop axiom 2>/dev/null || true
+docker rm   axiom 2>/dev/null || true
+docker run -d \
+    --name axiom \
+    --restart unless-stopped \
+    --label "deployed.at=${TIMESTAMP}" \
+    --label "deployed.sha=${GIT_SHA}" \
+    ${image_tag}
+echo "${image_tag}" > current_image.txt
+EOF
+    info "Deployment successful"
+}
+
+# ---------------------------------------------------------------------------
+# Rollback
+# ---------------------------------------------------------------------------
+rollback() {
+    local target_tag="${1:-}"
+    [[ -n "${PRODUCTION_HOST}" ]] || die "PRODUCTION_HOST not set — cannot rollback"
+
+    local ssh_opts=(-o StrictHostKeyChecking=no -o BatchMode=yes)
+    [[ -n "${SSH_KEY}" ]] && ssh_opts+=(-i "${SSH_KEY}")
+
+    info "Initiating rollback on ${PRODUCTION_HOST}..."
+    ssh "${ssh_opts[@]}" "${PRODUCTION_HOST}" bash <<EOF
+set -euo pipefail
+cd ${PRODUCTION_DIR}
+if [[ -n "${target_tag}" ]]; then
+    ROLLBACK_IMAGE="${target_tag}"
+elif [[ -f previous_image.txt ]]; then
+    ROLLBACK_IMAGE="\$(cat previous_image.txt)"
+else
+    echo "ERROR: No previous image recorded and no target tag given" >&2
+    exit 1
+fi
+echo "Rolling back to: \${ROLLBACK_IMAGE}"
+docker pull "\${ROLLBACK_IMAGE}"
+docker stop axiom 2>/dev/null || true
+docker rm   axiom 2>/dev/null || true
+docker run -d --name axiom --restart unless-stopped "\${ROLLBACK_IMAGE}"
+EOF
+    info "Rollback complete"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+usage() {
+    cat <<EOF
+Usage: $0 [OPTIONS]
+
+  (no flags)         Full deploy: build → push → tag → deploy
+  --rollback [TAG]   Roll back to TAG, or to the previously recorded image
+  --build-only       Build locally, do not push or deploy
+  --list-tags        List available release tags
+  -h, --help         Show this help
+
+Environment variables:
+  REGISTRY           Docker registry prefix  (default: ghcr.io/zenprocess)
+  APP_NAME           Application name        (default: axiom-rdl)
+  PRODUCTION_HOST    SSH target              (e.g. user@prod.example.com)
+  PRODUCTION_DIR     Remote deploy dir       (default: /opt/axiom)
+  SSH_KEY            Path to SSH key
+  DOCKER_PLATFORM    Build platform          (default: linux/amd64)
+EOF
+}
+
+main() {
+    check_deps
+    case "${1:-}" in
+        --rollback)   rollback "${2:-}" ;;
+        --build-only) build_image ;;
+        --list-tags)  git tag --list 'v*' --sort=-version:refname | head -10 ;;
+        -h|--help)    usage ;;
+        "")
+            info "Deploying ${APP_NAME} v${PROJECT_VERSION} (${GIT_SHA})"
+            build_image
+            push_image
+            tag_release
+            deploy_to_production
+            info "Done. Version ${PROJECT_VERSION} is live."
+            ;;
+        *) die "Unknown option: ${1}. Run '$0 --help' for usage." ;;
+    esac
+}
+
+main "$@"
+```
+
+---
+
+After saving, make it executable: `chmod +x deploy.sh`
+
+**Key design decisions:**
+
+- **Three image tags per deploy**: `:0.6.0` (semver), `:abc1234` (git SHA for traceability), `:latest`
+- **Rollback mechanism**: before replacing the container, the current image is saved to `previous_image.txt` on the host. `--rollback` with no arg restores it; `--rollback ghcr.io/zenprocess/axiom-rdl:v0.5.0` targets a specific version
+- **Git tag**: skips silently if the tag already exists (idempotent re-runs)
+- **`PRODUCTION_HOST` is optional**: if unset, the deploy step prints the manual commands instead of failing
+- **`set -euo pipefail`**: any step failure aborts immediately

@@ -1,0 +1,103 @@
+```python
+"""User management system data models and database fetching utilities."""
+
+from typing import List, Optional
+from datetime import datetime
+from enum import Enum
+import os
+import httpx
+import structlog
+from pydantic import BaseModel, Field, validator, EmailStr
+
+log = structlog.get_logger()
+
+
+class Permission(Enum):
+    """Available permissions in the system."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Role(BaseModel):
+    """Role model with associated permissions."""
+    name: str = Field(..., min_length=1, max_length=50)
+    permissions: List[Permission]
+    description: Optional[str] = Field(default=None, max_length=255)
+
+    class Config:
+        use_enum_values = True
+
+    @validator('permissions')
+    def validate_permissions(cls, v):
+        """Ensure at least one permission is assigned."""
+        if not v:
+            raise ValueError('A role must have at least one permission')
+        return v
+
+
+class User(BaseModel):
+    """User model with validation and serialization."""
+    id: int = Field(..., ge=1)
+    username: str = Field(..., min_length=3, max_length=32, pattern=r'^[a-zA-Z0-9_]+$')
+    email: EmailStr
+    role: Role
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        use_enum_values = True
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat() if dt else None,
+            Role: lambda role: role.dict() if role else None
+        }
+
+    def dict(self, *args, **kwargs):
+        """Override dict() to include enum values in serialization."""
+        data = super().dict(*args, **kwargs)
+        # Ensure role is serialized correctly
+        if 'role' in data and isinstance(data['role'], dict):
+            data['role'] = data['role']
+        return data
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database API endpoint.
+
+    Args:
+        database_url: URL of the users API endpoint
+
+    Returns:
+        List of User objects
+
+    Raises:
+        ValueError: If the URL is invalid or response is malformed
+        RuntimeError: If the API request fails
+    """
+    if not database_url or not database_url.startswith(('http://', 'https://')):
+        raise ValueError('Invalid database URL provided')
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            users_data = response.json()
+            
+            if not isinstance(users_data, list):
+                raise ValueError('Expected a list of users from the API')
+            
+            return [User(**user_data) for user_data in users_data]
+    
+    except httpx.RequestError as e:
+        log.error('database_fetch_failed', url=database_url, error=str(e))
+        raise RuntimeError(f'Failed to fetch users from database: {e}') from e
+    except httpx.HTTPStatusError as e:
+        log.error('database_fetch_failed', url=database_url, status_code=e.response.status_code, error=str(e))
+        raise RuntimeError(f'API returned error status {e.response.status_code}') from e
+    except Exception as e:
+        log.error('unexpected_error_during_fetch', url=database_url, error=str(e))
+        raise
+```

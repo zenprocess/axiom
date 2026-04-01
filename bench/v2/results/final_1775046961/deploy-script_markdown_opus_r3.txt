@@ -1,0 +1,24 @@
+It looks like write permissions need to be granted. Could you approve the file writes? I'm creating two files:
+
+1. **`Dockerfile`** — Multi-stage build for the `axiom-rdl` Python package
+2. **`deploy.sh`** — The deployment script with these features:
+
+**Normal deploy** (`./deploy.sh`):
+- Reads version from `pyproject.toml` automatically (or use `--tag`)
+- Builds & tags Docker image (versioned + `latest`)
+- Pushes to registry (defaults to `ghcr.io/zenprocess`, override with `--registry` or `$DEPLOY_REGISTRY`)
+- Creates annotated git tag and pushes it
+- Deploys via `kubectl set image` with rollout status check
+
+**Rollback** (`./deploy.sh --rollback [TAG]`):
+- No tag = auto-detects previous git tag
+- Specific tag = `./deploy.sh --rollback 0.5.0`
+- Points the deployment back to the older image
+
+**Safety guards**:
+- Refuses to deploy with a dirty working tree
+- Refuses to re-deploy an existing git tag
+- Requires interactive confirmation for production
+- `--dry-run` mode prints commands without executing
+- `--skip-build` to redeploy an existing image
+- `set -euo pipefail` for strict error handling

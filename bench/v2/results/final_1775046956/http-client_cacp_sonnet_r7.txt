@@ -1,0 +1,23 @@
+Here's the module — you can create it manually or grant write permission. Key design decisions:
+
+**Data models** (`user_client.py`):
+- `UserResponse` — top-level Pydantic model with all common user fields; optional ones default to `None`
+- `Address` — nested model for the address sub-object
+- `UserAPIError` — typed exception for all API failures
+
+**`UserClient.fetch_user`** (`async`, as required for I/O):
+- Uses `httpx.AsyncClient` for the HTTP call
+- Separates HTTP errors (`HTTPStatusError`) from network errors (`RequestError`) so callers get actionable messages
+- Validates the JSON body via `UserResponse.model_validate()`; raises `UserAPIError` if the shape is wrong
+- Logs with `structlog` at each failure point and on success
+
+**`main()`**:
+- `async def`, runs under `asyncio.run()` in `__main__`
+- Fetches user 42, logs `user_id / name / email`
+
+Dependencies needed:
+```
+httpx
+structlog
+pydantic
+```

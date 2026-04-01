@@ -1,0 +1,243 @@
+```python
+#!/usr/bin/env python3
+"""
+CSV filter CLI tool.
+
+Filters rows in a CSV file based on a column value and outputs the results.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import structlog
+
+# Initialize structlog
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(level="INFO"),
+)
+logger = structlog.get_logger()
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("input_file", type=str, help="Input CSV file path")
+    parser.add_argument(
+        "-c", "--column", required=True, type=str, help="Column name to filter on"
+    )
+    parser.add_argument(
+        "-v", "--value", required=True, type=str, help="Value to match in the column"
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        help="Output file path (default: stdout)",
+    )
+    parser.add_argument(
+        "-d",
+        "--delimiter",
+        type=str,
+        default=",",
+        help="CSV delimiter (default: ',')",
+    )
+    parser.add_argument(
+        "-q",
+        "--quotechar",
+        type=str,
+        default='"',
+        help="Quote character (default: '\"')",
+    )
+    parser.add_argument(
+        "-l",
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Logging level (default: INFO)",
+    )
+    return parser.parse_args()
+
+
+def read_csv_file(
+    file_path: Path,
+    delimiter: str = ",",
+    quotechar: str = '"',
+) -> Tuple[List[str], List[dict]]:
+    """
+    Read CSV file and return headers and rows.
+
+    Args:
+        file_path: Path to the CSV file.
+        delimiter: Field separator.
+        quotechar: Character used for quoting fields.
+
+    Returns:
+        Tuple of (headers, rows as list of dicts).
+
+    Raises:
+        FileNotFoundError: If file does not exist.
+        ValueError: If file is empty or missing headers.
+    """
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    try:
+        with file_path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(
+                f, delimiter=delimiter, quotechar=quotechar
+            )
+            if not reader.fieldnames:
+                raise ValueError("CSV file has no header row.")
+            headers = reader.fieldnames
+            rows = list(reader)
+            return headers, rows
+    except csv.Error as e:
+        raise ValueError(f"Error parsing CSV: {e}")
+
+
+def filter_rows(
+    rows: List[dict], column: str, value: str
+) -> Tuple[List[dict], int]:
+    """
+    Filter rows where the specified column matches the given value.
+
+    Args:
+        rows: List of row dictionaries.
+        column: Column name to filter on.
+        value: Value to match.
+
+    Returns:
+        Tuple of (filtered_rows, matched_count).
+    """
+    matched_count = 0
+    filtered = []
+    for row in rows:
+        if row.get(column, "") == value:
+            filtered.append(row)
+            matched_count += 1
+    return filtered, matched_count
+
+
+def write_csv_output(
+    headers: List[str],
+    rows: List[dict],
+    output_path: Optional[Path] = None,
+    delimiter: str = ",",
+    quotechar: str = '"',
+) -> None:
+    """
+    Write filtered CSV data to stdout or file.
+
+    Args:
+        headers: Column names.
+        rows: Filtered rows.
+        output_path: Output file path (None for stdout).
+        delimiter: Field separator.
+        quotechar: Quote character.
+    """
+    try:
+        if output_path:
+            with output_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=headers,
+                    delimiter=delimiter,
+                    quotechar=quotechar,
+                    quoting=csv.QUOTE_MINIMAL,
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+        else:
+            writer = csv.DictWriter(
+                sys.stdout,
+                fieldnames=headers,
+                delimiter=delimiter,
+                quotechar=quotechar,
+                quoting=csv.QUOTE_MINIMAL,
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+    except IOError as e:
+        logger.error("Failed to write output", error=str(e))
+        sys.exit(1)
+
+
+def main() -> None:
+    """Main entry point."""
+    args = parse_args()
+
+    # Set log level
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(
+            level=args.log_level
+        ),
+    )
+    logger = structlog.get_logger()
+
+    # Resolve paths
+    input_path = Path(args.input_file)
+    output_path = Path(args.output) if args.output else None
+
+    # Validate input file
+    if not input_path.exists():
+        logger.error("Input file not found", file=str(input_path))
+        sys.exit(1)
+
+    logger.info("Reading CSV file", file=str(input_path))
+
+    try:
+        headers, rows = read_csv_file(
+            input_path,
+            delimiter=args.delimiter,
+            quotechar=args.quotechar,
+        )
+        logger.info("CSV file read", rows_count=len(rows))
+    except (FileNotFoundError, ValueError) as e:
+        logger.error("Failed to read CSV file", error=str(e))
+        sys.exit(1)
+
+    logger.info(
+        "Filtering rows",
+        column=args.column,
+        value=args.value,
+    )
+
+    # Filter rows
+    try:
+        filtered_rows, matched_count = filter_rows(
+            rows, args.column, args.value
+        )
+        logger.info(
+            "Filtering complete",
+            matched_count=matched_count,
+            total_rows=len(rows),
+        )
+    except Exception as e:
+        logger.error("Failed to filter rows", error=str(e))
+        sys.exit(1)
+
+    # Write output
+    logger.info("Writing output")
+    try:
+        write_csv_output(
+            headers,
+            filtered_rows,
+            output_path,
+            delimiter=args.delimiter,
+            quotechar=args.quotechar,
+        )
+        logger.info("Output written successfully")
+    except Exception as e:
+        logger.error("Failed to write output", error=str(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+```

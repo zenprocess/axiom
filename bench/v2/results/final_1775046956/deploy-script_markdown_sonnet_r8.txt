@@ -1,0 +1,171 @@
+Here's the deployment script — you can create it yourself or approve the write:
+
+```bash
+#!/usr/bin/env bash
+# deploy.sh — build, tag, push, and deploy axiom-rdl
+# Usage:
+#   ./deploy.sh [VERSION]          # deploy VERSION (e.g. 1.2.3)
+#   ./deploy.sh rollback [VERSION] # rollback to a previous tag
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Configuration — override via environment variables
+# ---------------------------------------------------------------------------
+REGISTRY="${REGISTRY:-ghcr.io}"
+IMAGE_NAME="${IMAGE_NAME:-zenprocess/axiom}"
+DEPLOY_HOST="${DEPLOY_HOST:?DEPLOY_HOST must be set}"
+DEPLOY_USER="${DEPLOY_USER:-deploy}"
+DEPLOY_PATH="${DEPLOY_PATH:-/opt/axiom}"
+COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
+ROLLBACK_LIMIT="${ROLLBACK_LIMIT:-5}"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+log()  { echo "[$(date -u +%H:%M:%SZ)] $*"; }
+die()  { echo "ERROR: $*" >&2; exit 1; }
+ssh_prod() { ssh "${DEPLOY_USER}@${DEPLOY_HOST}" "$@"; }
+
+require() {
+    for cmd in "$@"; do
+        command -v "$cmd" &>/dev/null || die "Required command not found: $cmd"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Resolve version from arg or pyproject.toml
+# ---------------------------------------------------------------------------
+resolve_version() {
+    if [[ -n "${1:-}" ]]; then
+        echo "$1"
+    else
+        grep -m1 '^version' pyproject.toml | sed 's/.*= *"\(.*\)"/\1/'
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------------
+step_build() {
+    local version="$1"
+    local full_image="${REGISTRY}/${IMAGE_NAME}:${version}"
+    local latest_image="${REGISTRY}/${IMAGE_NAME}:latest"
+
+    log "Building Docker image ${full_image}"
+    docker build \
+        --build-arg VERSION="${version}" \
+        --label "org.opencontainers.image.version=${version}" \
+        --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+        --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        -t "${full_image}" \
+        -t "${latest_image}" \
+        .
+}
+
+step_push() {
+    local version="$1"
+    log "Pushing ${REGISTRY}/${IMAGE_NAME}:${version}"
+    docker push "${REGISTRY}/${IMAGE_NAME}:${version}"
+    docker push "${REGISTRY}/${IMAGE_NAME}:latest"
+}
+
+step_tag_git() {
+    local tag="v${1}"
+    if git rev-parse "${tag}" &>/dev/null; then
+        log "Git tag ${tag} already exists — skipping"
+        return
+    fi
+    log "Creating git tag ${tag}"
+    git tag -a "${tag}" -m "Release ${tag}"
+    git push origin "${tag}"
+}
+
+step_deploy() {
+    local version="$1"
+    local full_image="${REGISTRY}/${IMAGE_NAME}:${version}"
+
+    log "Deploying ${full_image} to ${DEPLOY_HOST}"
+    ssh_prod bash -euo pipefail << REMOTE
+        cd "${DEPLOY_PATH}"
+        docker pull "${full_image}"
+        IMAGE_TAG="${version}" docker compose -f "${COMPOSE_FILE}" up -d --no-deps app
+
+        for i in \$(seq 1 12); do
+            if docker compose -f "${COMPOSE_FILE}" ps app | grep -q "healthy\|running"; then
+                echo "Service is up after \$((i * 5))s"
+                exit 0
+            fi
+            sleep 5
+        done
+        echo "Service did not become healthy in time" >&2
+        exit 1
+REMOTE
+    log "Deployment successful: ${version}"
+}
+
+step_rollback() {
+    local version="$1"
+    local full_image="${REGISTRY}/${IMAGE_NAME}:${version}"
+    log "Rolling back to ${version} on ${DEPLOY_HOST}"
+    ssh_prod bash -euo pipefail << REMOTE
+        cd "${DEPLOY_PATH}"
+        docker pull "${full_image}"
+        IMAGE_TAG="${version}" docker compose -f "${COMPOSE_FILE}" up -d --no-deps app
+        echo "Rollback to ${version} complete"
+REMOTE
+}
+
+save_deploy_state() {
+    local state_file=".deploy_history"
+    { echo "$1"; [[ -f "${state_file}" ]] && head -n $((ROLLBACK_LIMIT - 1)) "${state_file}"; } \
+        > "${state_file}.tmp"
+    mv "${state_file}.tmp" "${state_file}"
+}
+
+last_deployed_version() {
+    [[ -f ".deploy_history" ]] && sed -n '2p' ".deploy_history" || echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+    require docker git ssh
+
+    case "${1:-deploy}" in
+        rollback)
+            local target="${2:-$(last_deployed_version)}"
+            [[ -n "${target}" ]] || die "No rollback target. Pass a version: ./deploy.sh rollback 1.2.0"
+            step_rollback "${target}"
+            ;;
+        deploy)
+            local version
+            version="$(resolve_version "${2:-}")"
+            [[ -n "${version}" ]] || die "Could not determine version"
+            log "Deploying axiom-rdl v${version}"
+            step_build   "${version}"
+            step_push    "${version}"
+            step_tag_git "${version}"
+            step_deploy  "${version}"
+            save_deploy_state "${version}"
+            log "Done."
+            ;;
+        *)
+            die "Usage: ./deploy.sh [deploy [VERSION]] | rollback [VERSION]"
+            ;;
+    esac
+}
+
+main "$@"
+```
+
+**Key design decisions:**
+
+- **Version source**: reads from `pyproject.toml` automatically if no arg given, or override with `./deploy.sh 1.2.3`
+- **Rollback**: tracks deploy history in `.deploy_history` (newest first). `./deploy.sh rollback` uses the previous version; `./deploy.sh rollback 0.5.0` targets a specific one
+- **Git tag**: skips silently if tag already exists (idempotent reruns)
+- **Health check**: polls `docker compose ps` for up to 60s before failing the deploy step — the SSH heredoc exits non-zero, which propagates back locally via `set -euo pipefail`
+- **Config via env**: `DEPLOY_HOST` is required and will fail fast; registry/user/path all have sane defaults you can override
+
+You'll still need a `Dockerfile` and `docker-compose.prod.yml` on the server — want me to write those too?

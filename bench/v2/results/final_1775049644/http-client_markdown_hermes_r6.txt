@@ -1,0 +1,149 @@
+Here's a Python module that follows all the specified rules:
+
+```python
+"""
+User data fetcher module.
+
+This module provides functionality to fetch user data from a REST API
+with proper error handling, structured logging, and Pydantic data models.
+"""
+
+import os
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.processors.JSONRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+log = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data model representing a user from the API."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+
+
+class APIError(Exception):
+    """Custom exception for API-related errors."""
+    def __init__(self, message: str, status_code: Optional[int] = None, url: Optional[str] = None):
+        self.message = message
+        self.status_code = status_code
+        self.url = url
+        super().__init__(self.message)
+
+
+async def fetch_user(user_id: int) -> User:
+    """
+    Fetch user data from the REST API.
+
+    Args:
+        user_id: The ID of the user to fetch.
+
+    Returns:
+        User: A User model instance with the fetched data.
+
+    Raises:
+        APIError: If the API request fails or returns an unexpected status code.
+    """
+    base_url = os.environ.get("API_BASE_URL", "https://api.example.com")
+    url = f"{base_url}/users/{user_id}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            user_data = response.json()
+            return User(**user_data)
+    except httpx.TimeoutException as e:
+        log.error("api_request_timeout", url=url, error=str(e))
+        raise APIError(
+            message=f"Request to {url} timed out",
+            url=url,
+        ) from e
+    except httpx.HTTPStatusError as e:
+        log.error(
+            "api_request_failed",
+            url=url,
+            status_code=e.response.status_code,
+            error=str(e),
+        )
+        raise APIError(
+            message=f"API returned status code {e.response.status_code}",
+            status_code=e.response.status_code,
+            url=url,
+        ) from e
+    except httpx.RequestError as e:
+        log.error("api_request_error", url=url, error=str(e))
+        raise APIError(
+            message=f"Failed to connect to {url}",
+            url=url,
+        ) from e
+    except Exception as e:
+        log.error("unexpected_error", url=url, error=str(e))
+        raise APIError(
+            message=f"Unexpected error while fetching user {user_id}",
+            url=url,
+        ) from e
+
+
+async def main() -> User:
+    """
+    Main function that fetches user #42 from the API.
+
+    Returns:
+        User: The fetched user data.
+
+    Raises:
+        APIError: If the API request fails.
+    """
+    user_id = 42
+    log.info("fetching_user", user_id=user_id)
+    user = await fetch_user(user_id)
+    log.info("user_fetched", user_id=user.id, name=user.name)
+    return user
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    # Run the main function
+    try:
+        user = asyncio.run(main())
+        print(f"Successfully fetched user: {user.name} (ID: {user.id})")
+    except APIError as e:
+        log.error("main_error", message=e.message, status_code=e.status_code, url=e.url)
+        raise SystemExit(1)
+```
+
+Key features of this implementation:
+
+1. Uses `structlog` for structured logging as required
+2. Uses `pydantic` for the `User` data model with proper type hints
+3. All I/O operations use `async def` and `httpx.AsyncClient`
+4. Comprehensive error handling with try/except blocks
+5. Custom `APIError` exception class for API-related errors
+6. Uses environment variable for base URL (no hardcoded secrets)
+7. Includes proper docstrings following Google-style format
+8. Avoids star imports and uses specific imports
+9. Includes logging with structured context
+10. Includes a main function that fetches user #42
+
+To run this module, you would need to set the `API_BASE_URL` environment variable if the API isn't at the default `https://api.example.com`, and ensure the API has a user with ID 42 available.

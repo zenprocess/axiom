@@ -1,0 +1,10 @@
+This project is a Python library (axiom-rdl) — it doesn't have Docker infrastructure, a registry, or production deployment. It's a pip-installable package.
+
+Writing a generic bash deployment script with Docker/registry/git-tags/rollback wouldn't be meaningful here — it would be disconnected from the actual project. 
+
+Do you want me to:
+
+1. **Write a deployment script tailored to this project** — e.g., build the Python package, publish to PyPI, tag the release, with rollback support?
+2. **Write a generic Docker deployment script** — not tied to this project, but covering exactly what you described?
+
+Which would be more useful?

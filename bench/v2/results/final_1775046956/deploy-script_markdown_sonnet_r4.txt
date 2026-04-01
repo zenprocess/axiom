@@ -1,0 +1,28 @@
+The script is ready. Once you approve the write, here's what it does:
+
+**Steps:**
+1. `step_build` — `docker build` with git metadata labels (SHA, branch, date)
+2. `step_push` — pushes both `:<version>` and `:latest` tags
+3. `step_git_tag` — creates + pushes an annotated git tag (version sourced from `pyproject.toml`, `VERSION` env var, or short SHA)
+4. `step_deploy` — SSHs to prod, writes `.env` with current tag, runs `docker compose up -d`, then waits up to 60s for a health check
+
+**Rollback:**
+- **Auto** — if any step after `step_deploy` starts fails, `trap ... ERR` fires `rollback()` which re-pulls and restarts the previous tag
+- **Manual** — `./deploy.sh rollback v1.2.3` to roll back to any specific tag
+
+**Usage:**
+```bash
+# Full deploy
+DEPLOY_HOST=user@prod.example.com ./deploy.sh
+
+# Override version
+VERSION=1.5.0 DEPLOY_HOST=user@prod.example.com ./deploy.sh
+
+# Manual rollback
+DEPLOY_HOST=user@prod.example.com ./deploy.sh rollback v1.4.2
+
+# Build only (no push/deploy)
+./deploy.sh build-only
+```
+
+**Required env vars:** `DEPLOY_HOST`. Optional: `REGISTRY`, `IMAGE_NAME`, `DEPLOY_DIR`, `DOCKER_COMPOSE_FILE`. No secrets are hardcoded — Docker registry auth is expected to be pre-configured via `docker login` or a credential helper.

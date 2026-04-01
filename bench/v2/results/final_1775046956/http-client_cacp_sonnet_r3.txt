@@ -1,0 +1,113 @@
+It seems write permissions aren't granted. Here's the complete module you can save as `user_client.py`:
+
+```python
+"""REST API client for fetching user data."""
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger(__name__)
+
+BASE_URL = "https://api.example.com"
+
+
+class UserAddress(BaseModel):
+    """Nested address model within a user response."""
+
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    """Represents a user returned by the REST API."""
+
+    id: int
+    name: str
+    email: str
+    address: UserAddress | None = None
+
+
+class UserFetchError(Exception):
+    """Raised when the user fetch operation fails."""
+
+
+class UserClient:
+    """Client for the /users REST API endpoint."""
+
+    def __init__(self, base_url: str = BASE_URL) -> None:
+        """Initialize the client with the given base URL."""
+        self._base_url = base_url
+
+    async def get_user(self, user_id: int) -> User:
+        """Fetch a single user by ID.
+
+        Args:
+            user_id: The integer ID of the user to retrieve.
+
+        Returns:
+            A User instance populated from the API response.
+
+        Raises:
+            UserFetchError: If the request fails or the response is invalid.
+        """
+        url = f"{self._base_url}/users/{user_id}"
+        logger = log.bind(user_id=user_id, url=url)
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "http_error_fetching_user",
+                status_code=exc.response.status_code,
+            )
+            raise UserFetchError(
+                f"HTTP {exc.response.status_code} fetching user {user_id}"
+            ) from exc
+        except httpx.RequestError as exc:
+            logger.error("request_error_fetching_user", error=str(exc))
+            raise UserFetchError(
+                f"Request failed for user {user_id}: {exc}"
+            ) from exc
+
+        try:
+            user = User.model_validate(response.json())
+        except Exception as exc:
+            logger.error("invalid_response_schema", error=str(exc))
+            raise UserFetchError(
+                f"Invalid response schema for user {user_id}: {exc}"
+            ) from exc
+
+        logger.info("user_fetched", name=user.name, email=user.email)
+        return user
+
+
+async def main() -> None:
+    """Entry point: fetch user #42 and log the result."""
+    client = UserClient()
+    try:
+        user = await client.get_user(42)
+        log.info("fetched_user", id=user.id, name=user.name, email=user.email)
+    except UserFetchError as exc:
+        log.error("failed_to_fetch_user", error=str(exc))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Key design decisions:**
+
+- **`User` / `UserAddress`** — Pydantic `BaseModel` subclasses; `address` is optional with `None` default so partial responses don't break validation.
+- **`UserClient.get_user`** — `async def` with `httpx.AsyncClient`. Two distinct `except` blocks: one for HTTP status errors (4xx/5xx) and one for transport/network errors.
+- **Schema validation** — a separate `try/except` around `model_validate` so a malformed-but-successful response produces a clear `UserFetchError` rather than a raw Pydantic exception propagating unexpectedly.
+- **`structlog`** — bound logger carries `user_id` and `url` on every log line; no `print()` or `logging` imports.
+- **`main`** — `async def`, runs via `asyncio.run()`.
+
+Dependencies needed: `httpx`, `structlog`, `pydantic`.

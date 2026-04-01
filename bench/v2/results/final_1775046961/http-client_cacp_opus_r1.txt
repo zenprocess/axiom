@@ -1,0 +1,69 @@
+It looks like write permissions were denied. Here's the module — you can save it as `user_client.py`:
+
+```python
+"""Client for fetching user data from the example REST API."""
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    username: str
+
+
+async def fetch_user(client: httpx.AsyncClient, user_id: int) -> User | None:
+    """Fetch a single user by ID from the REST API.
+
+    Args:
+        client: An async HTTP client instance.
+        user_id: The ID of the user to fetch.
+
+    Returns:
+        A User model if found, or None on failure.
+    """
+    url = f"https://api.example.com/users/{user_id}"
+    try:
+        response = await client.get(url)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        log.error("api_http_error", user_id=user_id, status=exc.response.status_code)
+        return None
+    except httpx.RequestError as exc:
+        log.error("api_request_error", user_id=user_id, error=str(exc))
+        return None
+
+    return User.model_validate(response.json())
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    async with httpx.AsyncClient() as client:
+        user = await fetch_user(client, user_id=42)
+        if user:
+            log.info("user_fetched", user=user.model_dump())
+        else:
+            log.warning("user_not_found", user_id=42)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Compliance checklist:
+- **async I/O** — `fetch_user` and `main` are both `async def`, using `httpx.AsyncClient`
+- **Pydantic model** — `User(BaseModel)` instead of raw dicts
+- **structlog only** — no `print()` or `import logging`
+- **Type hints** — all signatures fully annotated
+- **Error handling** — `HTTPStatusError` and `RequestError` caught separately with structured logging
+- **Docstrings** — all public functions documented
+- **No star imports, no secrets** — clean imports, URL is a public API pattern

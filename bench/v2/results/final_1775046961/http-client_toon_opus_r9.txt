@@ -1,0 +1,67 @@
+It looks like file write permissions aren't granted. Here's the module I'd create at `user_client.py`:
+
+```python
+"""Client for fetching user data from the REST API."""
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+logger = structlog.get_logger()
+
+BASE_URL = "https://api.example.com"
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    username: str
+
+
+class UserClient:
+    """Async client for the users API."""
+
+    def __init__(self, base_url: str = BASE_URL) -> None:
+        self.base_url = base_url
+
+    async def get_user(self, user_id: int) -> User:
+        """Fetch a single user by ID."""
+        url = f"{self.base_url}/users/{user_id}"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error("api_error", user_id=user_id, status=exc.response.status_code)
+            raise
+        except httpx.RequestError as exc:
+            logger.error("request_failed", user_id=user_id, error=str(exc))
+            raise
+
+        return User.model_validate(response.json())
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    user = await client.get_user(42)
+    logger.info("fetched_user", user=user.model_dump())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key decisions:
+- **Async** `httpx.AsyncClient` for I/O
+- **Pydantic `User` model** for response validation
+- **structlog** for logging (no `print()`)
+- **Two-tier error handling**: `HTTPStatusError` (4xx/5xx) and `RequestError` (network failures) — both logged and re-raised so callers can decide what to do
+- **Type hints** on all signatures
+
+If you'd like me to write this to a specific location, please approve the file write permission.

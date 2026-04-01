@@ -1,0 +1,84 @@
+It looks like write permission was denied. Here's the module I'd create at `examples/user_client.py`:
+
+```python
+"""Client for fetching user data from a REST API."""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+BASE_URL = "https://api.example.com"
+
+
+class Address(BaseModel):
+    """User's address."""
+
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    address: Optional[Address] = None
+
+
+class UserClient:
+    """Async client for the users REST API."""
+
+    def __init__(self, base_url: str = BASE_URL) -> None:
+        self.base_url = base_url
+
+    async def fetch_user(self, user_id: int) -> User:
+        """Fetch a single user by ID."""
+        url = f"{self.base_url}/users/{user_id}"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            log.error(
+                "api_error",
+                user_id=user_id,
+                status_code=exc.response.status_code,
+            )
+            raise
+        except httpx.RequestError as exc:
+            log.error("request_failed", user_id=user_id, error=str(exc))
+            raise
+
+        data = response.json()
+        log.info("user_fetched", user_id=user_id)
+        return User.model_validate(data)
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    user = await client.fetch_user(42)
+    log.info("result", user=user.model_dump())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design choices:
+
+- **Pydantic models** (`User`, `Address`) for validated, typed response data
+- **Async I/O** via `httpx.AsyncClient` for the HTTP call
+- **structlog** for structured logging (no `print()` or `logging`)
+- **Error handling** catches `HTTPStatusError` (4xx/5xx) and `RequestError` (network failures) separately, logs context, and re-raises
+- **Type hints** on all signatures
+
+Would you like me to try writing the file again, or place it somewhere else?

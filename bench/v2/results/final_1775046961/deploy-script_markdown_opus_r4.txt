@@ -1,0 +1,197 @@
+Here's the deployment script:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# deploy.sh — Build, push, tag, and deploy with rollback support
+#
+# Usage:
+#   ./deploy.sh deploy [--tag <tag>]    Build, push, tag, and deploy
+#   ./deploy.sh rollback [<tag>]        Roll back to previous (or specified) tag
+#
+# Required env vars:
+#   DOCKER_REGISTRY   e.g. ghcr.io/zenprocess
+#   IMAGE_NAME        e.g. axiom
+#   DEPLOY_HOST       SSH target, e.g. deploy@prod.example.com
+#   DEPLOY_COMPOSE    Path to docker-compose.yml on the remote host
+#
+# Optional:
+#   DOCKER_BUILD_ARGS   Extra args passed to docker build
+#   DEPLOY_TIMEOUT      Healthcheck timeout in seconds (default: 60)
+# ---------------------------------------------------------------------------
+
+REGISTRY="${DOCKER_REGISTRY:?Set DOCKER_REGISTRY}"
+IMAGE="${IMAGE_NAME:?Set IMAGE_NAME}"
+DEPLOY_HOST="${DEPLOY_HOST:?Set DEPLOY_HOST}"
+DEPLOY_COMPOSE="${DEPLOY_COMPOSE:?Set DEPLOY_COMPOSE}"
+TIMEOUT="${DEPLOY_TIMEOUT:-60}"
+
+FULL_IMAGE="${REGISTRY}/${IMAGE}"
+
+log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+die() { log "FATAL: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+resolve_version() {
+    if [[ -n "${TAG:-}" ]]; then
+        echo "${TAG}"
+    else
+        git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD
+    fi
+}
+
+previous_tag() {
+    git tag --sort=-v:refname | sed -n '2p'
+}
+
+build_image() {
+    local version="$1"
+    log "Building ${FULL_IMAGE}:${version}"
+    # shellcheck disable=SC2086
+    docker build ${DOCKER_BUILD_ARGS:-} \
+        --tag "${FULL_IMAGE}:${version}" \
+        --tag "${FULL_IMAGE}:latest" \
+        .
+}
+
+push_image() {
+    local version="$1"
+    log "Pushing ${FULL_IMAGE}:${version}"
+    docker push "${FULL_IMAGE}:${version}"
+    docker push "${FULL_IMAGE}:latest"
+}
+
+create_git_tag() {
+    local version="$1"
+    if git rev-parse "refs/tags/${version}" >/dev/null 2>&1; then
+        log "Git tag ${version} already exists — skipping"
+        return 0
+    fi
+    log "Creating git tag ${version}"
+    git tag -a "${version}" -m "Release ${version}"
+    git push origin "${version}"
+}
+
+deploy_remote() {
+    local version="$1"
+    log "Deploying ${FULL_IMAGE}:${version} to ${DEPLOY_HOST}"
+    ssh "${DEPLOY_HOST}" bash -s <<EOF
+        set -euo pipefail
+        export IMAGE="${FULL_IMAGE}:${version}"
+        cd "\$(dirname "${DEPLOY_COMPOSE}")"
+        docker compose pull
+        docker compose up -d --remove-orphans
+EOF
+}
+
+healthcheck() {
+    local elapsed=0
+    log "Waiting up to ${TIMEOUT}s for healthy containers on ${DEPLOY_HOST}"
+    while (( elapsed < TIMEOUT )); do
+        if ssh "${DEPLOY_HOST}" \
+            "docker compose -f '${DEPLOY_COMPOSE}' ps --format json" \
+            | grep -qv '"unhealthy"'; then
+            log "Healthcheck passed"
+            return 0
+        fi
+        sleep 5
+        (( elapsed += 5 ))
+    done
+    log "Healthcheck failed after ${TIMEOUT}s"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_deploy() {
+    local version
+    version="$(resolve_version)"
+
+    log "=== Starting deployment: ${version} ==="
+
+    build_image "${version}"
+    push_image "${version}"
+    create_git_tag "${version}"
+    deploy_remote "${version}"
+
+    if ! healthcheck; then
+        log "Deployment unhealthy — initiating automatic rollback"
+        cmd_rollback ""
+        die "Rolled back after failed healthcheck for ${version}"
+    fi
+
+    log "=== Deployment ${version} complete ==="
+}
+
+cmd_rollback() {
+    local target="${1:-}"
+    if [[ -z "${target}" ]]; then
+        target="$(previous_tag)"
+        [[ -n "${target}" ]] || die "No previous tag found for rollback"
+    fi
+
+    log "=== Rolling back to ${target} ==="
+
+    # Ensure the image exists in the registry; rebuild + push if not
+    if ! docker manifest inspect "${FULL_IMAGE}:${target}" >/dev/null 2>&1; then
+        log "Image ${FULL_IMAGE}:${target} not in registry — rebuilding from tag"
+        git checkout "refs/tags/${target}"
+        build_image "${target}"
+        push_image "${target}"
+        git checkout -
+    fi
+
+    deploy_remote "${target}"
+
+    if ! healthcheck; then
+        die "Rollback to ${target} also failed — manual intervention required"
+    fi
+
+    log "=== Rollback to ${target} complete ==="
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+main() {
+    local cmd="${1:-}"
+    shift || true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tag) TAG="$2"; shift 2 ;;
+            *)     break ;;
+        esac
+    done
+
+    case "${cmd}" in
+        deploy)   cmd_deploy ;;
+        rollback) cmd_rollback "${1:-}" ;;
+        *)
+            echo "Usage: $0 {deploy [--tag <tag>] | rollback [<tag>]}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
+```
+
+**How it works:**
+
+- **`./deploy.sh deploy`** — resolves version from git tags, builds the Docker image, pushes to registry, creates an annotated git tag, SSHs to the deploy host to pull and restart via `docker compose`, then runs a healthcheck loop
+- **`./deploy.sh deploy --tag v1.2.0`** — same flow but with an explicit version
+- **`./deploy.sh rollback`** — automatically rolls back to the previous git tag
+- **`./deploy.sh rollback v1.0.0`** — rolls back to a specific tag
+
+**Rollback details:** If the healthcheck fails after deploy, rollback triggers automatically. During rollback, if the old image isn't in the registry, it checks out the tag, rebuilds, and pushes. If rollback itself fails, it exits with a fatal error for manual intervention.
+
+Configure via env vars (`DOCKER_REGISTRY`, `IMAGE_NAME`, `DEPLOY_HOST`, `DEPLOY_COMPOSE`) — no secrets in the script. Let me know if you'd like me to write it to a file or adjust the deployment mechanism (e.g. Kubernetes instead of docker compose).

@@ -1,0 +1,89 @@
+Here's the module — I'll paste it directly since write permissions aren't available:
+
+```python
+"""Client for fetching user data from the example REST API."""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel, HttpUrl
+
+log = structlog.get_logger(__name__)
+
+BASE_URL = "https://api.example.com"
+
+
+class Address(BaseModel):
+    street: str
+    city: str
+    zip: str
+
+
+class UserResponse(BaseModel):
+    id: int
+    name: str
+    email: str
+    address: Optional[Address] = None
+    website: Optional[HttpUrl] = None
+
+
+class UserClient:
+    """Fetches user data from the example REST API."""
+
+    def __init__(self, base_url: str = BASE_URL, timeout: float = 10.0) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
+
+    async def get_user(self, user_id: int) -> UserResponse:
+        """Fetch a single user by ID.
+
+        Raises:
+            httpx.HTTPStatusError: on 4xx/5xx responses.
+            httpx.RequestError: on network-level failures.
+        """
+        url = f"{self._base_url}/users/{user_id}"
+        log.info("fetching_user", user_id=user_id, url=url)
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            log.error(
+                "http_error",
+                user_id=user_id,
+                status_code=exc.response.status_code,
+                detail=exc.response.text,
+            )
+            raise
+        except httpx.RequestError as exc:
+            log.error("request_error", user_id=user_id, error=str(exc))
+            raise
+
+        user = UserResponse.model_validate(response.json())
+        log.info("user_fetched", user_id=user.id, name=user.name)
+        return user
+
+
+async def main() -> None:
+    """Fetch and print user #42."""
+    client = UserClient()
+    user = await client.get_user(42)
+    print(f"User #{user.id}: {user.name} <{user.email}>")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Key design decisions:**
+
+- **`httpx.AsyncClient`** — async HTTP per the `async-io` rule; context manager ensures connection cleanup
+- **Two exception layers** — `HTTPStatusError` (4xx/5xx from `raise_for_status()`) vs `RequestError` (DNS, timeout, connection refused); both log structured context before re-raising
+- **`structlog`** — structured key=value logging instead of `print` or `logging`
+- **Nested Pydantic models** — `Address` is optional so the model works whether the API includes it or not; `HttpUrl` validates the website field format
+- **`model_validate()`** — Pydantic v2 API (vs deprecated `parse_obj`)
+
+Dependencies: `httpx`, `structlog`, `pydantic`.

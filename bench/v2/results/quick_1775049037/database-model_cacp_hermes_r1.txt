@@ -1,0 +1,99 @@
+```python
+"""User management system data models and database interaction."""
+
+from typing import List, Optional
+from pydantic import BaseModel, EmailStr, validator, Field
+import structlog
+import httpx
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission with name and description."""
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        extra = "forbid"
+
+
+class Role(BaseModel):
+    """Represents a role with name, description, and associated permissions."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    @validator("permissions")
+    def validate_permissions(cls, v):
+        """Ensure no duplicate permissions by name."""
+        seen = set()
+        for perm in v:
+            if perm.name in seen:
+                raise ValueError(f"Duplicate permission name: {perm.name}")
+            seen.add(perm.name)
+        return v
+
+    class Config:
+        extra = "forbid"
+
+
+class User(BaseModel):
+    """Represents a user with basic info, role, and active status."""
+    id: int
+    username: str = Field(..., min_length=3, max_length=30)
+    email: EmailStr
+    role_id: int
+    is_active: bool = True
+    created_at: str  # ISO format datetime string
+    role: Optional[Role] = None
+
+    @validator("username")
+    def validate_username(cls, v):
+        """Ensure username contains only alphanumeric characters and underscores."""
+        if not v.replace('_', '').isalnum():
+            raise ValueError("Username must contain only alphanumeric characters and underscores")
+        return v
+
+    def serialize(self) -> dict:
+        """Return a JSON-serializable dictionary representation."""
+        return self.dict()
+
+    class Config:
+        extra = "forbid"
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a remote database endpoint.
+
+    Args:
+        database_url: URL of the users endpoint
+
+    Returns:
+        List of User models
+
+    Raises:
+        httpx.HTTPError: If the request fails
+        ValueError: If the response data is invalid
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Validate that we received a list
+            if not isinstance(data, list):
+                raise ValueError("Expected list of users from endpoint")
+            
+            return [User(**user_data) for user_data in data]
+    
+    except httpx.HTTPError as exc:
+        logger.error("http_request_failed", url=database_url, error=str(exc))
+        raise
+    except ValueError as exc:
+        logger.error("invalid_user_data", error=str(exc))
+        raise
+```

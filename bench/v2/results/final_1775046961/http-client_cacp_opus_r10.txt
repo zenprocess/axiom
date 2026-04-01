@@ -1,0 +1,89 @@
+It looks like write permission was denied. Here's the module I'd create at `user_client.py`:
+
+```python
+"""Client for fetching user data from the example REST API."""
+
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class Address(BaseModel):
+    """Nested address within a user record."""
+
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    address: Address | None = None
+
+
+BASE_URL = "https://api.example.com"
+
+
+async def fetch_user(user_id: int, *, client: httpx.AsyncClient | None = None) -> User:
+    """Fetch a single user by ID from the REST API."""
+    url = f"{BASE_URL}/users/{user_id}"
+    should_close = client is None
+    client = client or httpx.AsyncClient()
+    try:
+        response = await client.get(url)
+        response.raise_for_status()
+        data = response.json()
+        user = User.model_validate(data)
+        await log.ainfo("user_fetched", user_id=user.id, name=user.name)
+        return user
+    except httpx.HTTPStatusError as exc:
+        await log.aerror(
+            "api_http_error",
+            user_id=user_id,
+            status_code=exc.response.status_code,
+        )
+        raise
+    except httpx.RequestError as exc:
+        await log.aerror("api_request_error", user_id=user_id, error=str(exc))
+        raise
+    finally:
+        if should_close:
+            await client.aclose()
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    user = await fetch_user(42)
+    await log.ainfo("result", user=user.model_dump())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Compliance checklist:**
+
+| Rule | Status |
+|---|---|
+| No `print()` | `structlog` only |
+| `async def` for I/O | `fetch_user` and `main` are async |
+| Pydantic models | `User`, `Address` as `BaseModel` |
+| structlog only | No `logging` or `print` imports |
+| Type hints | All signatures annotated |
+| Error handling | `HTTPStatusError` + `RequestError` caught |
+| No star imports | Explicit imports only |
+| Docstrings | All public functions/classes documented |
+| No hardcoded secrets | None present |
+
+Would you like me to write this to a specific path?

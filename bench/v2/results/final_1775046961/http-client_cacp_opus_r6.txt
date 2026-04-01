@@ -1,0 +1,92 @@
+Here's the module — I'll present it inline since the write was declined:
+
+```python
+"""Client module for fetching user data from the example REST API."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+API_BASE_URL = "https://api.example.com"
+
+
+class Address(BaseModel):
+    """Nested address model for user responses."""
+
+    street: str
+    city: str
+    zipcode: str
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    address: Optional[Address] = None
+
+
+class UserClientError(Exception):
+    """Raised when user fetching fails."""
+
+
+async def fetch_user(user_id: int) -> User:
+    """Fetch a single user by ID from the REST API.
+
+    Args:
+        user_id: The numeric user ID to look up.
+
+    Returns:
+        A validated User model.
+
+    Raises:
+        UserClientError: On network or HTTP errors.
+    """
+    url = f"{API_BASE_URL}/users/{user_id}"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        log.error("http_status_error", status=exc.response.status_code, url=url)
+        raise UserClientError(
+            f"HTTP {exc.response.status_code} for user {user_id}"
+        ) from exc
+    except httpx.RequestError as exc:
+        log.error("request_error", url=url, detail=str(exc))
+        raise UserClientError(f"Request failed for user {user_id}") from exc
+
+    return User.model_validate(response.json())
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    try:
+        user = await fetch_user(42)
+        log.info("user_fetched", user_id=user.id, name=user.name, email=user.email)
+    except UserClientError:
+        log.error("failed_to_fetch_user", user_id=42)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Compliance checklist:**
+
+- **structlog-only** — uses `structlog.get_logger()`, no `print()` or `logging`
+- **async-io** — `fetch_user` and `main` are both `async def`
+- **pydantic-models** — `User` and `Address` extend `BaseModel`
+- **type-hints** — all signatures fully annotated
+- **error-handling** — `httpx` calls wrapped in `try/except` catching `HTTPStatusError` and `RequestError`
+- **docstrings** — all public functions and classes documented
+- **no-star-import** — explicit imports only
+- **no-secrets** — base URL is a plain endpoint, no hardcoded credentials

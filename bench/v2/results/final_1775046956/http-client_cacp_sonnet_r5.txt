@@ -1,0 +1,75 @@
+Here's the module — you'll need to approve the write. The code follows all your project rules:
+
+```python
+# user_client.py
+"""HTTP client for fetching user data from the REST API."""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger(__name__)
+BASE_URL = "https://api.example.com"
+
+
+class Address(BaseModel):
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    id: int
+    name: str
+    email: str
+    username: str
+    phone: Optional[str] = None
+    website: Optional[str] = None
+    address: Optional[Address] = None
+
+
+class UserFetchError(Exception):
+    """Raised when a user fetch operation fails."""
+
+
+class UserClient:
+    def __init__(self, base_url: str = BASE_URL, timeout: float = 10.0) -> None: ...
+
+    async def get_user(self, user_id: int) -> User:
+        url = f"{self._base_url}/users/{user_id}"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise UserFetchError(f"HTTP {exc.response.status_code} ...") from exc
+        except httpx.RequestError as exc:
+            raise UserFetchError(...) from exc
+
+        try:
+            return User.model_validate(response.json())
+        except Exception as exc:
+            raise UserFetchError(...) from exc
+
+
+async def main() -> None:
+    client = UserClient()
+    try:
+        user = await client.get_user(42)
+        log.info("result", id=user.id, name=user.name, email=user.email)
+    except UserFetchError as exc:
+        log.error("main_failed", error=str(exc))
+```
+
+Key design decisions:
+- **`httpx.AsyncClient`** — async-native HTTP, required by `async-io` rule
+- **Two `try/except` blocks** — one for network/HTTP errors, one for parse errors, giving precise error attribution
+- **`structlog`** only — no `print()`, no `logging` import
+- **`User` + `Address` as Pydantic `BaseModel`s** — typed, validated, no raw dicts
+- **`UserFetchError`** — wraps all failure modes so callers have a single exception to handle
+
+Dependencies needed: `httpx`, `structlog`, `pydantic`.

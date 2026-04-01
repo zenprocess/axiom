@@ -1,0 +1,92 @@
+```python
+"""Module for fetching user data from a REST API."""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+# Initialize structlog for logging
+logger = structlog.get_logger()
+
+
+class User(BaseModel):
+    """Pydantic model representing a user from the API."""
+    id: int
+    name: str
+    email: str
+    username: str
+
+
+class UserNotFoundError(Exception):
+    """Custom exception for when a user is not found."""
+    pass
+
+
+class APIClientError(Exception):
+    """Custom exception for API client errors."""
+    pass
+
+
+async def fetch_user(user_id: int) -> User:
+    """
+    Fetch a user by ID from the REST API.
+
+    Args:
+        user_id: The ID of the user to fetch.
+
+    Returns:
+        User: The fetched user data.
+
+    Raises:
+        UserNotFoundError: If the user is not found (HTTP 404).
+        APIClientError: For other API errors.
+    """
+    url = f"https://api.example.com/users/{user_id}"
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            return User(**data)
+    
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            logger.warning("User not found", user_id=user_id, status_code=404)
+            raise UserNotFoundError(f"User with ID {user_id} not found") from exc
+        else:
+            logger.error(
+                "HTTP error fetching user",
+                user_id=user_id,
+                status_code=exc.response.status_code,
+                error=str(exc)
+            )
+            raise APIClientError(f"HTTP error {exc.response.status_code}") from exc
+    
+    except httpx.RequestError as exc:
+        logger.error("Request error fetching user", user_id=user_id, error=str(exc))
+        raise APIClientError(f"Request error: {exc}") from exc
+    
+    except Exception as exc:
+        logger.error("Unexpected error fetching user", user_id=user_id, error=str(exc))
+        raise APIClientError(f"Unexpected error: {exc}") from exc
+
+
+async def main() -> None:
+    """Main function to fetch user #42."""
+    try:
+        user = await fetch_user(42)
+        logger.info("User fetched successfully", user_id=user.id, name=user.name)
+        # In production, you might return or process the user data further
+    except UserNotFoundError:
+        logger.warning("User #42 not found")
+    except APIClientError as exc:
+        logger.error("Failed to fetch user #42", error=str(exc))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```

@@ -1,0 +1,96 @@
+It looks like write permission was denied. Here's the module I'd create at `examples/user_client.py`:
+
+```python
+"""Client for fetching user data from the example REST API."""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class Address(BaseModel):
+    """User address details."""
+
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    address: Optional[Address] = None
+
+
+class UserAPIError(Exception):
+    """Raised when the user API returns an error."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(f"API error {status_code}: {detail}")
+
+
+class UserClient:
+    """Async client for the user REST API."""
+
+    BASE_URL = "https://api.example.com"
+
+    def __init__(self, base_url: Optional[str] = None) -> None:
+        self.base_url = base_url or self.BASE_URL
+
+    async def get_user(self, user_id: int) -> User:
+        """Fetch a single user by ID."""
+        url = f"{self.base_url}/users/{user_id}"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+        except httpx.HTTPError as exc:
+            log.error("user_api_request_failed", user_id=user_id, error=str(exc))
+            raise UserAPIError(status_code=0, detail=str(exc)) from exc
+
+        if response.status_code != 200:
+            log.warning("user_api_non_ok", user_id=user_id, status_code=response.status_code)
+            raise UserAPIError(status_code=response.status_code, detail=response.text)
+
+        data = response.json()
+        user = User.model_validate(data)
+        log.info("user_fetched", user_id=user.id, email=user.email)
+        return user
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    try:
+        user = await client.get_user(42)
+        log.info("result", user=user.model_dump())
+    except UserAPIError:
+        log.error("failed_to_fetch_user", user_id=42)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Compliance checklist:**
+
+- **structlog-only** — uses `structlog.get_logger()`, no `print()` or `logging`
+- **async-io** — `get_user` and `main` are both `async def`
+- **pydantic-models** — `User`, `Address` are Pydantic `BaseModel`s
+- **type-hints** — all signatures fully annotated
+- **error-handling** — `httpx.HTTPError` caught around the external call, non-200 status raises `UserAPIError`
+- **docstrings** — all public classes/functions documented
+- **no-star-import** — explicit imports only
+- **no-secrets** — base URL is configurable, no hardcoded credentials
+
+Would you like me to try writing the file again, or place it somewhere else?

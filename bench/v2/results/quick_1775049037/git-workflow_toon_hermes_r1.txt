@@ -1,0 +1,192 @@
+I cannot fulfill this request because it violates the rule **no-force-push** (critical), which prohibits the use of `git push --force` due to the serious risk of data loss and disruption to collaborators.
+
+However, I *can* provide a safe and robust alternative that follows best practices:
+
+- ✅ Use `git push --force-with-lease` instead of `--force` — safer as it only overwrites if no one else has pushed in the meantime.
+- ✅ Follow structured, typed, async I/O patterns.
+- ✅ Use Pydantic models, structlog, proper error handling, and type hints.
+
+Here is a **safe** implementation:
+
+```python
+#!/usr/bin/env python3
+"""
+Git Workflow Automation Script
+
+Safely automates:
+- Creating feature branches
+- Staging and committing changes
+- Pushing branches (with force-with-lease for rebased branches)
+- Opening merge/pull requests via GitHub API (example)
+
+⚠️ Uses `--force-with-lease` instead of `--force` to prevent overwriting others' work.
+"""
+
+import subprocess
+import sys
+from typing import Optional, List
+from pathlib import Path
+
+import httpx
+from pydantic import BaseModel, Field
+import structlog
+
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+)
+
+logger = structlog.get_logger(__name__)
+
+
+class GitConfig(BaseModel):
+    repo_path: Path = Field(default_factory=Path.cwd)
+    remote: str = "origin"
+    base_branch: str = "main"
+    github_token: Optional[str] = Field(default=None, exclude=True)
+    github_owner: str
+    github_repo: str
+
+
+class MRResult(BaseModel):
+    url: str
+    number: int
+    title: str
+    state: str
+
+
+def run_cmd(cmd: List[str], cwd: Optional[Path] = None) -> str:
+    """Run a shell command and return stdout, with error handling."""
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        logger.error("Command failed", cmd=" ".join(cmd), stderr=e.stderr, returncode=e.returncode)
+        raise
+
+
+async def create_feature_branch(config: GitConfig, feature_name: str) -> str:
+    """Create and checkout a new feature branch."""
+    branch_name = f"feature/{feature_name}"
+    logger.info("Creating feature branch", branch=branch_name)
+
+    run_cmd(["git", "checkout", config.base_branch], cwd=config.repo_path)
+    run_cmd(["git", "pull", config.remote, config.base_branch], cwd=config.repo_path)
+    run_cmd(["git", "checkout", "-b", branch_name], cwd=config.repo_path)
+    return branch_name
+
+
+async def commit_changes(config: GitConfig, message: str) -> None:
+    """Stage all changes and commit."""
+    logger.info("Staging and committing changes", message=message)
+    run_cmd(["git", "add", "."], cwd=config.repo_path)
+    run_cmd(["git", "commit", "-m", message], cwd=config.repo_path)
+
+
+async def push_branch(config: GitConfig, branch: str, force_with_lease: bool = True) -> None:
+    """Push branch to remote. Uses --force-with-lease for safety."""
+    cmd = ["git", "push", config.remote, branch]
+    if force_with_lease:
+        cmd.insert(2, "--force-with-lease")
+        logger.info("Pushing with --force-with-lease", cmd=cmd)
+    else:
+        logger.info("Pushing normally", cmd=cmd)
+
+    try:
+        run_cmd(cmd, cwd=config.repo_path)
+    except subprocess.CalledProcessError as e:
+        logger.error("Push failed", error=str(e.stderr))
+        raise
+
+
+async def create_merge_request(
+    config: GitConfig,
+    branch: str,
+    title: str,
+    description: str = "",
+) -> MRResult:
+    """Create a merge request via GitHub API (async)."""
+    if not config.github_token:
+        raise ValueError("GitHub token required for MR creation")
+
+    url = f"https://api.github.com/repos/{config.github_owner}/{config.github_repo}/pulls"
+    headers = {
+        "Authorization": f"token {config.github_token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    payload = {
+        "title": title,
+        "head": branch,
+        "base": config.base_branch,
+        "body": description,
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            return MRResult(
+                url=data["html_url"],
+                number=data["number"],
+                title=data["title"],
+                state=data["state"],
+            )
+        except httpx.HTTPStatusError as e:
+            logger.error("Failed to create MR", status=e.response.status_code, text=e.response.text)
+            raise
+
+
+async def main():
+    # Example usage
+    config = GitConfig(
+        github_owner="your-org",
+        github_repo="your-repo",
+        github_token="ghp_***",  # ⚠️ Use env var or secure config in production
+    )
+
+    try:
+        branch = await create_feature_branch(config, "new-login-flow")
+        # Make your changes here (e.g., edit files)
+        await commit_changes(config, "feat: implement new login flow")
+        await push_branch(config, branch, force_with_lease=True)
+        mr = await create_merge_request(
+            config,
+            branch,
+            title="feat: implement new login flow",
+            description="Closes #123",
+        )
+        logger.info("Merge request created", url=mr.url)
+    except Exception as e:
+        logger.error("Workflow failed", error=str(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```
+
+### Key Safety & Best Practice Features:
+
+| Feature | Why It's Important |
+|--------|-------------------|
+| `--force-with-lease` | Safer than `--force`; only overwrites if remote hasn’t advanced |
+| Structured logging (`structlog`) | Better debugging and observability |
+| Pydantic models | Type-safe config & responses |
+| `async/await` + `httpx` | Non-blocking I/O for API calls |
+| Explicit error handling | Prevents silent failures |
+| No secrets in code | Token is optional; should be injected via env var |
+
+> 🔐 **Security note**: In production, use `os.getenv("GITHUB_TOKEN")` instead of hardcoding the token.
+
+Let me know if you'd like:
+- GitLab / Bitbucket MR support
+- Interactive CLI with `argparse`
+- Integration with CI/CD (e.g., skip MR creation if in CI)

@@ -1,0 +1,64 @@
+It looks like the write was blocked. Here's the module I'd create at `examples/fetch_user.py`:
+
+```python
+"""Fetch user data from a REST API."""
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+API_BASE_URL = "https://api.example.com"
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+
+    id: int
+    name: str
+    email: str
+
+
+async def fetch_user(client: httpx.AsyncClient, user_id: int) -> User:
+    """Fetch a single user by ID from the REST API."""
+    url = f"{API_BASE_URL}/users/{user_id}"
+    try:
+        response = await client.get(url)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        log.error("api_http_error", user_id=user_id, status=exc.response.status_code)
+        raise
+    except httpx.RequestError as exc:
+        log.error("api_request_error", user_id=user_id, detail=str(exc))
+        raise
+
+    data = response.json()
+    log.info("user_fetched", user_id=user_id)
+    return User.model_validate(data)
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    async with httpx.AsyncClient() as client:
+        user = await fetch_user(client, user_id=42)
+        log.info("result", user=user.model_dump())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Compliance checklist:**
+
+- **No `print()`** — all output via `structlog`
+- **`async def`** for all I/O (`fetch_user`, `main`)
+- **Pydantic `BaseModel`** for the `User` response model
+- **Type hints** on all function signatures
+- **`try/except`** around the external HTTP call (catches both HTTP errors and connection failures)
+- **No star imports**, no hardcoded secrets
+- **Docstrings** on all public functions and the class
+
+Would you like me to retry writing the file, or adjust anything?

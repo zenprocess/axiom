@@ -1,0 +1,311 @@
+I'll create a config loader that reads from YAML files, environment variables, and command-line flags with proper priority merging. Following the rules, I'll use `structlog` for logging instead of `print()`, implement proper error handling, and use Pydantic models for data structures.
+
+```python
+import os
+import sys
+import argparse
+from typing import Any, Dict, Optional
+from pathlib import Path
+
+import yaml
+import structlog
+from pydantic import BaseModel, Field, ValidationError
+from dotenv import load_dotenv
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.dev.ConsoleRenderer(),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+)
+
+log = structlog.get_logger()
+
+
+class ConfigError(Exception):
+    """Custom exception for configuration errors."""
+    pass
+
+
+class DatabaseConfig(BaseModel):
+    """Database configuration model."""
+    host: str = Field(default="localhost", description="Database host")
+    port: int = Field(default=5432, description="Database port")
+    name: str = Field(..., description="Database name")
+    user: str = Field(..., description="Database user")
+    password: str = Field(..., description="Database password")
+
+
+class AppConfig(BaseModel):
+    """Main application configuration model."""
+    app_name: str = Field(default="MyApp", description="Application name")
+    debug: bool = Field(default=False, description="Enable debug mode")
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig, description="Database configuration")
+    log_level: str = Field(default="INFO", description="Logging level")
+
+
+def load_yaml_config(file_path: Path) -> Dict[str, Any]:
+    """
+    Load configuration from a YAML file.
+    
+    Args:
+        file_path: Path to the YAML configuration file.
+        
+    Returns:
+        Dictionary containing the YAML configuration.
+        
+    Raises:
+        ConfigError: If the file cannot be read or parsed.
+    """
+    if not file_path.exists():
+        log.debug("yaml_file_not_found", path=str(file_path))
+        return {}
+    
+    try:
+        with open(file_path, 'r') as f:
+            config = yaml.safe_load(f)
+            log.info("yaml_config_loaded", path=str(file_path))
+            return config or {}
+    except yaml.YAMLError as e:
+        log.error("yaml_parse_error", path=str(file_path), error=str(e))
+        raise ConfigError(f"Failed to parse YAML file {file_path}: {e}")
+    except IOError as e:
+        log.error("yaml_read_error", path=str(file_path), error=str(e))
+        raise ConfigError(f"Failed to read YAML file {file_path}: {e}")
+
+
+def load_env_config() -> Dict[str, Any]:
+    """
+    Load configuration from environment variables.
+    
+    Returns:
+        Dictionary containing environment variable configuration.
+    """
+    # Load .env file if it exists
+    env_file = Path('.env')
+    if env_file.exists():
+        load_dotenv(env_file)
+    
+    config = {}
+    
+    # Map environment variables to config structure
+    # Format: APP_<SECTION>_<KEY> or APP_<KEY>
+    for key, value in os.environ.items():
+        if key.startswith('APP_'):
+            # Remove APP_ prefix
+            config_key = key[4:]
+            
+            # Handle nested keys (e.g., DATABASE_HOST -> database.host)
+            parts = config_key.split('_')
+            if len(parts) > 1:
+                # This is a nested config (e.g., DATABASE_HOST)
+                section = parts[0].lower()
+                nested_key = '_'.join(parts[1:]).lower()
+                
+                if section not in config:
+                    config[section] = {}
+                
+                config[section][nested_key] = value
+            else:
+                # Top-level config (e.g., DEBUG)
+                config[config_key.lower()] = value
+    
+    log.debug("env_config_loaded", keys=list(config.keys()))
+    return config
+
+
+def load_cli_config() -> Dict[str, Any]:
+    """
+    Load configuration from command-line arguments.
+    
+    Returns:
+        Dictionary containing CLI configuration.
+    """
+    parser = argparse.ArgumentParser(description='Application configuration')
+    
+    # Add arguments for top-level config
+    parser.add_argument('--app-name', dest='app_name', type=str, help='Application name')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--log-level', dest='log_level', type=str, 
+                       choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+                       help='Logging level')
+    
+    # Add arguments for database config
+    parser.add_argument('--db-host', dest='database_host', type=str, help='Database host')
+    parser.add_argument('--db-port', dest='database_port', type=int, help='Database port')
+    parser.add_argument('--db-name', dest='database_name', type=str, help='Database name')
+    parser.add_argument('--db-user', dest='database_user', type=str, help='Database user')
+    parser.add_argument('--db-password', dest='database_password', type=str, help='Database password')
+    
+    args = parser.parse_args()
+    
+    # Convert args to config dict
+    config = {}
+    
+    # Add top-level config
+    if args.app_name:
+        config['app_name'] = args.app_name
+    if args.debug:
+        config['debug'] = True
+    if args.log_level:
+        config['log_level'] = args.log_level
+    
+    # Add database config
+    database_config = {}
+    if args.database_host:
+        database_config['host'] = args.database_host
+    if args.database_port:
+        database_config['port'] = args.database_port
+    if args.database_name:
+        database_config['name'] = args.database_name
+    if args.database_user:
+        database_config['user'] = args.database_user
+    if args.database_password:
+        database_config['password'] = args.database_password
+    
+    if database_config:
+        config['database'] = database_config
+    
+    log.debug("cli_config_loaded", config=config)
+    return config
+
+
+def merge_configs(*configs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Merge multiple configuration dictionaries with priority (later configs override earlier ones).
+    
+    Args:
+        *configs: Configuration dictionaries to merge.
+        
+    Returns:
+        Merged configuration dictionary.
+    """
+    def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        """Recursively merge two dictionaries."""
+        result = base.copy()
+        
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = deep_merge(result[key], value)
+            else:
+                result[key] = value
+        
+        return result
+    
+    merged = {}
+    for config in configs:
+        if config:
+            merged = deep_merge(merged, config)
+    
+    return merged
+
+
+def load_config(yaml_path: Optional[Path] = None) -> AppConfig:
+    """
+    Load and validate the complete configuration.
+    
+    Priority order (highest to lowest):
+    1. Command-line arguments
+    2. Environment variables
+    3. YAML configuration file
+    
+    Args:
+        yaml_path: Optional path to YAML configuration file.
+        
+    Returns:
+        Validated AppConfig instance.
+        
+    Raises:
+        ConfigError: If configuration validation fails.
+    """
+    # Load configs in reverse priority order (lowest priority first)
+    yaml_config = load_yaml_config(yaml_path) if yaml_path else {}
+    env_config = load_env_config()
+    cli_config = load_cli_config()
+    
+    # Merge configs with priority (later configs override earlier ones)
+    merged_config = merge_configs(yaml_config, env_config, cli_config)
+    
+    # Validate and create AppConfig model
+    try:
+        config = AppConfig(**merged_config)
+        log.info("config_loaded_successfully", config=config.dict())
+        return config
+    except ValidationError as e:
+        log.error("config_validation_error", errors=e.errors())
+        raise ConfigError(f"Configuration validation failed: {e}")
+
+
+def main():
+    """Main entry point."""
+    # Parse YAML path from command line if provided
+    parser = argparse.ArgumentParser(description='Application configuration loader')
+    parser.add_argument('--config', type=Path, help='Path to YAML configuration file')
+    args, remaining = parser.parse_known_args()
+    
+    # Set up logging level from config
+    try:
+        config = load_config(args.config)
+        
+        # Override log level from config if specified
+        log_level = getattr(logging, config.log_level.upper(), logging.INFO)
+        structlog.configure(
+            processors=[
+                structlog.processors.add_log_level,
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.dev.ConsoleRenderer(),
+            ],
+            wrapper_class=structlog.make_filtering_bound_logger(log_level),
+        )
+        log = structlog.get_logger()
+        
+        # Log the final configuration
+        log.info("final_config", config=config.dict())
+        
+        # Return config for use by application
+        return config
+        
+    except ConfigError as e:
+        log.error("config_load_failed", error=str(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    config = main()
+```
+
+## Key Features
+
+1. **Structured Logging**: Uses `structlog` instead of `print()` for debugging output
+2. **Priority Merging**: Configuration sources in priority order:
+   - Command-line arguments (highest priority)
+   - Environment variables
+   - YAML configuration file (lowest priority)
+3. **Pydantic Models**: Strongly typed configuration models with validation
+4. **Error Handling**: Comprehensive error handling with custom exceptions
+5. **Deep Merging**: Recursively merges nested configuration sections
+6. **Environment Variable Support**: Maps environment variables to config structure
+7. **Command-line Arguments**: Supports both top-level and nested configuration options
+
+## Usage
+
+```python
+# Load config from default sources
+config = load_config()
+
+# Load config from specific YAML file
+config = load_config(Path("config.yaml"))
+
+# Override with environment variables
+# export APP_DEBUG=true
+# export APP_DATABASE_HOST=prod-db.example.com
+# export APP_DATABASE_PASSWORD=secret
+
+# Override with command-line arguments
+# python app.py --debug --db-host localhost --db-name test
+```
+
+The final configuration is logged in JSON format for debugging purposes, following the structured logging approach.

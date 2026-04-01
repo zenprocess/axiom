@@ -1,0 +1,17 @@
+Here's the module — pending your permission approval:
+
+**`user_client.py`** contains:
+
+- **`User` / `Address`** — Pydantic models for the API response (with `zipCode` alias handling)
+- **`UserAPIError`** — custom exception carrying the HTTP status code
+- **`UserClient.get_user(user_id)`** — async method using `httpx`, with `try/except` covering timeouts, connection errors, 404s, and other non-2xx responses
+- **`main()`** — fetches user #42 and prints their details
+
+Key design choices per your project rules:
+- `async def` for all I/O (`async-io`)
+- `structlog` for logging (`structlog-only`)
+- Pydantic `BaseModel` for data structures (`pydantic-models`)
+- Full type hints (`type-hints`)
+- `try/except` around the `httpx` call (`error-handling`)
+
+Dependencies needed: `httpx`, `pydantic`, `structlog`.

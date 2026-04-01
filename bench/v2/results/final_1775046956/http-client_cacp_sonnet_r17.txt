@@ -1,0 +1,22 @@
+Here's the module — you'll need to approve the file write. The key design decisions:
+
+**Models** (`Address`, `User`) — Pydantic `BaseModel` with optional fields matching a typical REST user response. `HttpUrl` validates the website field automatically.
+
+**`UserClient`** — takes `base_url` and `timeout` as constructor args (no hardcoded secrets, easily overridden for testing). `get_user` is `async` using `httpx.AsyncClient`.
+
+**Error handling** — two distinct catch paths:
+- `HTTPStatusError` — server returned 4xx/5xx (logged with status code + body)
+- `RequestError` — network failure, DNS, timeout, etc.
+
+Both re-raise as `UserAPIError` so callers have a single exception type to handle.
+
+**Logging** — `structlog` throughout, no `print()` or `logging`.
+
+**`main()`** — `async`, calls `get_user(42)`, logs the result via structlog.
+
+Dependencies needed:
+```
+httpx
+structlog
+pydantic
+```

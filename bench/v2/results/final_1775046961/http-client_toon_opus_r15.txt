@@ -1,0 +1,80 @@
+It looks like write permissions were denied. Here's the module I'd create as `user_client.py`:
+
+```python
+"""Client for fetching user data from the example REST API."""
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+logger = structlog.get_logger()
+
+
+class Address(BaseModel):
+    """User's address."""
+
+    street: str
+    city: str
+    zipcode: str
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    address: Address | None = None
+
+
+class UserClient:
+    """Async client for the users API."""
+
+    BASE_URL = "https://api.example.com"
+
+    def __init__(self, base_url: str | None = None) -> None:
+        self.base_url = base_url or self.BASE_URL
+
+    async def get_user(self, user_id: int) -> User:
+        """Fetch a single user by ID."""
+        url = f"{self.base_url}/users/{user_id}"
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                logger.error(
+                    "api_error",
+                    user_id=user_id,
+                    status_code=exc.response.status_code,
+                )
+                raise
+            except httpx.RequestError as exc:
+                logger.error("request_failed", user_id=user_id, error=str(exc))
+                raise
+
+        return User.model_validate(response.json())
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    user = await client.get_user(42)
+    logger.info("user_fetched", user=user.model_dump())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design choices:
+
+- **Pydantic models** (`User`, `Address`) for validated, typed response data
+- **Async I/O** via `httpx.AsyncClient` for non-blocking requests
+- **structlog** for structured logging (no `print()` or stdlib `logging`)
+- **Error handling** catches `HTTPStatusError` (4xx/5xx) and `RequestError` (connection failures) separately, logs context, and re-raises
+- **`base_url` override** in the constructor for testing against different environments
+
+Would you like me to save this to a specific location, or adjust anything?

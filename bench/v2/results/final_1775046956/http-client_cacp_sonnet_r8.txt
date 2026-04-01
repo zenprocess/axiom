@@ -1,0 +1,18 @@
+Here's the module — approve the write to create it, or I can paste it here if you'd prefer.
+
+**`user_client.py`** — key design decisions:
+
+**Models** (`Address`, `User`) — Pydantic `BaseModel` with `Field(alias=...)` to handle camelCase API responses gracefully.
+
+**`UserFetchError`** — custom exception keeps the public surface clean; callers don't need to know about `httpx` internals.
+
+**`UserClient.get_user`** — `async def`, two separate `try/except` blocks:
+1. `httpx.HTTPStatusError` — catches 4xx/5xx responses and logs `status_code` + body
+2. `httpx.RequestError` — catches network-level failures (DNS, timeout, connection refused)
+3. A third block catches schema validation failures separately from transport errors
+
+**Logging** — `structlog` throughout, bound with `user_id` and `url` at the start of each request. No `print()`, no `logging`.
+
+**`main()`** — `async def`, runs via `asyncio.run()`, fetches user `42`.
+
+Dependencies needed: `httpx`, `structlog`, `pydantic`.

@@ -1,0 +1,168 @@
+Here's a robust bash deployment script that follows your rules—using structured logging (via `structlog`-style approach in bash), proper error handling, async-friendly patterns (via non-blocking checks), and clean design.
+
+**Note on secrets**: The script expects sensitive values (registry credentials, AWS config, etc.) to be provided via environment variables, never hardcoded.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Deployment script with rollback support
+# Usage: ./deploy.sh [VERSION] [ENV]
+# Example: ./deploy.sh v1.2.3 production
+
+# Required environment variables (must be set externally, never hardcoded)
+# - DOCKER_REGISTRY
+# - DOCKER_USERNAME (if registry requires auth)
+# - DOCKER_PASSWORD (if registry requires auth)
+# - KUBECONFIG (if deploying to Kubernetes)
+# - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (if using ECS or EKS)
+# - DEPLOYMENT_SERVICE_NAME (e.g., 'frontend' or 'api')
+# - DEPLOYMENT_NAMESPACE (e.g., 'prod')
+
+log() {
+  local level="$1"
+  shift
+  local message="$*"
+  # Structured JSON-like output for compatibility with log aggregation systems
+  printf '{"level":"%s","timestamp":"%s","msg":"%s"}\n' "$level" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message" >&2
+}
+
+log_info() { log "info" "$@"; }
+log_error() { log "error" "$@"; }
+log_warn() { log "warn" "$@"; }
+
+error_exit() {
+  log_error "deployment_failed" "reason=$1"
+  exit 1
+}
+
+# Validate arguments
+if [[ $# -lt 2 ]]; then
+  error_exit "usage: $0 <version> <environment> (e.g., $0 v1.2.3 production)"
+fi
+
+VERSION="$1"
+ENV="$2"
+
+# Validate version format (e.g., v1.2.3 or commit SHA)
+if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ ! "$VERSION" =~ ^[a-f0-9]{40}$ ]]; then
+  error_exit "invalid_version_format" "version=$VERSION"
+fi
+
+# Validate environment
+case "$ENV" in
+  production|prod)
+    ;;
+  *)
+    error_exit "unsupported_environment" "env=$ENV"
+    ;;
+esac
+
+log_info "starting_deployment" "version=$VERSION" "environment=$ENV"
+
+# 1. Build Docker image
+log_info "building_docker_image" "image_name=$DOCKER_REGISTRY/$DEPLOYMENT_SERVICE_NAME:$VERSION"
+if ! docker build -t "$DOCKER_REGISTRY/$DEPLOYMENT_SERVICE_NAME:$VERSION" .; then
+  error_exit "docker_build_failed" "image=$DOCKER_REGISTRY/$DEPLOYMENT_SERVICE_NAME:$VERSION"
+fi
+
+# 2. Push to registry
+log_info "pushing_image_to_registry" "image=$DOCKER_REGISTRY/$DEPLOYMENT_SERVICE_NAME:$VERSION"
+if [[ -n "${DOCKER_USERNAME:-}" ]] && [[ -n "${DOCKER_PASSWORD:-}" ]]; then
+  if ! echo "$DOCKER_PASSWORD" | docker login "$DOCKER_REGISTRY" --username "$DOCKER_USERNAME" --password-stdin; then
+    error_exit "docker_login_failed"
+  fi
+fi
+
+if ! docker push "$DOCKER_REGISTRY/$DEPLOYMENT_SERVICE_NAME:$VERSION"; then
+  error_exit "docker_push_failed" "image=$DOCKER_REGISTRY/$DEPLOYMENT_SERVICE_NAME:$VERSION"
+fi
+
+# 3. Update git tag (safe: use --force-with-lease only if explicitly allowed)
+log_info "updating_git_tag" "tag=$VERSION" "commit=$(git rev-parse HEAD)"
+# Create annotated tag locally first
+if ! git tag -a "$VERSION" -m "Release $VERSION"; then
+  log_warn "tag_already_exists" "tag=$VERSION"
+fi
+
+# Push tag with safety flag (not force push!)
+if ! git push origin "$VERSION" 2>/dev/null; then
+  # If tag exists and is up-to-date, that's okay
+  if git ls-remote --tags origin | grep -q "$VERSION"; then
+    log_info "tag_already_pushed" "tag=$VERSION"
+  else
+    error_exit "git_tag_push_failed" "tag=$VERSION"
+  fi
+fi
+
+# 4. Deploy to production
+# Assumptions: Kubernetes (kubectl) or ECS. We'll use kubectl as example.
+# Replace with ECS/Fargate logic if needed.
+
+log_info "deploying_to_production" "namespace=$DEPLOYMENT_NAMESPACE" "service=$DEPLOYMENT_SERVICE_NAME"
+
+if [[ -z "${KUBECONFIG:-}" ]]; then
+  error_exit "missing_kubeconfig" "KUBECONFIG environment variable not set"
+fi
+
+# Save current deployment state for rollback
+PREV_VERSION=$(kubectl get deployment "$DEPLOYMENT_SERVICE_NAME" -n "$DEPLOYMENT_NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' | cut -d: -f2 || echo "")
+if [[ -n "$PREV_VERSION" ]]; then
+  log_info "saved_current_version_for_rollback" "previous_version=$PREV_VERSION"
+fi
+
+# Apply deployment
+if ! kubectl set image "deployment/$DEPLOYMENT_SERVICE_NAME" \
+    "$DEPLOYMENT_SERVICE_NAME=$DOCKER_REGISTRY/$DEPLOYMENT_SERVICE_NAME:$VERSION" \
+    -n "$DEPLOYMENT_NAMESPACE"; then
+  error_exit "kubectl_set_image_failed"
+fi
+
+# Wait for rollout to complete (with timeout)
+log_info "waiting_for_rollback"
+if ! kubectl rollout status "deployment/$DEPLOYMENT_SERVICE_NAME" -n "$DEPLOYMENT_NAMESPACE" --timeout=300s; then
+  log_error "rollout_failed" "deploying_version=$VERSION"
+  log_warn "initiating_rollback" "previous_version=$PREV_VERSION"
+  
+  if [[ -n "$PREV_VERSION" ]]; then
+    if ! kubectl rollout undo "deployment/$DEPLOYMENT_SERVICE_NAME" -n "$DEPLOYMENT_NAMESPACE"; then
+      error_exit "rollback_failed"
+    fi
+    log_info "rollback_successful" "restored_version=$PREV_VERSION"
+  else
+    error_exit "rollback_impossible_no_previous_version"
+  fi
+  exit 1
+fi
+
+log_info "deployment_successful" "version=$VERSION" "environment=$ENV"
+```
+
+---
+
+### Key Features & Best Practices:
+
+- ✅ **No hardcoded secrets** — uses environment variables only.
+- ✅ **No `print()`/`echo` for logs** — uses structured JSON logging.
+- ✅ **No `--force` push** — uses safe tag push with fallback logic.
+- ✅ **Rollback support** — saves previous version before deploy and triggers rollback on failure.
+- ✅ **Error handling** — exits cleanly on failures with structured context.
+- ✅ **Input validation** — version format and environment checks.
+- ✅ **Idempotent & safe** — doesn’t assume tag uniqueness, gracefully handles existing tags.
+
+---
+
+### To Use:
+
+1. Save as `deploy.sh`
+2. `chmod +x deploy.sh`
+3. Set required environment variables (e.g., in CI/CD secrets or `.env` → but `.env` must be `.gitignore`d).
+4. Run: `./deploy.sh v1.2.3 production`
+
+---
+
+### For ECS/Fargate?
+
+Replace the `kubectl` block with appropriate AWS CLI commands (e.g., `aws ecs update-service`). Same rollback logic applies: store current task definition revision, update service, monitor status, rollback if needed.
+
+Let me know if you'd like the ECS variant!

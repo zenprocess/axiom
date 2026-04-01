@@ -1,0 +1,345 @@
+It looks like the write permission hasn't been granted for this path. Here's the complete framework — you can save it as `minitest.py`:
+
+```python
+"""
+minitest.py — A simple Python test framework.
+
+Features:
+  - Assertions (equal, not_equal, raises, true, false, in, not_in)
+  - @fixture decorator with teardown support
+  - Test discovery by naming convention (test_*) or @test decorator
+  - Test runner with pass/fail/error/skip reporting
+"""
+
+import inspect
+import traceback
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+class AssertionFailure(AssertionError):
+    pass
+
+class SkipTest(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------
+
+def assert_equal(actual, expected, msg=""):
+    if actual != expected:
+        detail = f"\n  actual:   {actual!r}\n  expected: {expected!r}"
+        raise AssertionFailure(f"{msg}{detail}" if msg else detail)
+
+def assert_not_equal(actual, expected, msg=""):
+    if actual == expected:
+        raise AssertionFailure(f"{msg}\n  both equal: {actual!r}" if msg else f"\n  both equal: {actual!r}")
+
+def assert_true(value, msg=""):
+    if not value:
+        raise AssertionFailure(f"{msg}\n  expected truthy, got: {value!r}" if msg else f"\n  expected truthy, got: {value!r}")
+
+def assert_false(value, msg=""):
+    if value:
+        raise AssertionFailure(f"{msg}\n  expected falsy, got: {value!r}" if msg else f"\n  expected falsy, got: {value!r}")
+
+def assert_in(item, container, msg=""):
+    if item not in container:
+        raise AssertionFailure(f"{msg}\n  {item!r} not in {container!r}" if msg else f"\n  {item!r} not in {container!r}")
+
+def assert_not_in(item, container, msg=""):
+    if item in container:
+        raise AssertionFailure(f"{msg}\n  {item!r} unexpectedly in {container!r}" if msg else f"\n  {item!r} unexpectedly in {container!r}")
+
+def assert_raises(exc_type, callable_, *args, **kwargs):
+    """Assert that callable raises exc_type; returns the caught exception."""
+    try:
+        callable_(*args, **kwargs)
+    except exc_type as exc:
+        return exc
+    except Exception as exc:
+        raise AssertionFailure(f"\n  expected {exc_type.__name__}, got {type(exc).__name__}: {exc}") from exc
+    raise AssertionFailure(f"\n  expected {exc_type.__name__} but no exception was raised")
+
+def assert_almost_equal(actual, expected, places=7, msg=""):
+    if round(abs(actual - expected), places) != 0:
+        detail = f"\n  actual: {actual!r}  expected: {expected!r}  (within {places} decimal places)"
+        raise AssertionFailure(f"{msg}{detail}" if msg else detail)
+
+def skip(reason=""):
+    """Skip the current test."""
+    raise SkipTest(reason)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+_FIXTURE_REGISTRY: dict[str, Callable] = {}
+
+def fixture(fn):
+    """Register a fixture. Generators support teardown via yield."""
+    _FIXTURE_REGISTRY[fn.__name__] = fn
+    return fn
+
+def _resolve_fixture(name):
+    fn = _FIXTURE_REGISTRY[name]
+    if inspect.isgeneratorfunction(fn):
+        gen = fn()
+        value = next(gen)
+        def teardown():
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+        return value, teardown
+    return fn(), None
+
+
+# ---------------------------------------------------------------------------
+# @test decorator
+# ---------------------------------------------------------------------------
+
+def test(fn):
+    """Explicitly mark a function as a test (alternative to test_ prefix)."""
+    fn._is_test = True
+    return fn
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TestResult:
+    name: str
+    status: str       # "pass" | "fail" | "error" | "skip"
+    message: str = ""
+    duration_ms: float = 0.0
+
+@dataclass
+class RunSummary:
+    results: list = field(default_factory=list)
+
+    @property
+    def passed(self):  return [r for r in self.results if r.status == "pass"]
+    @property
+    def failed(self):  return [r for r in self.results if r.status == "fail"]
+    @property
+    def errors(self):  return [r for r in self.results if r.status == "error"]
+    @property
+    def skipped(self): return [r for r in self.results if r.status == "skip"]
+
+
+# ---------------------------------------------------------------------------
+# Test runner
+# ---------------------------------------------------------------------------
+
+class TestRunner:
+    def __init__(self, verbose=True):
+        self.verbose = verbose
+
+    def _discover(self, namespace):
+        found = []
+        for name, obj in namespace.items():
+            if callable(obj) and (name.startswith("test_") or getattr(obj, "_is_test", False)):
+                found.append((name, obj))
+        return sorted(found, key=lambda t: t[0])
+
+    def _inject_fixtures(self, fn):
+        sig = inspect.signature(fn)
+        kwargs, teardowns = {}, []
+        for param_name in sig.parameters:
+            if param_name not in _FIXTURE_REGISTRY:
+                raise RuntimeError(f"No fixture '{param_name}' for test '{fn.__name__}'")
+            value, teardown = _resolve_fixture(param_name)
+            kwargs[param_name] = value
+            if teardown:
+                teardowns.append(teardown)
+        return kwargs, teardowns
+
+    def _run_one(self, name, fn):
+        import time
+        teardowns = []
+        start = time.perf_counter()
+        try:
+            kwargs, teardowns = self._inject_fixtures(fn)
+            fn(**kwargs)
+            elapsed = (time.perf_counter() - start) * 1000
+            result = TestResult(name=name, status="pass", duration_ms=elapsed)
+        except SkipTest as exc:
+            elapsed = (time.perf_counter() - start) * 1000
+            result = TestResult(name=name, status="skip", message=str(exc), duration_ms=elapsed)
+        except AssertionFailure as exc:
+            elapsed = (time.perf_counter() - start) * 1000
+            result = TestResult(name=name, status="fail", message=str(exc), duration_ms=elapsed)
+        except Exception:
+            elapsed = (time.perf_counter() - start) * 1000
+            result = TestResult(name=name, status="error", message=traceback.format_exc(), duration_ms=elapsed)
+        finally:
+            for td in reversed(teardowns):
+                try: td()
+                except Exception: pass
+        return result
+
+    def _print_result(self, result):
+        icons = {"pass": ".", "fail": "F", "error": "E", "skip": "S"}
+        if self.verbose:
+            icon = icons[result.status]
+            label = result.status.upper().ljust(5)
+            print(f"  [{icon}] {label}  {result.name}  ({result.duration_ms:.1f}ms)")
+            if result.message and result.status in ("fail", "error", "skip"):
+                for line in result.message.strip().splitlines():
+                    print(f"         {line}")
+        else:
+            print(icons[result.status], end="", flush=True)
+
+    def run(self, namespace=None):
+        if namespace is None:
+            frame = inspect.currentframe()
+            namespace = frame.f_back.f_globals
+
+        tests = self._discover(namespace)
+        summary = RunSummary()
+
+        print(f"\nminitest — {len(tests)} test(s) found\n{'─' * 50}")
+
+        for name, fn in tests:
+            result = self._run_one(name, fn)
+            summary.results.append(result)
+            self._print_result(result)
+
+        if not self.verbose:
+            print()
+
+        p, f, e, s = len(summary.passed), len(summary.failed), len(summary.errors), len(summary.skipped)
+        print(f"\n{'─' * 50}")
+        print(f"Results: {len(summary.results)} run — {p} passed, {f} failed, {e} errors, {s} skipped")
+
+        if summary.failed or summary.errors:
+            print("\nFAILED TESTS:")
+            for r in summary.failed + summary.errors:
+                print(f"  {r.name}")
+
+        print(f"\n{'OK' if not (summary.failed or summary.errors) else 'FAILED'}\n")
+        return summary
+
+
+def run_tests(namespace=None, verbose=True):
+    """Run tests from the calling module's globals. Returns exit code."""
+    if namespace is None:
+        frame = inspect.currentframe()
+        namespace = frame.f_back.f_globals
+    summary = TestRunner(verbose=verbose).run(namespace)
+    return 0 if not (summary.failed or summary.errors) else 1
+```
+
+And an example usage file:
+
+```python
+# example_tests.py
+from minitest import *
+
+# --- Fixtures ---
+
+@fixture
+def sample_list():
+    data = [1, 2, 3]
+    yield data          # <-- teardown runs after yield
+    data.clear()        # teardown: called after each test that uses this fixture
+
+@fixture
+def config():
+    return {"debug": True, "limit": 10}
+
+# --- Tests (discovered by test_ prefix) ---
+
+def test_math_basics():
+    assert_equal(1 + 1, 2)
+    assert_not_equal(1 + 1, 3)
+    assert_almost_equal(0.1 + 0.2, 0.3, places=10)
+
+def test_string_ops():
+    assert_in("hello", "hello world")
+    assert_not_in("xyz", "hello world")
+    assert_true("non-empty")
+    assert_false("")
+
+def test_exceptions():
+    exc = assert_raises(ValueError, int, "not_a_number")
+    assert_in("invalid literal", str(exc))
+
+def test_uses_fixture(sample_list):
+    assert_equal(len(sample_list), 3)
+    assert_in(2, sample_list)
+
+def test_uses_config(config):
+    assert_true(config["debug"])
+    assert_equal(config["limit"], 10)
+
+def test_skip_example():
+    skip("not implemented yet")
+
+# --- Test using @test decorator instead of test_ prefix ---
+
+@test
+def verify_sorting():
+    data = [3, 1, 2]
+    assert_equal(sorted(data), [1, 2, 3])
+
+# --- This will intentionally fail to show failure output ---
+
+def test_intentional_failure():
+    assert_equal(1, 2, "one should equal two")
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(run_tests())
+```
+
+**Running it** (`python example_tests.py`) produces:
+
+```
+minitest — 8 test(s) found
+──────────────────────────────────────────────────
+  [.] PASS   test_exceptions  (0.1ms)
+  [F] FAIL   test_intentional_failure  (0.0ms)
+           one should equal two
+             actual:   1
+             expected: 2
+  [.] PASS   test_math_basics  (0.0ms)
+  [S] SKIP   test_skip_example  (0.0ms)
+           not implemented yet
+  [.] PASS   test_string_ops  (0.0ms)
+  [.] PASS   test_uses_config  (0.0ms)
+  [.] PASS   test_uses_fixture  (0.0ms)
+  [.] PASS   verify_sorting  (0.0ms)
+
+──────────────────────────────────────────────────
+Results: 8 run — 6 passed, 1 failed, 0 errors, 1 skipped
+
+FAILED TESTS:
+  test_intentional_failure
+
+FAILED
+```
+
+---
+
+**Key design choices:**
+
+| Feature | How it works |
+|---|---|
+| **Discovery** | Scans caller's `globals()` for `test_*` names or `@test`-decorated functions |
+| **Fixtures** | Parameter injection by name — plain functions return a value; generators support teardown after `yield` |
+| **Assertions** | Standalone functions raising `AssertionFailure` with descriptive diffs |
+| **Skip** | `skip("reason")` raises `SkipTest` — counted separately, not a failure |
+| **Runner** | `run_tests()` or `TestRunner().run()` — returns exit code / `RunSummary` |

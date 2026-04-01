@@ -1,0 +1,138 @@
+Here's a **secure, production-ready** bash deployment script that adheres to all the provided rules (especially `no-secrets`, `no-force-push`, and `structlog-only` for Python components — bash itself doesn’t violate those, but we avoid unsafe patterns):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# === CONFIGURATION (set via environment or .env file) ===
+# DO NOT hardcode secrets here — use environment variables or CI secrets.
+# Example: export REGISTRY_URL=ghcr.io/yourorg
+#          export IMAGE_NAME=myapp
+#          export IMAGE_TAG=${GITHUB_SHA:-$(git rev-parse HEAD)}
+#          export KUBECONFIG=~/.kube/config  # if applicable
+
+REGISTRY_URL="${REGISTRY_URL:-}"
+IMAGE_NAME="${IMAGE_NAME:-}"
+IMAGE_TAG="${IMAGE_TAG:-}"
+DEPLOY_ENV="${DEPLOY_ENV:-production}"
+ROLLBACK_ENABLED="${ROLLBACK_ENABLED:-true}"
+
+# === VALIDATION ===
+if [[ -z "$REGISTRY_URL" || -z "$IMAGE_NAME" || -z "$IMAGE_TAG" ]]; then
+  echo "ERROR: Missing required env vars: REGISTRY_URL, IMAGE_NAME, IMAGE_TAG"
+  exit 1
+fi
+
+FULL_IMAGE_NAME="${REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+echo "ℹ️  Deploying ${FULL_IMAGE_NAME} to ${DEPLOY_ENV}..."
+
+# === 1. BUILD DOCKER IMAGE ===
+echo "📦 Building Docker image..."
+docker build -t "${FULL_IMAGE_NAME}" .
+
+# === 2. PUSH TO REGISTRY ===
+echo "🚀 Pushing image to registry..."
+# Use docker login via credentials (not hardcoded)
+# Example: docker login --username "$REGISTRY_USER" --password "$REGISTRY_PASS"
+docker push "${FULL_IMAGE_NAME}"
+
+# === 3. UPDATE GIT TAG (safe, non-force push) ===
+echo "🏷️  Creating and pushing Git tag..."
+TAG_NAME="v${IMAGE_TAG}"
+if git tag -l "$TAG_NAME" >/dev/null 2>&1; then
+  echo "⚠️  Tag ${TAG_NAME} already exists. Skipping tag creation."
+else
+  git tag -a "$TAG_NAME" -m "Deploy: ${IMAGE_TAG}"
+  git push origin "$TAG_NAME"  # ✅ Safe: no --force
+fi
+
+# === 4. DEPLOY TO PRODUCTION ===
+# Placeholder: Replace with your actual deployment (e.g., helm, kubectl, ECS, etc.)
+# For Kubernetes example:
+if command -v kubectl &> /dev/null; then
+  echo " Kubernetes deployment..."
+  # Update image in deployment (no force-replace to avoid downtime)
+  kubectl set image deployment/"${IMAGE_NAME}" "${IMAGE_NAME}"="${FULL_IMAGE_NAME}" -n "${DEPLOY_ENV}"
+  # Wait for rollout
+  kubectl rollout status deployment/"${IMAGE_NAME}" -n "${DEPLOY_ENV}"
+else
+  echo "⚠️  kubectl not found — skipping Kubernetes deployment step"
+fi
+
+# === ROLLBACK SUPPORT ===
+if [[ "$ROLLBACK_ENABLED" == "true" ]]; then
+  echo "🔄 Rollback support enabled."
+  # Store previous image tag in a file for rollback
+  PREV_TAG_FILE=".deployment_prev_tag"
+  if [[ -f "$PREV_TAG_FILE" ]]; then
+    PREV_FULL_IMAGE_NAME=$(cat "$PREV_TAG_FILE")
+    echo "ℹ️  Previous image: ${PREV_FULL_IMAGE_NAME}"
+  else
+    PREV_FULL_IMAGE_NAME=""
+    echo "ℹ️  No previous image recorded."
+  fi
+
+  # Save current tag for future rollback
+  echo "${FULL_IMAGE_NAME}" > "$PREV_TAG_FILE"
+
+  # Define rollback function (optional CLI hook)
+  rollback() {
+    if [[ -z "$PREV_FULL_IMAGE_NAME" ]]; then
+      echo "❌ No previous image to rollback to."
+      return 1
+    fi
+    echo "🔄 Rolling back to ${PREV_FULL_IMAGE_NAME}..."
+    kubectl set image deployment/"${IMAGE_NAME}" "${IMAGE_NAME}"="${PREV_FULL_IMAGE_NAME}" -n "${DEPLOY_ENV}"
+    kubectl rollout status deployment/"${IMAGE_NAME}" -n "${DEPLOY_ENV}"
+  }
+  export -f rollback  # Make available to subshells (e.g., for CI hooks)
+else
+  echo "ℹ️  Rollback disabled."
+fi
+
+echo "✅ Deployment complete."
+```
+
+---
+
+### ✅ Compliance with Rules
+
+| Rule | Compliance |
+|------|------------|
+| `no-force-push` | Uses `git push origin "$TAG_NAME"` — **no `--force`** |
+| `no-secrets` | No hardcoded credentials; relies on environment variables or CI secrets |
+| `no-print-debug` | Uses `echo` (safe for bash), no `print()` (irrelevant for bash) |
+| `structlog-only` | Not applicable — bash script |
+| `error-handling` | `set -euo pipefail` + explicit error checks (`if [[ -z ... ]]`) |
+| `type-hints`, `pydantic-models` | Not applicable — bash script |
+
+---
+
+### 🛠️ Usage & Best Practices
+
+1. **Run with CI secrets** (e.g., GitHub Actions):
+   ```yaml
+   env:
+     REGISTRY_URL: ghcr.io/yourorg
+     IMAGE_NAME: myapp
+     IMAGE_TAG: ${{ github.sha }}
+     REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+     REGISTRY_PASS: ${{ secrets.REGISTRY_PASS }}
+   run: |
+     echo "${REGISTRY_PASS}" | docker login ghcr.io -u "${REGISTRY_USER}" --password-stdin
+     ./deploy.sh
+   ```
+
+2. **Rollback manually** (if needed):
+   ```bash
+   source ./deploy.sh  # to load `rollback` function
+   rollback
+   ```
+
+3. **Idempotent & safe**:  
+   - Skips tag creation if it exists  
+   - Uses `kubectl set image` (no force-restart)  
+   - Records previous image for rollback  
+
+Let me know if you'd like a **Kubernetes Helm**, **ECS**, or **AWS Lambda** variant!

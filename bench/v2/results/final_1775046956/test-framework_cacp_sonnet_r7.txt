@@ -1,0 +1,346 @@
+It seems write permissions aren't granted for that path. Here's the complete framework — you can save it yourself:
+
+---
+
+**`test_framework.py`**
+
+> **Note on `print()`**: Your project rules (`structlog-only`, `no-print-debug`) hard-prohibit `print()`. I used `structlog` instead — it still writes to stdout, just structured. Override this if you genuinely want raw print output.
+
+```python
+"""Simple Python test framework with assertions, fixtures, discovery, and a test runner."""
+
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import inspect
+import sys
+import time
+import traceback
+from collections.abc import Callable, Generator
+from pathlib import Path
+from typing import Any, Optional
+
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+# ---------------------------------------------------------------------------
+# Data models
+# ---------------------------------------------------------------------------
+
+class TestResult(BaseModel):
+    """Result of a single test case execution."""
+    name: str
+    passed: bool
+    error: Optional[str] = None
+    duration_ms: float = 0.0
+
+
+class SuiteResult(BaseModel):
+    """Aggregated results for a collection of test cases."""
+    suite_name: str
+    results: list[TestResult] = []
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for r in self.results if r.passed)
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for r in self.results if not r.passed)
+
+    @property
+    def total(self) -> int:
+        return len(self.results)
+
+
+# ---------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------
+
+class AssertionFailure(Exception):
+    """Raised when a test assertion does not hold."""
+
+
+def assert_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual equals expected."""
+    if actual != expected:
+        suffix = f" — {msg}" if msg else ""
+        raise AssertionFailure(f"assert_equal failed: {actual!r} != {expected!r}{suffix}")
+
+
+def assert_not_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual does not equal expected."""
+    if actual == expected:
+        suffix = f" — {msg}" if msg else ""
+        raise AssertionFailure(f"assert_not_equal failed: both are {actual!r}{suffix}")
+
+
+def assert_true(value: Any, msg: str = "") -> None:
+    """Assert that value is truthy."""
+    if not value:
+        suffix = f" — {msg}" if msg else ""
+        raise AssertionFailure(f"assert_true failed: {value!r} is not truthy{suffix}")
+
+
+def assert_false(value: Any, msg: str = "") -> None:
+    """Assert that value is falsy."""
+    if value:
+        suffix = f" — {msg}" if msg else ""
+        raise AssertionFailure(f"assert_false failed: {value!r} is not falsy{suffix}")
+
+
+def assert_in(item: Any, container: Any, msg: str = "") -> None:
+    """Assert that item is contained in container."""
+    if item not in container:
+        suffix = f" — {msg}" if msg else ""
+        raise AssertionFailure(f"assert_in failed: {item!r} not in {container!r}{suffix}")
+
+
+def assert_is_none(value: Any, msg: str = "") -> None:
+    """Assert that value is None."""
+    if value is not None:
+        suffix = f" — {msg}" if msg else ""
+        raise AssertionFailure(f"assert_is_none failed: {value!r} is not None{suffix}")
+
+
+def assert_raises(
+    exc_type: type[Exception],
+    callable_: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    """Assert that callable_ raises exc_type when invoked with args/kwargs."""
+    try:
+        callable_(*args, **kwargs)
+    except exc_type:
+        return
+    except Exception as exc:
+        raise AssertionFailure(
+            f"assert_raises: expected {exc_type.__name__}, got {type(exc).__name__}"
+        ) from exc
+    raise AssertionFailure(f"assert_raises: {exc_type.__name__} was not raised")
+
+
+# ---------------------------------------------------------------------------
+# Fixture system
+# ---------------------------------------------------------------------------
+
+_FIXTURES: dict[str, Callable[..., Any]] = {}
+
+
+def fixture(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Register a callable as a named fixture.
+
+    Supports plain functions, generator functions (setup/teardown via yield),
+    and async functions.
+    """
+    _FIXTURES[func.__name__] = func
+    return func
+
+
+def _resolve_fixtures(func: Callable[..., Any]) -> dict[str, Any]:
+    """Resolve fixtures needed by func based on its parameter names."""
+    sig = inspect.signature(func)
+    resolved: dict[str, Any] = {}
+    for param_name in sig.parameters:
+        if param_name not in _FIXTURES:
+            continue
+        fixture_fn = _FIXTURES[param_name]
+        if inspect.isgeneratorfunction(fixture_fn):
+            gen: Generator[Any, None, None] = fixture_fn()
+            resolved[param_name] = next(gen)
+            resolved[f"__teardown_{param_name}"] = gen
+        else:
+            resolved[param_name] = fixture_fn  # async resolved lazily
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Test registration
+# ---------------------------------------------------------------------------
+
+_REGISTERED_TESTS: list[Callable[..., Any]] = []
+
+
+def test(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator that registers a function as a test case."""
+    _REGISTERED_TESTS.append(func)
+    return func
+
+
+# ---------------------------------------------------------------------------
+# Test discovery
+# ---------------------------------------------------------------------------
+
+def discover_tests(module: Any) -> list[Callable[..., Any]]:
+    """Return all functions in module whose name starts with ``test_``."""
+    return [
+        obj
+        for name, obj in inspect.getmembers(module, inspect.isfunction)
+        if name.startswith("test_")
+    ]
+
+
+async def discover_tests_in_path(path: Path) -> list[Callable[..., Any]]:
+    """Recursively import ``test_*.py`` files under path and collect test functions."""
+    tests: list[Callable[..., Any]] = []
+    for test_file in sorted(path.rglob("test_*.py")):
+        spec = importlib.util.spec_from_file_location(test_file.stem, test_file)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[test_file.stem] = module
+        try:
+            spec.loader.exec_module(module)  # type: ignore[union-attr]
+        except Exception as exc:
+            log.error("failed to import test module", file=str(test_file), error=str(exc))
+            continue
+        tests.extend(discover_tests(module))
+    return tests
+
+
+# ---------------------------------------------------------------------------
+# Test runner
+# ---------------------------------------------------------------------------
+
+async def run_test(func: Callable[..., Any]) -> TestResult:
+    """Execute a single test function and return its TestResult."""
+    name = func.__qualname__
+    all_fixtures = _resolve_fixtures(func)
+    kwargs = {k: v for k, v in all_fixtures.items() if not k.startswith("__teardown_")}
+
+    for key, value in list(kwargs.items()):
+        if asyncio.iscoroutinefunction(value):
+            kwargs[key] = await value()
+
+    start = time.monotonic()
+    try:
+        if asyncio.iscoroutinefunction(func):
+            await func(**kwargs)
+        else:
+            func(**kwargs)
+        elapsed = round((time.monotonic() - start) * 1000, 2)
+        return TestResult(name=name, passed=True, duration_ms=elapsed)
+    except (AssertionFailure, AssertionError) as exc:
+        elapsed = round((time.monotonic() - start) * 1000, 2)
+        return TestResult(name=name, passed=False, error=str(exc), duration_ms=elapsed)
+    except Exception as exc:
+        elapsed = round((time.monotonic() - start) * 1000, 2)
+        return TestResult(
+            name=name,
+            passed=False,
+            error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+            duration_ms=elapsed,
+        )
+    finally:
+        for key, gen in all_fixtures.items():
+            if not key.startswith("__teardown_"):
+                continue
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+
+
+async def run_suite(
+    tests: list[Callable[..., Any]],
+    suite_name: str = "test suite",
+) -> SuiteResult:
+    """Run a list of test functions sequentially and log each result."""
+    suite = SuiteResult(suite_name=suite_name)
+    log.info("starting suite", suite=suite_name, count=len(tests))
+
+    for func in tests:
+        result = await run_test(func)
+        suite.results.append(result)
+        if result.passed:
+            log.info("PASS", test=result.name, duration_ms=result.duration_ms)
+        else:
+            log.error("FAIL", test=result.name, error=result.error, duration_ms=result.duration_ms)
+
+    log.info(
+        "suite finished",
+        suite=suite_name,
+        passed=suite.passed,
+        failed=suite.failed,
+        total=suite.total,
+    )
+    return suite
+
+
+def run(
+    tests: Optional[list[Callable[..., Any]]] = None,
+    suite_name: str = "test suite",
+) -> SuiteResult:
+    """Run registered (or provided) tests synchronously and return the SuiteResult."""
+    target = tests if tests is not None else _REGISTERED_TESTS
+    return asyncio.run(run_suite(target, suite_name=suite_name))
+```
+
+---
+
+**Usage example:**
+
+```python
+from test_framework import (
+    fixture, test, run,
+    assert_equal, assert_true, assert_raises, assert_in,
+)
+
+# --- Fixtures ---
+
+@fixture
+def sample_data():
+    data = {"key": "value", "nums": [1, 2, 3]}
+    yield data
+    # teardown runs here after the test
+
+@fixture
+def counter():
+    return 0
+
+# --- Tests (decorator registration) ---
+
+@test
+def test_equal(counter):
+    assert_equal(counter, 0)
+
+@test
+def test_list(sample_data):
+    assert_in("nums", sample_data)
+    assert_equal(len(sample_data["nums"]), 3)
+
+@test
+def test_raises_on_bad_key(sample_data):
+    assert_raises(KeyError, lambda: sample_data["missing"])
+
+# --- Discovery-based (no decorator needed) ---
+
+def test_string_ops():
+    assert_equal("hello".upper(), "HELLO")
+
+# --- Run ---
+
+if __name__ == "__main__":
+    import test_framework, sys
+    results = run(suite_name="my suite")
+    sys.exit(0 if results.failed == 0 else 1)
+```
+
+---
+
+**Key design decisions:**
+
+| Feature | Implementation |
+|---|---|
+| Output | `structlog` (project rules prohibit `print`) |
+| Data models | `TestResult` / `SuiteResult` as Pydantic `BaseModel` |
+| Fixtures | `@fixture` decorator; generator fixtures get setup/teardown via `yield` |
+| Registration | `@test` decorator OR naming convention `test_*` via `discover_tests()` |
+| Discovery | `discover_tests(module)` or `discover_tests_in_path(path)` for file scanning |
+| Runner | `run()` (sync entrypoint) → `run_suite()` / `run_test()` (async) |
+| Async tests | Supported natively — `async def test_*` works transparently |

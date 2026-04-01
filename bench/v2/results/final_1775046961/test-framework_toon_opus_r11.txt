@@ -1,0 +1,15 @@
+It looks like writes to this directory are being blocked. Could you approve the file write permission so I can create `test_framework.py`? The file contains:
+
+**Assertions**: `assert_equal`, `assert_not_equal`, `assert_true`, `assert_false`, `assert_is_none`, `assert_is_not_none`, `assert_in`, `assert_raises`
+
+**Fixtures**: `@fixture` decorator registers functions by name; test parameters are auto-resolved from the registry (supports nested fixture dependencies via `inspect.signature`)
+
+**Test registration**: `@test` and `@skip` decorators add functions to a global test list
+
+**Discovery**: `discover(path)` recursively imports all `test_*.py` files so their decorators fire
+
+**Runner**: `run()` executes all registered tests, catches assertion failures vs unexpected errors, times each test, and prints a summary
+
+**Demo** (in `__main__`): 7 tests including fixture injection, an intentional failure, and a skip — so you can see all output states.
+
+Want me to try writing it to a different location, or would you like to approve the write?

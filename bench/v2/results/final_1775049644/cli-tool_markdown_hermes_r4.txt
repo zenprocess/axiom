@@ -1,0 +1,155 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by column value.
+
+Usage:
+    python csv_filter.py input.csv column_name column_value [--output output.csv]
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for CSV filtering."""
+    input_file: Path
+    output_file: Path | None
+    column_name: str
+    column_value: str
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("input_file", type=Path, help="Input CSV file path")
+    parser.add_argument("column_name", type=str, help="Column name to filter on")
+    parser.add_argument("column_value", type=str, help="Value to match in the column")
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        help="Output file path (default: stdout)",
+    )
+    return parser.parse_args()
+
+
+def read_csv(input_path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """Read CSV file and return headers and rows."""
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    try:
+        with open(input_path, newline='', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            headers = reader.fieldnames or []
+            rows = list(reader)
+            return headers, rows
+    except csv.Error as e:
+        raise ValueError(f"Error parsing CSV file: {e}")
+
+
+def filter_rows(
+    rows: list[dict[str, str]],
+    column_name: str,
+    column_value: str,
+) -> list[dict[str, str]]:
+    """Filter rows where column_name equals column_value."""
+    filtered = []
+    for i, row in enumerate(rows):
+        if column_name in row and row[column_name] == column_value:
+            filtered.append(row)
+        if (i + 1) % 1000 == 0:
+            log.info("filtering_progress", processed=i + 1, filtered=len(filtered))
+    return filtered
+
+
+def write_csv(
+    headers: list[str],
+    rows: list[dict[str, str]],
+    output_path: Path | None,
+) -> None:
+    """Write filtered rows to CSV file or stdout."""
+    if output_path:
+        try:
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=headers)
+                writer.writeheader()
+                writer.writerows(rows)
+            log.info("output_written", path=str(output_path), row_count=len(rows))
+        except IOError as e:
+            log.error("output_error", path=str(output_path), error=str(e))
+            sys.exit(1)
+    else:
+        writer = csv.DictWriter(sys.stdout, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def main() -> None:
+    """Main entry point."""
+    args = parse_args()
+
+    try:
+        config = FilterConfig(
+            input_file=args.input_file,
+            output_file=args.output,
+            column_name=args.column_name,
+            column_value=args.column_value,
+        )
+    except ValueError as e:
+        log.error("invalid_config", error=str(e))
+        sys.exit(1)
+
+    log.info("starting_filter", file=str(config.input_file), column=config.column_name, value=config.column_value)
+
+    try:
+        headers, rows = read_csv(config.input_file)
+        log.info("read_csv", row_count=len(rows))
+    except (FileNotFoundError, ValueError) as e:
+        log.error("file_error", error=str(e))
+        sys.exit(1)
+
+    log.info("filtering_rows", row_count=len(rows))
+    filtered_rows = filter_rows(rows, config.column_name, config.column_value)
+    log.info("filtering_complete", total=len(rows), filtered=len(filtered_rows))
+
+    write_csv(headers, filtered_rows, config.output_file)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+This CLI tool:
+
+1. Uses `argparse` for command-line argument parsing with clear help text
+2. Uses `structlog` for structured logging instead of print statements
+3. Uses Pydantic for configuration validation
+4. Implements proper error handling for file operations
+5. Provides progress output during filtering (every 1000 rows)
+6. Outputs filtered results to stdout or a file
+7. Follows all the specified development rules:
+   - No `print()` statements
+   - Uses `structlog` for logging
+   - Includes type hints
+   - Uses Pydantic models for data structures
+   - Proper error handling with try/except blocks
+   - Includes docstrings following Google-style format
+
+To use the tool:
+```bash
+python csv_filter.py data.csv status active
+python csv_filter.py data.csv status active -o filtered.csv
+```
+
+The tool will show progress during filtering and provide clear error messages if files are missing or invalid.

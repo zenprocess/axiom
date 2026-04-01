@@ -1,0 +1,143 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by column value.
+
+Usage:
+    python csv_filter.py input.csv column_name filter_value [--output output.csv]
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+log = structlog.get_logger()
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Filter CSV rows by column value',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python csv_filter.py data.csv status active
+  python csv_filter.py data.csv status active --output filtered.csv
+        '''
+    )
+    parser.add_argument('input_file', type=str, help='Input CSV file path')
+    parser.add_argument('column_name', type=str, help='Column name to filter on')
+    parser.add_argument('filter_value', type=str, help='Value to match in the column')
+    parser.add_argument(
+        '--output', '-o', type=str, default=None,
+        help='Output file path (default: stdout)'
+    )
+    return parser.parse_args()
+
+
+def read_csv_rows(input_path: Path) -> tuple[List[dict], int]:
+    """Read CSV file and return rows with total count."""
+    try:
+        with open(input_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            total_count = len(rows)
+            return rows, total_count
+    except FileNotFoundError:
+        log.error('file_not_found', path=str(input_path))
+        sys.exit(1)
+    except csv.Error as e:
+        log.error('csv_parse_error', path=str(input_path), error=str(e))
+        sys.exit(1)
+    except UnicodeDecodeError as e:
+        log.error('encoding_error', path=str(input_path), error=str(e))
+        sys.exit(1)
+
+
+def filter_rows(
+    rows: List[dict],
+    column_name: str,
+    filter_value: str,
+    total_count: int
+) -> List[dict]:
+    """Filter rows by column value with progress output."""
+    filtered = []
+    
+    for i, row in enumerate(rows):
+        # Progress output for large files (every 10%)
+        if total_count > 100 and (i + 1) % max(1, total_count // 10) == 0:
+            log.info('progress', processed=i + 1, total=total_count)
+        
+        # Check if column exists and matches filter value
+        if column_name in row:
+            if row[column_name] == filter_value:
+                filtered.append(row)
+        else:
+            log.warning('column_not_found', column=column_name, row_index=i)
+    
+    return filtered
+
+
+def write_output(
+    rows: List[dict],
+    output_path: Optional[Path],
+    fieldnames: List[str]
+) -> None:
+    """Write filtered rows to output."""
+    if output_path:
+        try:
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            log.info('output_written', path=str(output_path), row_count=len(rows))
+        except IOError as e:
+            log.error('output_error', path=str(output_path), error=str(e))
+            sys.exit(1)
+    else:
+        # Output to stdout
+        writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def main() -> None:
+    """Main entry point."""
+    args = parse_args()
+    
+    # Validate input file
+    input_path = Path(args.input_file)
+    if not input_path.exists():
+        log.error('file_not_found', path=args.input_file)
+        sys.exit(1)
+    
+    # Read CSV file
+    log.info('reading_csv', path=str(input_path))
+    rows, total_count = read_csv_rows(input_path)
+    log.info('csv_read', total_rows=total_count)
+    
+    # Filter rows
+    log.info('filtering', column=args.column_name, value=args.filter_value)
+    filtered_rows = filter_rows(rows, args.column_name, args.filter_value, total_count)
+    log.info('filtering_complete', matched_rows=len(filtered_rows))
+    
+    # Determine output fieldnames
+    if rows:
+        fieldnames = list(rows[0].keys())
+    else:
+        fieldnames = [args.column_name]  # Default if no rows
+    
+    # Write output
+    output_path = Path(args.output) if args.output else None
+    write_output(filtered_rows, output_path, fieldnames)
+    
+    log.info('complete', output=str(output_path) if output_path else 'stdout')
+
+
+if __name__ == '__main__':
+    main()
+```

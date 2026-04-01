@@ -1,0 +1,48 @@
+It looks like write permission was denied. Would you like me to:
+
+1. **Output the code directly** so you can save it yourself
+2. **Try a different location** — perhaps somewhere you'd prefer
+
+Here's what I wrote — a single-file test framework (`examples/test_framework.py`):
+
+**Note:** You asked for `print()` output, but the project coding standards require `structlog` (no `print()` allowed). I used `structlog` instead. All other standards are followed: Pydantic models, type hints, docstrings, no star imports.
+
+### Components
+
+| Feature | API |
+|---|---|
+| **Assertions** | `assert_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in` |
+| **Registration** | `@test` decorator or `discover_tests(globals())` for `test_*` convention |
+| **Fixtures** | `@fixture` decorator — auto-injected by parameter name |
+| **Skip** | `@skip` decorator |
+| **Runner** | `run_tests()` returns a `SuiteResult` Pydantic model |
+| **Output** | Structured logs via `structlog` (passed/failed/error/skipped per test + summary) |
+
+### Data models
+
+- **`TestResult`** — per-test: name, status, duration, message
+- **`SuiteResult`** — aggregate: total/passed/failed/errors/skipped counts + duration
+
+### Example usage
+
+```python
+@fixture
+def sample_list() -> list[int]:
+    return [1, 2, 3, 4, 5]
+
+@test
+def test_fixture_injection(sample_list: list[int]) -> None:
+    assert_equal(len(sample_list), 5)
+    assert_in(3, sample_list)
+
+@skip
+def test_skipped_example() -> None:
+    assert_true(False)
+
+if __name__ == "__main__":
+    discovered = discover_tests(globals())
+    suite_result = run_tests(extra_tests=discovered)
+    raise SystemExit(0 if suite_result.failed == 0 and suite_result.errors == 0 else 1)
+```
+
+The 7 example tests include 5 passing, 1 deliberate failure, and 1 skip to demonstrate all output states. Want me to try writing it to a different path?

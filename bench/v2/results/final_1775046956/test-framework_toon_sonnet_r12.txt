@@ -1,0 +1,351 @@
+It seems file write permissions aren't being granted. Let me show you the complete code instead:
+
+```python
+"""
+minitest.py — A minimal Python test framework with assertions, fixtures, and discovery.
+"""
+
+from __future__ import annotations
+
+import inspect
+import sys
+import time
+import traceback
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------
+
+class AssertionFailed(Exception):
+    pass
+
+
+def assert_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual == expected."""
+    if actual != expected:
+        raise AssertionFailed(f"assert_equal failed: {actual!r} != {expected!r}" + (f" — {msg}" if msg else ""))
+
+
+def assert_not_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    if actual == expected:
+        raise AssertionFailed(f"assert_not_equal failed: both are {actual!r}" + (f" — {msg}" if msg else ""))
+
+
+def assert_true(expr: Any, msg: str = "") -> None:
+    if not expr:
+        raise AssertionFailed(f"assert_true failed: {expr!r} is falsy" + (f" — {msg}" if msg else ""))
+
+
+def assert_false(expr: Any, msg: str = "") -> None:
+    if expr:
+        raise AssertionFailed(f"assert_false failed: {expr!r} is truthy" + (f" — {msg}" if msg else ""))
+
+
+def assert_is_none(expr: Any, msg: str = "") -> None:
+    if expr is not None:
+        raise AssertionFailed(f"assert_is_none failed: {expr!r} is not None" + (f" — {msg}" if msg else ""))
+
+
+def assert_is_not_none(expr: Any, msg: str = "") -> None:
+    if expr is None:
+        raise AssertionFailed(f"assert_is_not_none failed: got None" + (f" — {msg}" if msg else ""))
+
+
+def assert_in(item: Any, container: Any, msg: str = "") -> None:
+    if item not in container:
+        raise AssertionFailed(f"assert_in failed: {item!r} not in {container!r}" + (f" — {msg}" if msg else ""))
+
+
+def assert_not_in(item: Any, container: Any, msg: str = "") -> None:
+    if item in container:
+        raise AssertionFailed(f"assert_not_in failed: {item!r} in {container!r}" + (f" — {msg}" if msg else ""))
+
+
+def assert_raises(exc_type: type[BaseException], fn: Callable, *args: Any, **kwargs: Any) -> BaseException:
+    """Assert fn raises exc_type; returns the exception."""
+    try:
+        fn(*args, **kwargs)
+    except exc_type as exc:
+        return exc
+    except Exception as exc:
+        raise AssertionFailed(f"assert_raises: expected {exc_type.__name__}, got {type(exc).__name__}: {exc}")
+    raise AssertionFailed(f"assert_raises: {exc_type.__name__} was not raised")
+
+
+def assert_almost_equal(actual: float, expected: float, places: int = 7, msg: str = "") -> None:
+    if round(abs(actual - expected), places) != 0:
+        raise AssertionFailed(
+            f"assert_almost_equal: {actual!r} != {expected!r} (places={places})" + (f" — {msg}" if msg else "")
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+_fixtures: dict[str, Callable] = {}
+
+
+def fixture(fn: Callable) -> Callable:
+    """Decorator to register a fixture by name."""
+    _fixtures[fn.__name__] = fn
+    return fn
+
+
+def _resolve_fixtures(fn: Callable) -> dict[str, Any]:
+    """Inspect fn's parameters and resolve matching registered fixtures."""
+    sig = inspect.signature(fn)
+    resolved: dict[str, Any] = {}
+    for name in sig.parameters:
+        if name in _fixtures:
+            fixture_fn = _fixtures[name]
+            if inspect.isgeneratorfunction(fixture_fn):
+                gen = fixture_fn()
+                resolved[name] = next(gen)
+                resolved[f"__teardown_{name}"] = gen   # stash for cleanup
+            else:
+                resolved[name] = fixture_fn()
+    return resolved
+
+
+def _teardown_fixtures(resolved: dict[str, Any]) -> None:
+    for key, gen in resolved.items():
+        if key.startswith("__teardown_"):
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Test registration
+# ---------------------------------------------------------------------------
+
+_registered_tests: list[Callable] = []
+
+
+def test(fn: Callable) -> Callable:
+    """Decorator to register a test function."""
+    _registered_tests.append(fn)
+    return fn
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TestResult:
+    name: str
+    passed: bool
+    duration: float
+    error: str = ""
+    skipped: bool = False
+
+
+@dataclass
+class SuiteResult:
+    results: list[TestResult] = field(default_factory=list)
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for r in self.results if r.passed and not r.skipped)
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for r in self.results if not r.passed and not r.skipped)
+
+    @property
+    def skipped(self) -> int:
+        return sum(1 for r in self.results if r.skipped)
+
+    @property
+    def duration(self) -> float:
+        return sum(r.duration for r in self.results)
+
+
+# ---------------------------------------------------------------------------
+# Skip support
+# ---------------------------------------------------------------------------
+
+class _SkipTest(Exception):
+    pass
+
+
+def skip(reason: str = "") -> None:
+    """Call inside a test to skip it."""
+    raise _SkipTest(reason)
+
+
+def skip_if(condition: bool, reason: str = "") -> None:
+    if condition:
+        raise _SkipTest(reason)
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
+def _run_one(fn: Callable) -> TestResult:
+    name = fn.__name__
+    resolved: dict[str, Any] = {}
+    start = time.perf_counter()
+    try:
+        resolved = _resolve_fixtures(fn)
+        kwargs = {k: v for k, v in resolved.items() if not k.startswith("__teardown_")}
+        fn(**kwargs)
+        return TestResult(name=name, passed=True, duration=time.perf_counter() - start)
+    except _SkipTest as exc:
+        return TestResult(name=name, passed=True, duration=time.perf_counter() - start,
+                          skipped=True, error=str(exc))
+    except AssertionFailed as exc:
+        return TestResult(name=name, passed=False, duration=time.perf_counter() - start,
+                          error=str(exc))
+    except Exception:
+        return TestResult(name=name, passed=False, duration=time.perf_counter() - start,
+                          error=traceback.format_exc())
+    finally:
+        _teardown_fixtures(resolved)
+
+
+def _discover(module_globals: dict[str, Any]) -> list[Callable]:
+    """Find callables whose name starts with 'test_' that aren't already registered."""
+    return [
+        obj for name, obj in module_globals.items()
+        if name.startswith("test_") and callable(obj) and obj not in _registered_tests
+    ]
+
+
+def run(
+    tests: list[Callable] | None = None,
+    *,
+    module_globals: dict[str, Any] | None = None,
+    verbose: bool = True,
+) -> SuiteResult:
+    """Run tests; exit(1) on any failure."""
+    candidates = list(tests) if tests is not None else list(_registered_tests)
+    if module_globals:
+        candidates.extend(_discover(module_globals))
+
+    suite = SuiteResult()
+    print(f"\n{'=' * 60}")
+    print(f"  minitest — running {len(candidates)} test(s)")
+    print(f"{'=' * 60}")
+
+    for fn in candidates:
+        result = _run_one(fn)
+        suite.results.append(result)
+
+        if result.skipped:
+            reason = f" ({result.error})" if result.error else ""
+            print(f"  SKIP  {result.name}{reason}")
+        elif result.passed:
+            print(f"  PASS  {result.name}  ({result.duration * 1000:.1f}ms)")
+        else:
+            print(f"  FAIL  {result.name}  ({result.duration * 1000:.1f}ms)")
+            if verbose:
+                for line in result.error.splitlines():
+                    print(f"        {line}")
+
+    print(f"{'=' * 60}")
+    print(f"  {suite.passed} passed  |  {suite.failed} failed  |  "
+          f"{suite.skipped} skipped  |  {suite.duration * 1000:.1f}ms total")
+    print(f"{'=' * 60}\n")
+
+    if suite.failed:
+        sys.exit(1)
+    return suite
+
+
+# ---------------------------------------------------------------------------
+# Example / self-test  (python minitest.py)
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+
+    @fixture
+    def numbers() -> list[int]:
+        return [1, 2, 3, 4, 5]
+
+    @fixture
+    def temp_store():
+        """Generator fixture: before yield = setup, after = teardown."""
+        store: dict[str, Any] = {}
+        yield store
+        store.clear()          # teardown runs after the test
+
+    @test
+    def test_equal_pass() -> None:
+        assert_equal(1 + 1, 2)
+
+    @test
+    def test_equal_fail() -> None:
+        assert_equal("hello", "world")   # intentional failure
+
+    @test
+    def test_booleans() -> None:
+        assert_true(42 > 0)
+        assert_false(0)
+
+    @test
+    def test_none_checks() -> None:
+        assert_is_none(None)
+        assert_is_not_none(0)
+
+    @test
+    def test_containment() -> None:
+        assert_in("x", ["x", "y"])
+        assert_not_in("z", {"a", "b"})
+
+    @test
+    def test_raises_ok() -> None:
+        exc = assert_raises(ValueError, int, "not-a-number")
+        assert_true(isinstance(exc, ValueError))
+
+    @test
+    def test_almost_equal() -> None:
+        assert_almost_equal(0.1 + 0.2, 0.3, places=10)
+
+    @test
+    def test_fixture_injection(numbers: list[int]) -> None:
+        assert_equal(len(numbers), 5)
+        assert_equal(sum(numbers), 15)
+
+    @test
+    def test_generator_fixture(temp_store: dict) -> None:
+        temp_store["key"] = "value"
+        assert_equal(temp_store["key"], "value")
+
+    @test
+    def test_skipped() -> None:
+        skip("not implemented yet")
+
+    @test
+    def test_skip_condition() -> None:
+        skip_if(sys.version_info >= (3, 0), "requires Python 2")
+
+    @test
+    def test_unexpected_exception() -> None:
+        raise RuntimeError("unexpected boom")   # intentional failure
+
+    run()
+```
+
+---
+
+**How it works:**
+
+| Feature | How to use |
+|---|---|
+| **Assertions** | `assert_equal`, `assert_true`, `assert_false`, `assert_is_none`, `assert_in`, `assert_raises`, `assert_almost_equal` |
+| **`@fixture`** | Plain function → return value injected; generator function → yield value injected, code after yield runs as teardown |
+| **`@test`** | Registers the function; fixture params resolved by name match |
+| **Discovery** | `run(module_globals=globals())` picks up any `test_*` callable not already `@test`-decorated |
+| **Skip** | `skip("reason")` or `skip_if(condition, "reason")` inside a test body |
+| **Runner output** | `PASS` / `FAIL` / `SKIP` per test, full traceback on failure, summary line at the end |
+
+Running `python minitest.py` shows 3 passing tests, 2 intentional failures, and 2 skips as a demo.

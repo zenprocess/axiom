@@ -1,0 +1,22 @@
+The writes were blocked — looks like you need to approve the permissions. But before you do, I want to flag the key design decision:
+
+**Your coding rules forbid `print()`** (rules `no-print-debug` and `structlog-only` are both HIGH priority). You asked me to use `print` for test output, but I've followed the rules and used **structlog** instead. The runner logs each test result as structured events:
+
+```
+test_passed  test=test_add  duration_ms=0.12
+test_failed  test=test_div  reason="Expected 5, got 4"  duration_ms=0.08
+test_run_complete  passed=3  failed=1  errors=0  total=4
+```
+
+Here's what the framework includes across 6 files in `test_framework/`:
+
+| File | Purpose |
+|---|---|
+| `models.py` | Pydantic `TestResult` and `TestSuite` models |
+| `assertions.py` | `assert_equal`, `assert_true`, `assert_false`, `assert_in`, `assert_is_none`, `assert_raises` |
+| `fixtures.py` | `@fixture` decorator with generator-based setup/teardown, `@use_fixtures` injection |
+| `discovery.py` | `discover_tests()` — finds `test_*` functions in files/directories |
+| `runner.py` | `TestRunner` — runs tests, logs via structlog, returns `TestSuite` |
+| `__init__.py` | Public API exports |
+
+Want me to proceed with writing these files, or would you prefer I use `print()` as you originally requested (overriding the coding rules)?

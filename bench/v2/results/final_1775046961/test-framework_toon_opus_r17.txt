@@ -1,0 +1,7 @@
+It looks like write permissions are being blocked. Could you approve the file write permission so I can create `test_framework.py`? The file contains:
+
+- **Assertions**: `assert_equal`, `assert_not_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in`
+- **Fixtures**: `@fixture` decorator that registers provider functions; parameters are auto-injected by name into test functions
+- **Test registration**: `@test` decorator + `discover()` which also finds `test_*` functions by convention
+- **Runner**: `run()` executes all tests, prints PASS/FAIL per test, and a summary line. Returns a `RunSummary` dataclass
+- **Demo**: 7 self-tests (including one deliberate failure) in `__main__`

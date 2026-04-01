@@ -1,0 +1,75 @@
+```python
+"""Module for fetching user data from a REST API."""
+
+from typing import Optional
+import httpx
+from pydantic import BaseModel
+
+
+class User(BaseModel):
+    """Model representing a user."""
+    id: int
+    name: str
+    username: str
+    email: str
+    address: dict
+    phone: str
+    website: str
+    company: dict
+
+
+class APIClient:
+    """Client for fetching user data from the REST API."""
+
+    def __init__(self, base_url: str):
+        """
+        Initialize the API client.
+
+        Args:
+            base_url: The base URL of the API (e.g., "https://api.example.com")
+        """
+        self.base_url = base_url.rstrip("/")
+
+    async def fetch_user(self, user_id: int) -> Optional[User]:
+        """
+        Fetch a user by ID from the API.
+
+        Args:
+            user_id: The ID of the user to fetch
+
+        Returns:
+            User object if successful, None if user not found or error occurred
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                user_data = response.json()
+                return User(**user_data)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        except httpx.RequestError as exc:
+            print(f"Request error: {exc}")
+            return None
+        except Exception as exc:
+            print(f"Unexpected error: {exc}")
+            return None
+
+
+async def main():
+    """Main function to fetch user #42."""
+    client = APIClient("https://api.example.com")
+    user = await client.fetch_user(42)
+    if user:
+        print(f"User {user.id}: {user.name} ({user.email})")
+    else:
+        print("User #42 not found or an error occurred.")
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```

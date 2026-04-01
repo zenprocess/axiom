@@ -1,0 +1,232 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by a column value.
+
+This module provides a command-line interface for filtering CSV files
+based on a specified column and value.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+
+def setup_logging() -> structlog.BoundLogger:
+    """Configure structlog with appropriate processors."""
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.ExtraAdder(),
+            structlog.dev.ConsoleRenderer(),
+        ],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+    return structlog.get_logger()
+
+
+logger = setup_logging()
+
+
+class FilterConfig:
+    """Configuration for the CSV filter operation."""
+
+    def __init__(
+        self,
+        input_file: Path,
+        output_file: Optional[Path],
+        column_name: str,
+        column_value: str,
+        delimiter: str,
+    ):
+        self.input_file = input_file
+        self.output_file = output_file
+        self.column_name = column_name
+        self.column_value = column_value
+        self.delimiter = delimiter
+
+
+def parse_arguments() -> FilterConfig:
+    """Parse command line arguments and return a FilterConfig."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s data.csv name "John"          Filter rows where 'name' column equals 'John'
+  %(prog)s data.csv status active -o filtered.csv  Write output to filtered.csv
+  %(prog)s data.csv category "Electronics" -d ";"  Use semicolon as delimiter
+        """,
+    )
+
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Input CSV file path",
+    )
+    parser.add_argument(
+        "column_name",
+        type=str,
+        help="Name of the column to filter on",
+    )
+    parser.add_argument(
+        "column_value",
+        type=str,
+        help="Value to match in the specified column",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        dest="output_file",
+        type=Path,
+        help="Output CSV file path (stdout if not specified)",
+    )
+    parser.add_argument(
+        "-d",
+        "--delimiter",
+        type=str,
+        default=",",
+        help="CSV delimiter (default: ',')",
+    )
+
+    args = parser.parse_args()
+    return FilterConfig(
+        input_file=args.input_file,
+        output_file=args.output_file,
+        column_name=args.column_name,
+        column_value=args.column_value,
+        delimiter=args.delimiter,
+    )
+
+
+def read_csv_file(input_path: Path, delimiter: str) -> List[dict]:
+    """Read CSV file and return list of dictionaries.
+
+    Args:
+        input_path: Path to the input CSV file
+        delimiter: Column delimiter used in the CSV file
+
+    Returns:
+        List of dictionaries representing CSV rows
+    """
+    try:
+        with open(input_path, "r", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile, delimiter=delimiter)
+            return list(reader)
+    except FileNotFoundError:
+        logger.error("Input file not found", path=str(input_path))
+        sys.exit(1)
+    except PermissionError:
+        logger.error("Permission denied reading file", path=str(input_path))
+        sys.exit(1)
+    except csv.Error as e:
+        logger.error("CSV parsing error", error=str(e))
+        sys.exit(1)
+
+
+def filter_rows(
+    rows: List[dict], column_name: str, column_value: str
+) -> List[dict]:
+    """Filter rows by column value.
+
+    Args:
+        rows: List of CSV row dictionaries
+        column_name: Name of the column to filter on
+        column_value: Value to match in the specified column
+
+    Returns:
+        List of filtered rows
+    """
+    filtered = []
+    for i, row in enumerate(rows):
+        if row.get(column_name) == column_value:
+            filtered.append(row)
+        # Progress output (using structlog)
+        if (i + 1) % 1000 == 0:
+            logger.info(
+                "Processing rows", processed=i + 1, total=len(rows)
+            )
+    return filtered
+
+
+def write_csv_output(
+    rows: List[dict], output_path: Optional[Path], delimiter: str
+) -> None:
+    """Write filtered rows to output.
+
+    Args:
+        rows: List of filtered row dictionaries
+        output_path: Path to output file (stdout if None)
+        delimiter: Column delimiter for output
+    """
+    if not rows:
+        logger.warning("No rows matched the filter criteria")
+        return
+
+    fieldnames = rows[0].keys()
+
+    try:
+        if output_path:
+            with open(output_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=delimiter)
+                writer.writeheader()
+                writer.writerows(rows)
+            logger.info("Output written to file", path=str(output_path))
+        else:
+            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames, delimiter=delimiter)
+            writer.writeheader()
+            writer.writerows(rows)
+    except PermissionError:
+        logger.error("Permission denied writing file", path=str(output_path))
+        sys.exit(1)
+    except csv.Error as e:
+        logger.error("CSV writing error", error=str(e))
+        sys.exit(1)
+
+
+def main() -> None:
+    """Main entry point for the CSV filter CLI tool."""
+    config = parse_arguments()
+
+    logger.info(
+        "Starting CSV filter operation",
+        input_file=str(config.input_file),
+        column_name=config.column_name,
+        column_value=config.column_value,
+    )
+
+    # Verify input file exists
+    if not config.input_file.exists():
+        logger.error("Input file does not exist", path=str(config.input_file))
+        sys.exit(1)
+
+    # Read CSV file
+    rows = read_csv_file(config.input_file, config.delimiter)
+    logger.info("Read rows from input file", total_rows=len(rows))
+
+    # Filter rows
+    filtered_rows = filter_rows(
+        rows, config.column_name, config.column_value
+    )
+    logger.info(
+        "Filtering complete",
+        total_rows=len(rows),
+        filtered_rows=len(filtered_rows),
+    )
+
+    # Write output
+    write_csv_output(filtered_rows, config.output_file, config.delimiter)
+
+
+if __name__ == "__main__":
+    main()
+```

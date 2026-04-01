@@ -1,0 +1,220 @@
+```python
+#!/usr/bin/env python3
+"""
+CSV Filter CLI Tool
+
+A command-line tool to filter CSV files by a column value.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import Optional
+
+import structlog
+from pydantic import BaseModel, ValidationError
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.format_exc_info,
+        structlog.dev.ConsoleRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=False,
+)
+
+log = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for CSV filtering."""
+    input_file: Path
+    output_file: Optional[Path] = None
+    column_name: str
+    column_value: str
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s data.csv --column Name --value "John Doe"
+  %(prog)s data.csv -c Status -v "active" -o output.csv
+        """
+    )
+    
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Input CSV file path"
+    )
+    
+    parser.add_argument(
+        "-c", "--column",
+        dest="column_name",
+        required=True,
+        help="Name of the column to filter on"
+    )
+    
+    parser.add_argument(
+        "-v", "--value",
+        dest="column_value",
+        required=True,
+        help="Value to match in the specified column"
+    )
+    
+    parser.add_argument(
+        "-o", "--output",
+        dest="output_file",
+        type=Path,
+        help="Output file path (default: stdout)"
+    )
+    
+    return parser.parse_args()
+
+
+def validate_config(args: argparse.Namespace) -> FilterConfig:
+    """Validate and convert arguments to FilterConfig model."""
+    try:
+        return FilterConfig(
+            input_file=args.input_file,
+            column_name=args.column_name,
+            column_value=args.column_value,
+            output_file=args.output_file
+        )
+    except ValidationError as e:
+        log.error("validation_error", errors=e.errors())
+        sys.exit(1)
+
+
+def read_csv_with_progress(filepath: Path, column_name: str, column_value: str):
+    """
+    Read CSV file and yield matching rows with progress tracking.
+    
+    Args:
+        filepath: Path to the input CSV file
+        column_name: Name of the column to filter on
+        column_value: Value to match in the specified column
+        
+    Yields:
+        Tuple of (row_dict, progress_percentage)
+    """
+    try:
+        with open(filepath, 'r', newline='', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            
+            # Check if column exists
+            if column_name not in reader.fieldnames:
+                log.error("column_not_found", column=column_name, available_columns=reader.fieldnames)
+                raise ValueError(f"Column '{column_name}' not found in CSV. Available columns: {reader.fieldnames}")
+            
+            # Count total rows for progress calculation
+            total_rows = sum(1 for _ in reader)
+            csvfile.seek(0)  # Reset to beginning
+            next(reader)  # Skip header
+            
+            matched_rows = 0
+            current_row = 0
+            
+            for row in reader:
+                current_row += 1
+                progress = (current_row / total_rows) * 100
+                
+                if row[column_name] == column_value:
+                    matched_rows += 1
+                    yield row, progress
+                else:
+                    # Log progress for non-matching rows too
+                    if current_row % 1000 == 0:
+                        log.debug("progress", current=current_row, total=total_rows, progress=f"{progress:.1f}%")
+            
+            log.info("filtering_complete", total_rows=current_row, matched_rows=matched_rows)
+            
+    except FileNotFoundError:
+        log.error("file_not_found", filepath=str(filepath))
+        raise
+    except PermissionError:
+        log.error("permission_denied", filepath=str(filepath))
+        raise
+
+
+def write_csv_output(rows, output_file: Optional[Path], fieldnames: list[str]) -> None:
+    """
+    Write filtered rows to output.
+    
+    Args:
+        rows: Iterator of row dictionaries
+        output_file: Output file path or None for stdout
+        fieldnames: Column names to include
+    """
+    try:
+        if output_file:
+            with open(output_file, 'w', newline='', encoding='utf-8') as outfile:
+                writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for row, _ in rows:
+                    writer.writerow({k: row[k] for k in fieldnames})
+            log.info("output_written", filepath=str(output_file))
+        else:
+            # Write to stdout
+            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+            writer.writeheader()
+            for row, _ in rows:
+                writer.writerow({k: row[k] for k in fieldnames})
+                
+    except IOError as e:
+        log.error("io_error", error=str(e))
+        raise
+
+
+def main() -> int:
+    """Main entry point."""
+    try:
+        args = parse_args()
+        config = validate_config(args)
+        
+        log.info("filter_start", input_file=str(config.input_file), 
+                column=config.column_name, value=config.column_value)
+        
+        # First pass: read and filter rows
+        rows = read_csv_with_progress(config.input_file, config.column_name, config.column_value)
+        
+        # Get fieldnames from first row
+        try:
+            first_row, _ = next(rows)
+            fieldnames = list(first_row.keys())
+            
+            # Reconstruct the iterator for writing
+            def row_generator():
+                yield first_row, 0
+                for row in rows:
+                    yield row
+                    
+            write_csv_output(row_generator(), config.output_file, fieldnames)
+            
+        except StopIteration:
+            # No matching rows found
+            log.info("no_matching_rows", column=config.column_name, value=config.column_value)
+            return 0
+            
+        return 0
+        
+    except KeyboardInterrupt:
+        log.warning("interrupted")
+        return 130
+    except Exception as e:
+        log.error("unexpected_error", error=str(e))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

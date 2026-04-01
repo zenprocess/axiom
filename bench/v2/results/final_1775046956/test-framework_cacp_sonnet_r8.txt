@@ -1,0 +1,11 @@
+Your request conflicts with the project's coding rules:
+
+- `structlog-only` (HIGH): "Use structlog, never import logging or print()"
+- `no-print-debug` (HIGH): "Never use print() for debugging or logging"
+
+You explicitly asked for `print` output, but the rules explicitly forbid it. Should I:
+
+1. **Follow the rules** — use `structlog` for test output (structured JSON/console output)
+2. **Override the rules** — use `print` as you requested (your explicit instruction takes precedence)
+
+Which do you prefer?

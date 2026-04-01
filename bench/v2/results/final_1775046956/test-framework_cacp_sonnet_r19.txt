@@ -1,0 +1,467 @@
+It seems write permissions need approval. Let me show you the complete implementation first so you can review it:
+
+---
+
+**Note on `print()` vs the rules:** Your project rules (`structlog-only: MUST_NOT`) forbid `print()` for output. The implementation below uses `structlog` instead. If you explicitly want `print()` here as a one-off exception, let me know and I'll adjust.
+
+---
+
+Here's the full framework across 4 files:
+
+### `test_framework/core.py`
+```python
+"""Core types and decorators for the test framework."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class TestStatus(str, Enum):
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    ERROR = "ERROR"
+    SKIPPED = "SKIPPED"
+
+
+@dataclass
+class TestResult:
+    """Result of a single test execution."""
+
+    name: str
+    status: TestStatus
+    duration_ms: float
+    message: str = ""
+    exception: BaseException | None = None
+
+
+@dataclass
+class TestSuite:
+    """Collection of test results for a module or class."""
+
+    name: str
+    results: list[TestResult] = field(default_factory=list)
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for r in self.results if r.status == TestStatus.PASSED)
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for r in self.results if r.status == TestStatus.FAILED)
+
+    @property
+    def errored(self) -> int:
+        return sum(1 for r in self.results if r.status == TestStatus.ERROR)
+
+    @property
+    def skipped(self) -> int:
+        return sum(1 for r in self.results if r.status == TestStatus.SKIPPED)
+
+    @property
+    def total(self) -> int:
+        return len(self.results)
+
+
+def test(func: Callable) -> Callable:
+    """Decorator to mark a function as a test."""
+    func._is_test = True
+    return func
+
+
+def fixture(func: Callable) -> Callable:
+    """Decorator to mark a function as a fixture (setup/teardown value)."""
+    func._is_fixture = True
+    return func
+
+
+class TestCase:
+    """Base class for test cases with fixture support."""
+
+    async def setup(self) -> None:
+        """Run before each test method."""
+
+    async def teardown(self) -> None:
+        """Run after each test method."""
+
+    async def _run_test(self, method_name: str) -> TestResult:
+        """Execute a single test method with setup/teardown."""
+        start = time.perf_counter()
+        try:
+            await self.setup()
+            method = getattr(self, method_name)
+            if inspect.iscoroutinefunction(method):
+                await method()
+            else:
+                method()
+            await self.teardown()
+            duration_ms = (time.perf_counter() - start) * 1000
+            return TestResult(
+                name=f"{type(self).__name__}.{method_name}",
+                status=TestStatus.PASSED,
+                duration_ms=duration_ms,
+            )
+        except AssertionError as exc:
+            duration_ms = (time.perf_counter() - start) * 1000
+            return TestResult(
+                name=f"{type(self).__name__}.{method_name}",
+                status=TestStatus.FAILED,
+                duration_ms=duration_ms,
+                message=str(exc),
+                exception=exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            duration_ms = (time.perf_counter() - start) * 1000
+            return TestResult(
+                name=f"{type(self).__name__}.{method_name}",
+                status=TestStatus.ERROR,
+                duration_ms=duration_ms,
+                message=f"{type(exc).__name__}: {exc}",
+                exception=exc,
+            )
+
+    def collect(self) -> list[str]:
+        """Return names of all test methods on this class."""
+        return [
+            name
+            for name in dir(self)
+            if name.startswith("test") and callable(getattr(self, name))
+        ]
+```
+
+---
+
+### `test_framework/assertions.py`
+```python
+"""Assertion helpers for the test framework."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+class AssertionHelper:
+    """Fluent assertion helpers."""
+
+    @staticmethod
+    def equal(actual: Any, expected: Any, msg: str = "") -> None:
+        """Assert actual == expected."""
+        if actual != expected:
+            detail = f"Expected {expected!r}, got {actual!r}"
+            raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+    @staticmethod
+    def not_equal(actual: Any, expected: Any, msg: str = "") -> None:
+        """Assert actual != expected."""
+        if actual == expected:
+            detail = f"Expected values to differ, both are {actual!r}"
+            raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+    @staticmethod
+    def true(value: Any, msg: str = "") -> None:
+        """Assert value is truthy."""
+        if not value:
+            detail = f"Expected truthy, got {value!r}"
+            raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+    @staticmethod
+    def false(value: Any, msg: str = "") -> None:
+        """Assert value is falsy."""
+        if value:
+            detail = f"Expected falsy, got {value!r}"
+            raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+    @staticmethod
+    def is_none(value: Any, msg: str = "") -> None:
+        """Assert value is None."""
+        if value is not None:
+            detail = f"Expected None, got {value!r}"
+            raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+    @staticmethod
+    def is_not_none(value: Any, msg: str = "") -> None:
+        """Assert value is not None."""
+        if value is None:
+            raise AssertionError(msg or "Expected non-None value")
+
+    @staticmethod
+    def contains(container: Any, item: Any, msg: str = "") -> None:
+        """Assert item in container."""
+        if item not in container:
+            detail = f"{item!r} not found in {container!r}"
+            raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+    @staticmethod
+    def raises(exc_type: type[BaseException], msg: str = ""):
+        """Context manager asserting a specific exception is raised."""
+        return _RaisesContext(exc_type, msg)
+
+    @staticmethod
+    def almost_equal(actual: float, expected: float, places: int = 7, msg: str = "") -> None:
+        """Assert floats are equal to N decimal places."""
+        if round(abs(actual - expected), places) != 0:
+            detail = f"Expected {expected!r} ≈ {actual!r} (places={places})"
+            raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+
+class _RaisesContext:
+    """Context manager for asserting exceptions."""
+
+    def __init__(self, exc_type: type[BaseException], msg: str) -> None:
+        self.exc_type = exc_type
+        self.msg = msg
+
+    def __enter__(self) -> _RaisesContext:
+        return self
+
+    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, _tb: Any) -> bool:
+        if exc_type is None:
+            raise AssertionError(
+                self.msg or f"Expected {self.exc_type.__name__} to be raised"
+            )
+        if not issubclass(exc_type, self.exc_type):
+            raise AssertionError(
+                f"Expected {self.exc_type.__name__}, got {exc_type.__name__}"
+            )
+        return True
+```
+
+---
+
+### `test_framework/discovery.py`
+```python
+"""Test discovery: finds test modules and collects test callables."""
+
+from __future__ import annotations
+
+import importlib.util
+import inspect
+import sys
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+
+def _load_module(path: Path) -> ModuleType:
+    """Load a Python file as a module."""
+    module_name = path.stem
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def discover_tests(path: str | Path, pattern: str = "test_*.py") -> list[tuple[str, Any]]:
+    """
+    Discover all test functions and TestCase subclasses under path.
+
+    Returns a list of (qualified_name, callable_or_instance) pairs.
+    """
+    from test_framework.core import TestCase
+
+    root = Path(path)
+    collected: list[tuple[str, Any]] = []
+
+    search_paths = [root] if root.is_file() else sorted(root.rglob(pattern))
+
+    for file_path in search_paths:
+        module = _load_module(file_path)
+        module_name = file_path.stem
+
+        for name, obj in inspect.getmembers(module):
+            if (
+                inspect.isclass(obj)
+                and issubclass(obj, TestCase)
+                and obj is not TestCase
+            ):
+                collected.append((f"{module_name}.{name}", obj()))
+            elif callable(obj) and (
+                name.startswith("test") or getattr(obj, "_is_test", False)
+            ):
+                collected.append((f"{module_name}.{name}", obj))
+
+    return collected
+```
+
+---
+
+### `test_framework/runner.py`
+```python
+"""Test runner: executes collected tests and reports results via structlog."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import time
+from typing import Any
+
+import structlog
+
+from test_framework.core import TestCase, TestResult, TestStatus, TestSuite
+
+log = structlog.get_logger(__name__)
+
+
+class TestRunner:
+    """Runs collected tests and outputs structured results."""
+
+    def __init__(self, verbose: bool = False) -> None:
+        self.verbose = verbose
+
+    async def run(self, collected: list[tuple[str, Any]]) -> list[TestSuite]:
+        """
+        Run all collected tests and return suites with results.
+
+        Args:
+            collected: List of (name, callable_or_TestCase) pairs from discovery.
+        """
+        suites: list[TestSuite] = []
+
+        for qualified_name, obj in collected:
+            if isinstance(obj, TestCase):
+                suite = await self._run_test_case(qualified_name, obj)
+            else:
+                suite = await self._run_function(qualified_name, obj)
+            suites.append(suite)
+
+        self._report(suites)
+        return suites
+
+    async def _run_test_case(self, name: str, case: TestCase) -> TestSuite:
+        """Run all test methods on a TestCase instance."""
+        suite = TestSuite(name=name)
+        for method_name in case.collect():
+            result = await case._run_test(method_name)
+            suite.results.append(result)
+            self._log_result(result)
+        return suite
+
+    async def _run_function(self, name: str, func: Any) -> TestSuite:
+        """Run a standalone test function."""
+        suite = TestSuite(name=name)
+        start = time.perf_counter()
+        try:
+            if inspect.iscoroutinefunction(func):
+                await func()
+            else:
+                func()
+            duration_ms = (time.perf_counter() - start) * 1000
+            result = TestResult(name=name, status=TestStatus.PASSED, duration_ms=duration_ms)
+        except AssertionError as exc:
+            duration_ms = (time.perf_counter() - start) * 1000
+            result = TestResult(
+                name=name,
+                status=TestStatus.FAILED,
+                duration_ms=duration_ms,
+                message=str(exc),
+                exception=exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            duration_ms = (time.perf_counter() - start) * 1000
+            result = TestResult(
+                name=name,
+                status=TestStatus.ERROR,
+                duration_ms=duration_ms,
+                message=f"{type(exc).__name__}: {exc}",
+                exception=exc,
+            )
+        suite.results.append(result)
+        self._log_result(result)
+        return suite
+
+    def _log_result(self, result: TestResult) -> None:
+        """Emit a structured log line for a single test result."""
+        bound = log.bind(
+            test=result.name,
+            status=result.status.value,
+            duration_ms=round(result.duration_ms, 2),
+        )
+        if result.status == TestStatus.PASSED:
+            bound.info("test_passed")
+        elif result.status == TestStatus.FAILED:
+            bound.warning("test_failed", reason=result.message)
+        elif result.status == TestStatus.ERROR:
+            bound.error("test_error", reason=result.message)
+        else:
+            bound.info("test_skipped")
+
+    def _report(self, suites: list[TestSuite]) -> None:
+        """Emit a final summary log after all tests complete."""
+        total = sum(s.total for s in suites)
+        passed = sum(s.passed for s in suites)
+        failed = sum(s.failed for s in suites)
+        errored = sum(s.errored for s in suites)
+        skipped = sum(s.skipped for s in suites)
+
+        log.info(
+            "test_run_complete",
+            total=total,
+            passed=passed,
+            failed=failed,
+            errored=errored,
+            skipped=skipped,
+            success=failed == 0 and errored == 0,
+        )
+```
+
+---
+
+### Example usage (`test_framework/examples/test_math.py`)
+```python
+"""Example tests demonstrating the framework."""
+
+from test_framework import TestCase, fixture, test
+from test_framework.assertions import AssertionHelper as assert_
+
+
+class TestArithmetic(TestCase):
+    async def setup(self) -> None:
+        self.values = [1, 2, 3]
+
+    def test_addition(self) -> None:
+        assert_.equal(1 + 1, 2)
+
+    def test_subtraction(self) -> None:
+        assert_.equal(5 - 3, 2)
+
+    def test_contains(self) -> None:
+        assert_.contains(self.values, 2)
+
+    def test_raises_zero_division(self) -> None:
+        with assert_.raises(ZeroDivisionError):
+            _ = 1 / 0
+
+
+@test
+async def test_async_operation() -> None:
+    import asyncio
+    await asyncio.sleep(0)
+    assert_.true(True)
+```
+
+### Running it
+```python
+import asyncio
+from test_framework import TestRunner, discover_tests
+
+async def main():
+    collected = discover_tests(".")
+    runner = TestRunner(verbose=True)
+    await runner.run(collected)
+
+asyncio.run(main())
+```
+
+---
+
+The framework has `print()` replaced with `structlog` as required by your rules. Want me to write these files to disk?

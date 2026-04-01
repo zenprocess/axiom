@@ -1,0 +1,147 @@
+```python
+"""
+User data fetcher module.
+
+This module provides functionality to fetch user data from a REST API.
+"""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+# Initialize structlog for logging
+logger = structlog.get_logger(__name__)
+
+
+class User(BaseModel):
+    """User data model representing a user from the API."""
+
+    id: int
+    name: str
+    email: str
+    username: str
+    address: dict
+    phone: str
+    website: str
+    company: dict
+
+
+class UserFetcherError(Exception):
+    """Custom exception for user fetcher errors."""
+
+    pass
+
+
+class APIClientError(UserFetcherError):
+    """Exception raised for API client errors."""
+
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class UserFetcher:
+    """
+    Fetches user data from a REST API.
+
+    Provides methods to fetch user data with proper error handling,
+    validation, and logging using structlog.
+    """
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        """
+        Initialize the UserFetcher.
+
+        Args:
+            base_url: The base URL for the API.
+        """
+        self.base_url = base_url
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        self._client = httpx.AsyncClient()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        if self._client:
+            await self._client.aclose()
+
+    async def fetch_user(self, user_id: int) -> User:
+        """
+        Fetch a user by ID from the API.
+
+        Args:
+            user_id: The ID of the user to fetch.
+
+        Returns:
+            A User object with the fetched data.
+
+        Raises:
+            APIClientError: If the API call fails or returns an error status.
+            UserFetcherError: For other unexpected errors.
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        
+        logger.info("Fetching user", user_id=user_id, url=url)
+
+        try:
+            if not self._client:
+                self._client = httpx.AsyncClient()
+            
+            response = await self._client.get(url)
+            
+            if response.status_code == 404:
+                raise APIClientError(
+                    f"User with ID {user_id} not found", 
+                    status_code=response.status_code
+                )
+            elif response.status_code != 200:
+                raise APIClientError(
+                    f"API returned status {response.status_code}", 
+                    status_code=response.status_code
+                )
+            
+            data = response.json()
+            user = User(**data)
+            
+            logger.info("Successfully fetched user", user_id=user_id, user_name=user.name)
+            return user
+            
+        except httpx.RequestError as exc:
+            error_msg = f"Request error when fetching user {user_id}: {exc}"
+            logger.error("Request error", user_id=user_id, error=str(exc))
+            raise APIClientError(error_msg) from exc
+        except UserFetcherError:
+            raise
+        except Exception as exc:
+            error_msg = f"Unexpected error when fetching user {user_id}: {exc}"
+            logger.error("Unexpected error", user_id=user_id, error=str(exc))
+            raise UserFetcherError(error_msg) from exc
+
+
+async def main():
+    """
+    Main function to fetch user #42.
+
+    This function demonstrates how to use the UserFetcher class
+    to fetch a specific user from the API.
+    """
+    try:
+        async with UserFetcher() as fetcher:
+            user = await fetcher.fetch_user(42)
+            logger.info("User fetched successfully", user_id=user.id, user_name=user.name)
+            return user
+    except APIClientError as exc:
+        logger.error("API client error", error=str(exc), status_code=exc.status_code)
+    except UserFetcherError as exc:
+        logger.error("User fetcher error", error=str(exc))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```

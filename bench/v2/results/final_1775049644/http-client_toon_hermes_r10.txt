@@ -1,0 +1,94 @@
+```python
+"""User data fetching module."""
+
+from typing import Optional
+import httpx
+from pydantic import BaseModel
+
+
+class User(BaseModel):
+    """User data model."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class APIClient:
+    """Client for fetching user data from the REST API."""
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        """Initialize the API client."""
+        self.base_url = base_url
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def __aenter__(self):
+        """Enter async context manager."""
+        self._client = httpx.AsyncClient()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Exit async context manager."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+
+    async def fetch_user(self, user_id: int) -> User:
+        """
+        Fetch user data from the API.
+
+        Args:
+            user_id: The ID of the user to fetch.
+
+        Returns:
+            User: The fetched user data.
+
+        Raises:
+            ValueError: If user_id is not positive.
+            httpx.HTTPError: If the HTTP request fails.
+            KeyError: If expected fields are missing from response.
+        """
+        if user_id <= 0:
+            raise ValueError("User ID must be positive")
+
+        url = f"{self.base_url}/users/{user_id}"
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Validate required fields exist
+                required_fields = ["id", "name", "email"]
+                for field in required_fields:
+                    if field not in data:
+                        raise KeyError(f"Missing required field: {field}")
+                
+                return User(**data)
+                
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise ValueError(f"User with ID {user_id} not found")
+            raise
+        except httpx.RequestError as e:
+            raise ConnectionError(f"Failed to connect to API: {e}")
+
+
+async def main():
+    """Main function to demonstrate fetching user #42."""
+    try:
+        async with APIClient() as client:
+            user = await client.fetch_user(42)
+            print(f"User fetched: {user}")
+            return user
+    except Exception as e:
+        print(f"Error fetching user: {e}")
+        raise
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```

@@ -1,0 +1,99 @@
+```python
+"""
+Module for fetching user data from a REST API.
+"""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+logger = structlog.get_logger(__name__)
+
+
+class User(BaseModel):
+    """User data model."""
+    id: int
+    name: str
+    email: str
+    username: str
+    address: dict
+    phone: str
+    website: str
+    company: dict
+
+
+class ApiError(Exception):
+    """Custom exception for API errors."""
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        self.message = message
+        super().__init__(f"API error {status_code}: {message}")
+
+
+class UserClient:
+    """Client for fetching user data from the REST API."""
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        self.base_url = base_url
+
+    async def fetch_user(self, user_id: int) -> User:
+        """
+        Fetch a user by ID from the API.
+
+        Args:
+            user_id: The ID of the user to fetch.
+
+        Returns:
+            User: The user data model.
+
+        Raises:
+            ApiError: If the API request fails or returns an error status.
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                
+                if response.status_code != 200:
+                    raise ApiError(
+                        status_code=response.status_code,
+                        message=f"Failed to fetch user {user_id}"
+                    )
+                
+                user_data = response.json()
+                return User(**user_data)
+                
+        except httpx.RequestError as exc:
+            logger.error("network_error", error=str(exc))
+            raise ApiError(status_code=0, message=f"Network error: {exc}")
+        except Exception as exc:
+            logger.error("unexpected_error", error=str(exc))
+            raise ApiError(status_code=0, message=f"Unexpected error: {exc}")
+
+
+async def main() -> Optional[User]:
+    """
+    Main function that fetches user #42 from the API.
+
+    Returns:
+        User: The fetched user data if successful, None otherwise.
+    """
+    client = UserClient()
+    try:
+        user = await client.fetch_user(user_id=42)
+        logger.info("user_fetched", user_id=42, user_name=user.name)
+        return user
+    except ApiError as exc:
+        logger.error("failed_to_fetch_user", user_id=42, status_code=exc.status_code, message=exc.message)
+        return None
+
+
+if __name__ == "__main__":
+    result = asyncio.run(main())
+    if result:
+        print(result.model_dump_json(indent=2))
+```

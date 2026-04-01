@@ -1,0 +1,89 @@
+```python
+"""
+User data fetcher module.
+
+This module provides functionality to fetch user data from a REST API.
+"""
+
+import httpx
+from typing import Optional
+from pydantic import BaseModel
+
+
+class User(BaseModel):
+    """Represents a user data model."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class UserFetcherError(Exception):
+    """Custom exception for user fetcher errors."""
+    pass
+
+
+class UserFetcher:
+    """Fetcher class for retrieving user data from the REST API."""
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        """
+        Initialize the UserFetcher.
+
+        Args:
+            base_url: The base URL of the API (default: "https://api.example.com")
+        """
+        self.base_url = base_url.rstrip("/")
+
+    async def fetch_user(self, user_id: int) -> User:
+        """
+        Fetch a user by ID from the API.
+
+        Args:
+            user_id: The ID of the user to fetch
+
+        Returns:
+            User: The fetched user data
+
+        Raises:
+            UserFetcherError: If the API call fails or the response is invalid
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                
+                # Validate response data with Pydantic model
+                user_data = response.json()
+                return User(**user_data)
+                
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise UserFetcherError(f"User with ID {user_id} not found") from exc
+            raise UserFetcherError(
+                f"HTTP error {exc.response.status_code} while fetching user {user_id}: {exc.response.text}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise UserFetcherError(f"Request error while fetching user {user_id}: {exc}") from exc
+        except Exception as exc:
+            raise UserFetcherError(f"Unexpected error while fetching user {user_id}: {exc}") from exc
+
+
+async def main():
+    """Main function to demonstrate fetching user #42."""
+    fetcher = UserFetcher()
+    
+    try:
+        user = await fetcher.fetch_user(42)
+        print(f"User #42: {user.name} ({user.email})")
+    except UserFetcherError as e:
+        print(f"Error fetching user: {e}")
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```

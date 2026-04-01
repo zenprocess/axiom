@@ -1,0 +1,231 @@
+```python
+#!/usr/bin/env python3
+"""
+CSV filter CLI tool.
+
+Filters rows from a CSV file based on a column value match.
+Supports exact match and partial match via substring.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import structlog
+
+
+# Initialize structlog
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+)
+log = structlog.get_logger()
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s data.csv --column status --value active
+  %(prog)s data.csv --column name --value john --substring
+        """,
+    )
+    parser.add_argument("input", type=str, help="Input CSV file path")
+    parser.add_argument(
+        "--column",
+        required=True,
+        type=str,
+        help="Column name to filter on",
+    )
+    parser.add_argument(
+        "--value",
+        required=True,
+        type=str,
+        help="Value to match in the specified column",
+    )
+    parser.add_argument(
+        "--substring",
+        action="store_true",
+        help="Enable substring matching (default: exact match)",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        default="-",
+        help="Output file path (default: stdout)",
+    )
+    parser.add_argument(
+        "--delimiter",
+        "-d",
+        type=str,
+        default=",",
+        help="CSV delimiter (default: ',')",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="count",
+        default=0,
+        help="Increase verbosity (can be used multiple times)",
+    )
+    return parser.parse_args()
+
+
+def configure_logging(verbosity: int) -> None:
+    """Configure logging level based on verbosity count."""
+    levels = [logging.WARNING, logging.INFO, logging.DEBUG]
+    level = levels[min(verbosity, 2)]
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+    )
+
+
+def read_csv_file(
+    file_path: Path, delimiter: str
+) -> Tuple[List[str], List[dict]]:
+    """Read CSV file and return headers and rows."""
+    try:
+        with file_path.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter=delimiter)
+            headers = reader.fieldnames or []
+            rows = list(reader)
+            return headers, rows
+    except FileNotFoundError:
+        log.error("File not found", path=str(file_path))
+        sys.exit(1)
+    except csv.Error as e:
+        log.error("CSV parsing error", error=str(e))
+        sys.exit(1)
+    except UnicodeDecodeError as e:
+        log.error("Encoding error", error=str(e))
+        sys.exit(1)
+
+
+def filter_rows(
+    rows: List[dict],
+    column: str,
+    value: str,
+    substring: bool,
+) -> List[dict]:
+    """Filter rows by column value."""
+    filtered = []
+    total = len(rows)
+
+    for i, row in enumerate(rows, start=1):
+        if column not in row:
+            log.warning(
+                "Column not found in row",
+                column=column,
+                row_index=i,
+                available_columns=list(row.keys()),
+            )
+            continue
+
+        cell_value = row[column]
+        match = (
+            value.lower() in cell_value.lower()
+            if substring
+            else cell_value == value
+        )
+
+        if match:
+            filtered.append(row)
+
+        # Progress logging every 10% or at least every 1000 rows
+        if i % max(1, total // 10) == 0 or i == total:
+            log.info(
+                "Progress",
+                processed=i,
+                total=total,
+                matches=len(filtered),
+                percent=round(i / total * 100, 1),
+            )
+
+    return filtered
+
+
+def write_csv_output(
+    headers: List[str],
+    rows: List[dict],
+    output_path: Optional[str],
+    delimiter: str,
+) -> None:
+    """Write filtered rows to output."""
+    try:
+        if output_path == "-":
+            writer = csv.DictWriter(
+                sys.stdout, fieldnames=headers, delimiter=delimiter
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+        else:
+            with open(output_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(
+                    f, fieldnames=headers, delimiter=delimiter
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+    except IOError as e:
+        log.error("Write error", error=str(e))
+        sys.exit(1)
+
+
+def main() -> None:
+    """Main entry point."""
+    args = parse_args()
+    configure_logging(args.verbose)
+
+    log.info(
+        "Starting CSV filter",
+        input_file=args.input,
+        column=args.column,
+        value=args.value,
+        substring=args.substring,
+    )
+
+    input_path = Path(args.input)
+
+    headers, rows = read_csv_file(input_path, args.delimiter)
+    log.info("Loaded rows", total=len(rows))
+
+    if not headers:
+        log.error("No headers found in CSV file")
+        sys.exit(1)
+
+    if args.column not in headers:
+        log.error(
+            "Column not found in CSV headers",
+            column=args.column,
+            available_headers=headers,
+        )
+        sys.exit(1)
+
+    filtered_rows = filter_rows(
+        rows,
+        args.column,
+        args.value,
+        args.substring,
+    )
+
+    log.info(
+        "Filtering complete",
+        total=len(rows),
+        matches=len(filtered_rows),
+    )
+
+    write_csv_output(
+        headers,
+        filtered_rows,
+        args.output,
+        args.delimiter,
+    )
+
+
+if __name__ == "__main__":
+    main()
+```

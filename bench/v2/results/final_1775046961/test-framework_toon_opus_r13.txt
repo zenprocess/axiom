@@ -1,0 +1,10 @@
+It looks like write permissions were denied. Would you like me to write this file to a different location, or could you grant write access so I can create `test_framework.py` in the project root?
+
+Here's what the framework includes:
+
+- **Assertions**: `assert_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in`
+- **Fixtures**: `@fixture` decorator registers callables by name; the runner auto-injects them by matching parameter names
+- **Discovery**: `discover_tests()` finds all `test_*` callables on a module, class, or instance
+- **Runner**: `run_tests()` executes discovered tests, prints PASS/FAIL/SKIP/ERR per test, and prints a summary line
+- **Skip**: `@skip(reason="...")` decorator to skip tests
+- **Demo**: the `__main__` block includes 7 sample tests (including a deliberate failure and a skip) to show it working

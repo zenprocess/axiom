@@ -1,0 +1,218 @@
+```python
+#!/usr/bin/env python3
+"""
+A CLI tool to filter CSV rows by a column value.
+
+Usage:
+    csv_filter.py input.csv column_name value [--output output.csv]
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+from pydantic import BaseModel
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.dev.ConsoleRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=False,
+)
+
+log = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for the CSV filter operation."""
+    input_file: Path
+    column_name: str
+    filter_value: str
+    output_file: Optional[Path] = None
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s data.csv name John
+  %(prog)s data.csv status active --output filtered.csv
+        """
+    )
+    parser.add_argument("input_file", help="Path to input CSV file")
+    parser.add_argument("column_name", help="Column name to filter on")
+    parser.add_argument("filter_value", help="Value to match in the column")
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        help="Output file path (default: stdout)"
+    )
+    return parser.parse_args()
+
+
+def read_csv_with_progress(file_path: Path) -> tuple[List[dict], int]:
+    """
+    Read CSV file and return rows with progress tracking.
+    
+    Args:
+        file_path: Path to the CSV file
+        
+    Returns:
+        Tuple of (rows list, total row count)
+    """
+    try:
+        with open(file_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            total = len(rows)
+            log.info("csv_read", path=str(file_path), rows_read=total)
+            return rows, total
+    except FileNotFoundError:
+        log.error("file_not_found", path=str(file_path))
+        sys.exit(1)
+    except PermissionError:
+        log.error("permission_denied", path=str(file_path))
+        sys.exit(1)
+    except csv.Error as e:
+        log.error("csv_parse_error", path=str(file_path), error=str(e))
+        sys.exit(1)
+
+
+def filter_rows(rows: List[dict], column_name: str, filter_value: str) -> List[dict]:
+    """
+    Filter rows where the specified column matches the filter value.
+    
+    Args:
+        rows: List of row dictionaries
+        column_name: Name of the column to filter on
+        filter_value: Value to match
+        
+    Returns:
+        List of matching rows
+    """
+    # Check if column exists in the first row
+    if not rows:
+        log.warning("empty_csv")
+        return []
+    
+    if column_name not in rows[0]:
+        log.error("column_not_found", column=column_name, available_columns=list(rows[0].keys()))
+        sys.exit(1)
+    
+    # Filter rows with progress
+    filtered = []
+    total = len(rows)
+    log.info("filtering_started", total_rows=total, column=column_name, value=filter_value)
+    
+    for i, row in enumerate(rows):
+        if row.get(column_name) == filter_value:
+            filtered.append(row)
+        
+        # Progress output (every 10%)
+        if (i + 1) % max(1, total // 10) == 0 or i == total - 1:
+            log.info("filter_progress", processed=i + 1, total=total, matches=len(filtered))
+    
+    log.info("filtering_complete", matches=len(filtered))
+    return filtered
+
+
+def write_output(rows: List[dict], output_path: Optional[Path]) -> None:
+    """
+    Write filtered rows to output.
+    
+    Args:
+        rows: List of filtered row dictionaries
+        output_path: Output file path or None for stdout
+    """
+    if not rows:
+        log.warning("no_rows_to_write")
+        return
+    
+    try:
+        if output_path:
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+            log.info("output_written", path=str(output_path), rows_written=len(rows))
+        else:
+            # Write to stdout
+            writer = csv.DictWriter(sys.stdout, fieldnames=rows[0].keys())
+            writer.writeheader()
+            writer.writerows(rows)
+            log.info("output_written", destination="stdout", rows_written=len(rows))
+    except PermissionError:
+        log.error("permission_denied", path=str(output_path) if output_path else "stdout")
+        sys.exit(1)
+    except Exception as e:
+        log.error("output_error", error=str(e))
+        sys.exit(1)
+
+
+def main():
+    """Main entry point for the CSV filter tool."""
+    args = parse_args()
+    
+    # Validate input file
+    input_path = Path(args.input_file)
+    if not input_path.exists():
+        log.error("input_file_not_found", path=str(input_path))
+        sys.exit(1)
+    
+    # Create config
+    config = FilterConfig(
+        input_file=input_path,
+        column_name=args.column_name,
+        filter_value=args.filter_value,
+        output_file=args.output
+    )
+    
+    # Read CSV with progress
+    rows, total = read_csv_with_progress(config.input_file)
+    
+    # Filter rows
+    filtered_rows = filter_rows(rows, config.column_name, config.filter_value)
+    
+    # Write output
+    write_output(filtered_rows, config.output_file)
+    
+    log.info("complete", matches=len(filtered_rows), total=total)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+This CLI tool meets all the specified requirements:
+
+1. **Uses `argparse`** for command-line argument parsing with help text and examples
+2. **Reads CSV files** with error handling for common issues (file not found, permissions, parse errors)
+3. **Filters rows** by matching a column value with the provided filter value
+4. **Includes progress output** showing filtering progress at 10% intervals
+5. **Uses `structlog`** for structured logging with proper context
+6. **Uses Pydantic models** for configuration validation
+7. **Includes type hints** for all function signatures
+8. **Has proper error handling** with try/except blocks and user-friendly error messages
+9. **Includes docstrings** following Google-style format
+10. **Handles edge cases** like empty CSV files, missing columns, and output to stdout
+
+The tool can be used as:
+```
+python csv_filter.py data.csv name John
+python csv_filter.py data.csv status active --output filtered.csv
+```
+
+It provides progress updates during filtering and structured logging for debugging and monitoring.

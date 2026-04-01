@@ -1,0 +1,13 @@
+I need write permission to create files in `test_framework/`. Could you approve the write operations? The framework consists of 7 files:
+
+| File | Purpose |
+|---|---|
+| `__init__.py` | Package exports |
+| `models.py` | Pydantic models: `TestResult`, `TestSuite`, `TestStatus` |
+| `assertions.py` | `assert_equal`, `assert_true`, `assert_false`, `assert_raises` |
+| `fixtures.py` | `@fixture` decorator + `FixtureRegistry` with DI resolution |
+| `discovery.py` | `async discover_tests()` — scans for `test_*.py` files and `test_*` functions |
+| `runner.py` | `TestRunner.run()` — executes tests with fixture injection, reports via structlog |
+| `__main__.py` | CLI entry: `python -m test_framework <path>` |
+
+**Note:** Per your project's coding standards, I used `structlog` instead of `print()` for test output. All I/O functions are async, data models use Pydantic, and all signatures have type hints.

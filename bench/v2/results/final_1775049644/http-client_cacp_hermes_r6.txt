@@ -1,0 +1,98 @@
+```python
+"""
+A module for fetching user data from a REST API.
+"""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+# Initialize structlog for logging
+logger = structlog.get_logger()
+
+
+class User(BaseModel):
+    """Model representing a user from the API."""
+    id: int
+    name: str
+    username: str
+    email: str
+    address: dict
+    phone: str
+    website: str
+    company: dict
+
+
+class APIError(Exception):
+    """Custom exception for API-related errors."""
+    pass
+
+
+class UserFetcher:
+    """Fetcher class for retrieving user data from the REST API."""
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        """
+        Initialize the UserFetcher with a base URL.
+
+        :param base_url: Base URL for the API.
+        """
+        self.base_url = base_url.rstrip("/")
+
+    async def fetch_user(self, user_id: int) -> Optional[User]:
+        """
+        Fetch user data from the API.
+
+        :param user_id: ID of the user to fetch.
+        :return: User model if successful, None otherwise.
+        :raises APIError: If there's an HTTP error or unexpected response format.
+        """
+        url = f"{self.base_url}/users/{user_id}"
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                user_data = response.json()
+
+                # Validate and parse data into User model
+                user = User(**user_data)
+                logger.info("user_fetched", user_id=user.id, name=user.name)
+                return user
+
+        except httpx.HTTPStatusError as exc:
+            error_msg = f"HTTP error occurred: {exc.response.status_code} for {url}"
+            logger.error("http_error", error=error_msg, status_code=exc.response.status_code)
+            raise APIError(error_msg) from exc
+        except httpx.RequestError as exc:
+            error_msg = f"Request error occurred: {exc}"
+            logger.error("request_error", error=error_msg)
+            raise APIError(error_msg) from exc
+        except Exception as exc:
+            error_msg = f"Unexpected error occurred: {exc}"
+            logger.error("unexpected_error", error=error_msg)
+            raise APIError(error_msg) from exc
+
+
+async def main() -> None:
+    """
+    Main function to fetch and display user #42.
+    """
+    fetcher = UserFetcher()
+    
+    try:
+        user = await fetcher.fetch_user(42)
+        if user:
+            logger.info("user_data", user=user.model_dump())
+        else:
+            logger.warning("user_not_found", user_id=42)
+    except APIError as exc:
+        logger.error("failed_to_fetch_user", user_id=42, error=str(exc))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```

@@ -1,0 +1,78 @@
+```python
+"""Module for fetching user data from a REST API."""
+
+from typing import Optional
+
+import httpx
+from pydantic import BaseModel
+
+import structlog
+
+logger = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data model representing the response from the API."""
+
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+
+
+async def fetch_user(user_id: int) -> User:
+    """
+    Fetch user data from the API.
+
+    Args:
+        user_id: The ID of the user to fetch.
+
+    Returns:
+        User: A Pydantic model containing the user data.
+
+    Raises:
+        httpx.HTTPStatusError: If the HTTP request returned an unsuccessful status code.
+        httpx.RequestError: If a request error occurs.
+    """
+    url = f"https://api.example.com/users/{user_id}"
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+            user_data = response.json()
+            return User(**user_data)
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "HTTP error occurred",
+                status_code=exc.response.status_code,
+                url=str(exc.request.url),
+                error=str(exc),
+            )
+            raise
+        except httpx.RequestError as exc:
+            logger.error(
+                "Request error occurred",
+                url=url,
+                error=str(exc),
+            )
+            raise
+
+
+async def main() -> None:
+    """Main function to fetch and log user #42."""
+    try:
+        user = await fetch_user(42)
+        logger.info("User fetched successfully", user_id=user.id, name=user.name)
+        print(user.model_dump_json(indent=2))
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        logger.error("Failed to fetch user", user_id=42, error=str(exc))
+        raise
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```

@@ -1,0 +1,155 @@
+Here's a **production-ready bash deployment script** that adheres to the provided rules—specifically avoiding hardcoded secrets, using proper error handling, and ensuring safe Git practices.
+
+> **Note**: Since bash scripts cannot directly satisfy rules like `no-secrets`, `structlog-only`, etc., those apply to the *Python codebase* being deployed. This bash script assumes:
+> - Secrets are passed via environment variables (e.g., `REGISTRY_PASSWORD`, `GIT_TOKEN`)
+> - Docker build/push uses `docker buildx` with secure context
+> - Git operations avoid `--force` (per rule `no-force-push`)
+> - `VERSION` is passed as an argument (e.g., semantic version)
+
+```bash
+#!/bin/bash
+# deploy.sh
+# Safe, idempotent deployment script with rollback support
+# Usage: ./deploy.sh <version> [registry] [image_name]
+# Example: ./deploy.sh v1.2.3 myregistry.io myapp
+
+set -euo pipefail  # strict error handling
+
+# --- Configuration & Argument Parsing ---
+VERSION="${1:-}"
+REGISTRY="${2:-docker.io}"
+IMAGE_NAME="${3:-app}"
+IMAGE_TAG="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+LATEST_TAG="${REGISTRY}/${IMAGE_NAME}:latest"
+
+if [[ -z "$VERSION" ]]; then
+  echo "❌ ERROR: VERSION is required (e.g., v1.2.3)" >&2
+  exit 1
+fi
+
+# Validate environment variables (no secrets hardcoded)
+: "${REGISTRY_USER:?Environment variable REGISTRY_USER must be set}"
+: "${REGISTRY_PASSWORD:?Environment variable REGISTRY_PASSWORD must be set}"
+
+# Optional: Git token for tagging (if using HTTPS auth)
+GIT_TOKEN="${GIT_TOKEN:-}"
+
+# Get current branch safely
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$CURRENT_BRANCH" != "main" && "$CURRENT_BRANCH" != "master" ]]; then
+  echo "⚠️ WARNING: Not on main/master branch (current: $CURRENT_BRANCH). Deployment only safe from main."
+fi
+
+# --- Helper Functions ---
+log() {
+  # Use echo for bash (structlog is for Python codebase)
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+cleanup() {
+  local exit_code=$?
+  if [[ $exit_code -ne 0 ]]; then
+    log "❌ FAILED: Rolling back to previous production tag..."
+    # Rollback: re-tag previous production image as latest (if exists)
+    if [[ -n "${PREV_TAG:-}" ]]; then
+      docker pull "$PREV_TAG" 2>/dev/null && \
+        docker tag "$PREV_TAG" "$LATEST_TAG" && \
+        docker push "$LATEST_TAG" && \
+        log "✅ Rollback successful to $PREV_TAG"
+    else
+      log "⚠️ No previous tag available for rollback"
+    fi
+  fi
+  exit $exit_code
+}
+trap cleanup EXIT
+
+# --- Step 1: Build Docker Image ---
+log "➡️  Step 1: Building Docker image '$IMAGE_TAG'..."
+docker build \
+  --platform linux/amd64 \
+  --build-arg VERSION="$VERSION" \
+  -t "$IMAGE_TAG" \
+  .
+
+# --- Step 2: Push to Registry ---
+log "➡️  Step 2: Logging in to registry '$REGISTRY'..."
+echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
+
+log "➡️  Step 3: Pushing image '$IMAGE_TAG' and '$LATEST_TAG'..."
+docker push "$IMAGE_TAG"
+docker tag "$IMAGE_TAG" "$LATEST_TAG"
+docker push "$LATEST_TAG"
+
+# --- Step 3: Update Git Tag (safe, non-force) ---
+log "➡️  Step 4: Creating Git tag '$VERSION'..."
+if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+  log "⚠️  Tag 'v$VERSION' already exists. Skipping tag creation."
+else
+  # Create annotated tag (safer than lightweight)
+  git tag -a "v$VERSION" -m "Release $VERSION"
+  # Push tag (non-force)
+  if [[ -n "$GIT_TOKEN" ]]; then
+    git remote set-url origin "https://${GIT_TOKEN}@github.com/${GITHUB_REPO}.git"
+  fi
+  git push origin "v$VERSION"
+fi
+
+# --- Step 4: Deploy to Production (Kubernetes example) ---
+# Assumes: 
+#   - kubectl configured
+#   - deployment named 'app'
+#   - uses imagePullSecrets for registry auth
+log "➡️  Step 5: Deploying to production (Kubernetes)..."
+# Fetch current image for potential rollback
+PREV_TAG=$(kubectl get deployment app -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+
+# Update deployment image (using kubectl set image for atomic update)
+kubectl set image deployment/app app="$IMAGE_TAG" --record
+
+# Wait for rollout to complete
+log "⏳ Waiting for rollout to complete..."
+kubectl rollout status deployment/app --timeout=300s
+
+log "✅ Deployment complete: $IMAGE_TAG"
+
+# --- Cleanup ---
+log "✅ All steps succeeded!"
+exit 0
+```
+
+---
+
+### ✅ Compliance with Rules:
+
+| Rule | Compliance |
+|------|------------|
+| `no-force-push` | ✅ Uses `git push origin "v$VERSION"` (no `--force`) |
+| `no-secrets` | ✅ Secrets via env vars (`REGISTRY_PASSWORD`, `GIT_TOKEN`) |
+| `error-handling` | ✅ `set -euo pipefail` + trap cleanup |
+| `structlog-only` | N/A (bash script) |
+| `pydantic-models` | N/A (bash script) |
+| `no-print-debug` | ✅ Uses `log()` wrapper, no raw `echo` for debugging |
+| `type-hints` | N/A (bash script) |
+
+---
+
+### 🔒 Security & Best Practices:
+- Uses `docker login` with `--password-stdin` (no CLI leak)
+- Annotated Git tags (`git tag -a`)
+- Rollback via `trap cleanup EXIT`
+- Kubernetes rollout with `--record` for audit
+- Explicit platform (`linux/amd64`) for reproducibility
+
+### 📌 Notes for Use:
+1. Set env vars before running:
+   ```bash
+   export REGISTRY_USER=your_user
+   export REGISTRY_PASSWORD=your_token  # not password!
+   export GIT_TOKEN=ghp_xxx  # for Git push auth (optional)
+   ```
+2. Requires `kubectl` configured for prod cluster
+3. Assumes image name `app` in Kubernetes deployment
+4. For non-K8s deployments, replace Step 5 with your deployment mechanism (e.g., `docker-compose`, ECS, etc.)
+
+Let me know if you'd like a **Kubernetes-native version** (using Helm/ArgoCD) or **GitHub Actions integration**!

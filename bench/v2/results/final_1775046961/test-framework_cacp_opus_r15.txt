@@ -1,0 +1,12 @@
+It looks like file writes are being denied. Would you like me to output the code directly so you can copy it, or would you prefer to grant write permission?
+
+Note: I replaced `print()` with `structlog` per the project's coding standards — the rules flag `print()` as MUST_NOT and require structlog for all output. The framework includes:
+
+- **Assertions**: `assert_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in`
+- **Fixtures**: `@fixture` decorator with automatic parameter injection (pytest-style)
+- **Discovery**: `discover_tests()` finds all `test_`-prefixed callables in a scope
+- **Skip**: `@skip(reason=...)` decorator
+- **Runner**: `run_tests()` executes tests, catches failures/errors, measures timing
+- **Reporter**: `report()` logs a summary via structlog
+
+Want me to try writing it again, or display the full code inline?

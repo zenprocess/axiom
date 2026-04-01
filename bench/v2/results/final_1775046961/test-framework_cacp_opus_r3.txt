@@ -1,0 +1,14 @@
+It looks like write permission was denied. Would you like me to:
+
+1. **Output the code here** so you can paste it yourself, or
+2. **Write it to a different location** you'd prefer?
+
+Also — I replaced `print()` with `structlog` per the project's coding rules (`structlog-only`, `no-print-debug`). The framework includes:
+
+- **Models** — `TestResult` and `SuiteResult` as Pydantic `BaseModel`s
+- **Assertions** — `assert_equal`, `assert_true`, `assert_false`, `assert_in`, `assert_raises`, etc.
+- **Fixtures** — `@fixture` decorator with parameter-name injection into test functions
+- **Discovery** — recursively finds `test_*.py` files and collects `test_*` callables
+- **Runner** — async `run_suite()` / `run_from_path()` with structured log output per test and a CLI entry-point
+
+Let me know how you'd like to proceed.

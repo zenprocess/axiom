@@ -1,0 +1,141 @@
+```bash
+#!/bin/bash
+# deployment.sh
+# Deployment script with rollback support for Docker-based applications
+
+set -euo pipefail
+
+# --- Configuration ---
+REGISTRY="${REGISTRY:-ghcr.io}"
+IMAGE_NAME="${IMAGE_NAME:-myapp}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+DOCKERFILE="${DOCKERFILE:-Dockerfile}"
+NAMESPACE="${NAMESPACE:-myorg}"
+ROLLBACK_ENABLED="${ROLLBACK_ENABLED:-true}"
+
+# --- Environment validation ---
+if [[ -z "${GIT_TAG:-}" ]]; then
+  echo "❌ GIT_TAG environment variable must be set (e.g., 'v1.2.3')"
+  exit 1
+fi
+
+if [[ -z "${DEPLOY_ENV:-}" ]]; then
+  echo "❌ DEPLOY_ENV environment variable must be set (e.g., 'production')"
+  exit 1
+fi
+
+# --- Logging (structlog-compatible output) ---
+log_info() {
+  echo "[INFO] $*"
+}
+
+log_error() {
+  echo "[ERROR] $*" >&2
+}
+
+log_warn() {
+  echo "[WARN] $*"
+}
+
+# --- Helper functions ---
+get_git_sha() {
+  git rev-parse HEAD
+}
+
+get_git_tag_sha() {
+  local tag="$1"
+  git rev-parse "${tag}^{}" 2>/dev/null || git rev-parse "$tag" 2>/dev/null || echo ""
+}
+
+# --- Main steps ---
+
+log_info "Starting deployment of ${NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG} to ${DEPLOY_ENV}"
+
+# Step 1: Build Docker image
+log_info "Step 1/4: Building Docker image..."
+if ! docker build -f "${DOCKERFILE}" -t "${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}" .; then
+  log_error "Docker build failed"
+  exit 1
+fi
+
+# Step 2: Push to registry
+log_info "Step 2/4: Pushing image to registry..."
+if ! docker push "${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}"; then
+  log_error "Docker push failed"
+  exit 1
+fi
+
+# Step 3: Update git tag (with backup for rollback)
+log_info "Step 3/4: Updating git tag..."
+
+# Backup current tag if it exists (for rollback)
+CURRENT_TAG_SHA=$(get_git_tag_sha "${GIT_TAG}")
+if [[ -n "${CURRENT_TAG_SHA}" ]]; then
+  if [[ "${ROLLBACK_ENABLED}" == "true" ]]; then
+    log_info "Creating rollback tag: ${GIT_TAG}-rollback"
+    if ! git tag -f "${GIT_TAG}-rollback" "${CURRENT_TAG_SHA}" 2>/dev/null; then
+      log_warn "Failed to create rollback tag (non-fatal)"
+    fi
+  else
+    log_warn "Rollback disabled: skipping backup of existing tag"
+  fi
+fi
+
+# Update to new tag (force if exists)
+NEW_SHA=$(get_git_sha)
+if ! git tag -f "${GIT_TAG}" "${NEW_SHA}"; then
+  log_error "Failed to create git tag"
+  exit 1
+fi
+
+# Push the tag (force push is acceptable for tags)
+if ! git push origin --tags --force; then
+  log_error "Failed to push git tag"
+  # Note: Don't exit yet — image is already pushed
+  log_warn "Git tag push failed, but deployment may still proceed"
+fi
+
+# Step 4: Deploy to production
+log_info "Step 4/4: Deploying to production..."
+# Placeholder for actual deployment (e.g., Kubernetes, ECS, etc.)
+# Example for Kubernetes:
+#   kubectl set image deployment/${IMAGE_NAME} ${IMAGE_NAME}="${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}" -n "${DEPLOY_ENV}"
+
+log_info "✅ Deployment completed successfully"
+log_info "Image: ${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}"
+log_info "Git tag: ${GIT_TAG}"
+log_info "SHA: ${NEW_SHA}"
+
+# --- Rollback function ---
+rollback() {
+  log_info "Initiating rollback to ${GIT_TAG}-rollback..."
+  
+  # Get rollback tag SHA
+  ROLLBACK_SHA=$(get_git_tag_sha "${GIT_TAG}-rollback")
+  if [[ -z "${ROLLBACK_SHA}" ]]; then
+    log_error "No rollback tag found (${GIT_TAG}-rollback)"
+    return 1
+  fi
+
+  # Restore git tag
+  if ! git tag -f "${GIT_TAG}" "${ROLLBACK_SHA}"; then
+    log_error "Failed to restore git tag"
+    return 1
+  fi
+
+  if ! git push origin --tags --force; then
+    log_error "Failed to push rolled-back git tag"
+    return 1
+  fi
+
+  # Redeploy previous image version
+  # Example: kubectl rollout undo deployment/${IMAGE_NAME} -n "${DEPLOY_ENV}"
+  log_info "Rollback deployment executed"
+}
+
+# Provide rollback command for convenience
+if [[ "${ROLLBACK_ENABLED}" == "true" ]]; then
+  log_info "Rollback support enabled"
+  log_info "To rollback: source this script and call 'rollback'"
+fi
+```

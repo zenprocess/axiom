@@ -1,0 +1,114 @@
+```python
+"""Module for fetching user data from a REST API."""
+
+import os
+from typing import Optional
+import httpx
+import structlog
+from pydantic import BaseModel
+
+# Configure structlog
+log = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data model representing the response from the API."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+
+
+class APIClientError(Exception):
+    """Custom exception for API client errors."""
+    pass
+
+
+class APIClient:
+    """API client for fetching user data."""
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        """Initialize the API client.
+        
+        Args:
+            base_url: The base URL for the API
+        """
+        self.base_url = base_url
+
+    async def fetch_user(self, user_id: int) -> User:
+        """Fetch a user by ID from the API.
+        
+        Args:
+            user_id: The ID of the user to fetch
+            
+        Returns:
+            User: The user data
+            
+        Raises:
+            APIClientError: If the API request fails or returns unexpected data
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=30.0)
+                response.raise_for_status()
+                user_data = response.json()
+                return User(**user_data)
+                
+        except httpx.TimeoutException as exc:
+            log.error("api_timeout", url=url, error=str(exc), user_id=user_id)
+            raise APIClientError(f"Request to {url} timed out") from exc
+        except httpx.HTTPStatusError as exc:
+            log.error(
+                "api_http_error",
+                url=url,
+                status_code=exc.response.status_code,
+                user_id=user_id,
+                error=str(exc)
+            )
+            raise APIClientError(
+                f"API returned status {exc.response.status_code} for user {user_id}"
+            ) from exc
+        except httpx.RequestError as exc:
+            log.error("api_request_error", url=url, user_id=user_id, error=str(exc))
+            raise APIClientError(f"Request error for user {user_id}") from exc
+        except Exception as exc:
+            log.error("unexpected_error", url=url, user_id=user_id, error=str(exc))
+            raise APIClientError(f"Unexpected error while fetching user {user_id}") from exc
+
+
+async def main() -> User:
+    """Main function that fetches user #42 from the API.
+    
+    Returns:
+        User: The fetched user data
+        
+    Raises:
+        APIClientError: If the API request fails
+    """
+    # Use environment variable for base URL or default
+    base_url = os.environ.get("API_BASE_URL", "https://api.example.com")
+    
+    client = APIClient(base_url=base_url)
+    user = await client.fetch_user(42)
+    
+    log.info("user_fetched", user_id=user.id, name=user.name)
+    return user
+
+
+if __name__ == "__main__":
+    import asyncio
+    
+    async def run():
+        try:
+            user = await main()
+            print(user.json())
+        except APIClientError as exc:
+            log.error("main_error", error=str(exc))
+            raise SystemExit(1)
+    
+    asyncio.run(run())
+```

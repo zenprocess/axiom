@@ -1,0 +1,213 @@
+```python
+#!/usr/bin/env python3
+"""
+CSV Filter CLI Tool
+
+A command-line tool that reads a CSV file, filters rows by a column value,
+and outputs the matching rows to stdout in CSV format.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import structlog
+from pydantic import BaseModel
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.dev.ConsoleRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+log = structlog.get_logger()
+
+
+class FilterOptions(BaseModel):
+    input_file: Path
+    output_file: Path | None
+    column: str
+    value: str
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s data.csv -c status -v active
+  %(prog)s data.csv -c name -v 'John Doe' > filtered.csv
+  %(prog)s data.csv -c age -v '25' -o result.csv
+        """,
+    )
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Input CSV file path",
+    )
+    parser.add_argument(
+        "-c",
+        "--column",
+        required=True,
+        help="Column name to filter on",
+    )
+    parser.add_argument(
+        "-v",
+        "--value",
+        required=True,
+        help="Value to match in the specified column",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Output file path (default: stdout)",
+    )
+    parser.add_argument(
+        "-d",
+        "--delimiter",
+        default=",",
+        help="CSV delimiter (default: ',')",
+    )
+    parser.add_argument(
+        "-q",
+        "--quotechar",
+        default='"',
+        help="Quote character (default: '\"')",
+    )
+
+    return parser.parse_args()
+
+
+async def read_csv_file(input_path: Path, delimiter: str, quotechar: str) -> tuple[list[str], list[dict]]:
+    """Read CSV file and return headers and rows."""
+    if not input_path.exists():
+        log.error("input_file_not_found", path=str(input_path))
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    try:
+        with open(input_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter=delimiter, quotechar=quotechar)
+            headers = reader.fieldnames or []
+            rows = list(reader)
+            return headers, rows
+    except csv.Error as e:
+        log.error("csv_parse_error", path=str(input_path), error=str(e))
+        raise
+    except UnicodeDecodeError as e:
+        log.error("encoding_error", path=str(input_path), error=str(e))
+        raise
+
+
+def filter_rows(rows: list[dict], column: str, value: str) -> list[dict]:
+    """Filter rows where the specified column matches the value."""
+    filtered = []
+    for i, row in enumerate(rows):
+        if column not in row:
+            log.warning("missing_column", column=column, row_index=i)
+            continue
+        if row[column] == value:
+            filtered.append(row)
+        # Progress output for large files
+        if (i + 1) % 10000 == 0:
+            log.info("progress", processed=i + 1)
+    return filtered
+
+
+async def write_csv_output(
+    headers: list[str],
+    rows: list[dict],
+    output_path: Path | None,
+    delimiter: str,
+    quotechar: str,
+) -> None:
+    """Write filtered rows to output."""
+    output = sys.stdout if output_path is None else open(output_path, "w", newline="", encoding="utf-8")
+    
+    try:
+        writer = csv.DictWriter(
+            output,
+            fieldnames=headers,
+            delimiter=delimiter,
+            quotechar=quotechar,
+            quoting=csv.QUOTE_MINIMAL,
+        )
+        writer.writeheader()
+        for i, row in enumerate(rows):
+            writer.writerow(row)
+            if (i + 1) % 10000 == 0:
+                log.info("writing_progress", written=i + 1)
+        log.info("write_complete", total_rows=len(rows))
+    finally:
+        if output_path is not None:
+            output.close()
+
+
+async def main() -> int:
+    """Main entry point."""
+    try:
+        args = parse_args()
+        options = FilterOptions(
+            input_file=args.input_file,
+            output_file=args.output,
+            column=args.column,
+            value=args.value,
+        )
+        
+        log.info("starting_filter", input_file=str(options.input_file), column=options.column, value=options.value)
+        
+        # Read CSV file
+        headers, rows = await read_csv_file(
+            options.input_file,
+            args.delimiter,
+            args.quotechar,
+        )
+        log.info("read_complete", total_rows=len(rows), headers=headers)
+        
+        # Filter rows
+        filtered_rows = filter_rows(rows, options.column, options.value)
+        log.info("filter_complete", filtered_rows=len(filtered_rows))
+        
+        # Write output
+        await write_csv_output(
+            headers,
+            filtered_rows,
+            options.output_file,
+            args.delimiter,
+            args.quotechar,
+        )
+        
+        return 0
+        
+    except FileNotFoundError as e:
+        log.error("file_not_found", error=str(e))
+        return 1
+    except csv.Error as e:
+        log.error("csv_error", error=str(e))
+        return 2
+    except UnicodeDecodeError as e:
+        log.error("encoding_error", error=str(e))
+        return 3
+    except KeyboardInterrupt:
+        log.warning("interrupted")
+        return 130
+    except Exception as e:
+        log.error("unexpected_error", error=str(e))
+        return 1
+
+
+if __name__ == "__main__":
+    import asyncio
+    sys.exit(asyncio.run(main()))
+```

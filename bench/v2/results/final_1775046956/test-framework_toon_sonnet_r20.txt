@@ -1,0 +1,201 @@
+It looks like writes to this directory require your approval. Can you approve the file write, or would you prefer a different location?
+
+Alternatively, here's the complete code you can save wherever you like:
+
+---
+
+**`minitest.py`** — ~230 lines, single file:
+
+```python
+"""
+minitest.py — A simple Python test framework.
+"""
+import inspect, sys, traceback
+from typing import Any, Callable, Generator, Optional
+
+
+# ── Exceptions ──────────────────────────────────────────────────────────────
+class TestFailure(AssertionError):
+    """Raised when an assertion fails."""
+
+
+# ── Assertions ───────────────────────────────────────────────────────────────
+def assert_equal(actual, expected, msg=""):
+    if actual != expected:
+        raise TestFailure(msg or f"expected {expected!r}, got {actual!r}")
+
+def assert_not_equal(actual, expected, msg=""):
+    if actual == expected:
+        raise TestFailure(msg or f"expected {actual!r} to differ from {expected!r}")
+
+def assert_true(expr, msg=""):
+    if not expr:
+        raise TestFailure(msg or f"expected truthy, got {expr!r}")
+
+def assert_false(expr, msg=""):
+    if expr:
+        raise TestFailure(msg or f"expected falsy, got {expr!r}")
+
+def assert_is_none(value, msg=""):
+    if value is not None:
+        raise TestFailure(msg or f"expected None, got {value!r}")
+
+def assert_is_not_none(value, msg=""):
+    if value is None:
+        raise TestFailure(msg or "expected non-None value")
+
+def assert_in(item, container, msg=""):
+    if item not in container:
+        raise TestFailure(msg or f"expected {item!r} in {container!r}")
+
+def assert_not_in(item, container, msg=""):
+    if item in container:
+        raise TestFailure(msg or f"expected {item!r} not in {container!r}")
+
+def assert_raises(exc_type, fn, *args, **kwargs):
+    try:
+        fn(*args, **kwargs)
+    except exc_type:
+        return
+    except Exception as e:
+        raise TestFailure(f"expected {exc_type.__name__}, got {type(e).__name__}: {e}")
+    raise TestFailure(f"expected {exc_type.__name__} — no exception raised")
+
+
+# ── Fixtures ─────────────────────────────────────────────────────────────────
+_fixtures: dict[str, Callable] = {}
+
+def fixture(fn):
+    """Register a fixture. Supports plain functions and generators (yield = setup/teardown)."""
+    _fixtures[fn.__name__] = fn
+    return fn
+
+def _call_fixture(fn):
+    result = fn()
+    if inspect.isgenerator(result):
+        return next(result), result
+    return result, None
+
+def _teardown(gen):
+    if gen:
+        try: next(gen)
+        except StopIteration: pass
+
+
+# ── Test registry ─────────────────────────────────────────────────────────────
+_registered: list[Callable] = []
+
+def test(fn):
+    """Decorator to explicitly register a test (discovery also finds test_ functions)."""
+    if fn not in _registered:
+        _registered.append(fn)
+    return fn
+
+
+# ── Runner ────────────────────────────────────────────────────────────────────
+class Result:
+    def __init__(self, name, status, detail=""):
+        self.name, self.status, self.detail = name, status, detail
+
+def _run_one(fn) -> Result:
+    kwargs, gens = {}, []
+    for param in inspect.signature(fn).parameters:
+        if param not in _fixtures:
+            return Result(fn.__name__, "ERROR", f"unknown fixture: {param!r}")
+        val, gen = _call_fixture(_fixtures[param])
+        kwargs[param] = val
+        if gen: gens.append(gen)
+    try:
+        fn(**kwargs)
+        return Result(fn.__name__, "PASS")
+    except TestFailure as e:
+        return Result(fn.__name__, "FAIL", str(e))
+    except Exception as e:
+        return Result(fn.__name__, "ERROR", f"{type(e).__name__}: {e}\n{traceback.format_exc().rstrip()}")
+    finally:
+        for g in reversed(gens): _teardown(g)
+
+def run(module=None, verbose=True) -> int:
+    """Discover + run all tests. Returns 0 (all pass) or 1 (any fail/error)."""
+    if module is None:
+        module = inspect.getmodule(inspect.stack()[1][0])
+
+    seen, tests = set(), []
+    for fn in _registered:
+        if fn.__name__ not in seen:
+            tests.append(fn); seen.add(fn.__name__)
+    for name, obj in inspect.getmembers(module, inspect.isfunction):
+        if name.startswith("test_") and name not in seen:
+            tests.append(obj); seen.add(name)
+
+    if not tests:
+        print("No tests found."); return 0
+
+    print(f"\nRunning {len(tests)} test(s)...\n")
+    results = [_run_one(fn) for fn in tests]
+
+    for r in results:
+        mark = {"PASS": ".", "FAIL": "F", "ERROR": "E"}[r.status]
+        print(f"  [{mark}] {r.name}")
+        if r.detail and verbose:
+            for line in r.detail.splitlines():
+                print(f"       {line}")
+
+    passed = sum(1 for r in results if r.status == "PASS")
+    failed = sum(1 for r in results if r.status == "FAIL")
+    errors = sum(1 for r in results if r.status == "ERROR")
+    print(f"\n{'─'*42}")
+    print(f"  {passed}/{len(results)} passed", end="")
+    if failed: print(f"  |  {failed} failed", end="")
+    if errors: print(f"  |  {errors} error(s)", end="")
+    print("\n  All tests passed.\n" if not failed and not errors else "\n")
+    return 0 if not failed and not errors else 1
+```
+
+---
+
+**Usage** (in your own test file):
+
+```python
+import minitest as mt
+
+@mt.fixture
+def client():
+    c = MyClient()
+    yield c       # setup
+    c.close()     # teardown (runs after test)
+
+def test_add():
+    mt.assert_equal(1 + 1, 2)
+
+def test_raises():
+    mt.assert_raises(ValueError, int, "bad")
+
+def test_with_fixture(client):   # param name matches fixture
+    mt.assert_is_not_none(client)
+
+if __name__ == "__main__":
+    import sys, minitest
+    sys.exit(minitest.run())
+```
+
+**Output:**
+```
+Running 3 test(s)...
+
+  [.] test_add
+  [.] test_raises
+  [.] test_with_fixture
+
+──────────────────────────────────────────
+  3/3 passed
+  All tests passed.
+```
+
+---
+
+**Key design decisions:**
+- **Fixtures by parameter name** — if a test function has a param named `db`, minitest looks up `@fixture def db()` and injects it. Generator fixtures (`yield`) get teardown automatically.
+- **Discovery** finds any `test_*` function in the calling module; `@test` is optional for explicit registration.
+- `assert_raises` takes a callable rather than a context manager to stay simple.
+- `TestFailure(AssertionError)` subclasses the builtin so `except AssertionError` still works downstream.

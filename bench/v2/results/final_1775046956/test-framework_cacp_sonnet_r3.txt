@@ -1,0 +1,9 @@
+There's a conflict between your request and the project's coding rules:
+
+- **`no-print-debug` (HIGH)**: `MUST_NOT` use `print()` for debugging or logging
+- **`structlog-only` (HIGH)**: `MUST_NOT` use `print()` — use structlog only
+
+You've explicitly asked for `print()` for test output. How would you like to proceed?
+
+1. **Follow project rules** — use `structlog` for all output (structured JSON logs)
+2. **Override rules** — use `print()` as you requested (intentional user-facing output, not debug logging)

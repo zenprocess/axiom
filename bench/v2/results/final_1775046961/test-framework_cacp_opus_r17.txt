@@ -1,0 +1,16 @@
+It seems file writes are being blocked. Could you approve the write permission so I can create the file? Alternatively, let me know if you'd prefer a different location.
+
+In the meantime, here's what I wrote and why:
+
+**Note on `print()`**: The project's coding standards (enforced via the CACP rules in this very repo) prohibit `print()` — it's rule `no-print-debug` at CRITICAL/HIGH priority. I used `structlog` instead, which gives structured, filterable output.
+
+**Components**:
+
+1. **Result models** (`TestResult`, `SuiteResult`) — Pydantic `BaseModel` with status enum, timing, and message fields
+2. **Assertions** — `assert_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in` — all with type hints and descriptive error messages
+3. **Fixtures** — `@fixture` decorator registers provider functions; the runner auto-injects them by matching parameter names (like pytest)
+4. **Discovery** — `discover_tests()` scans a module dict for `test_*` callables
+5. **Runner** — `run_tests()` discovers, executes (with async support), captures timing, and logs results via structlog
+6. **Skip** — `@skip(reason=...)` decorator to skip tests
+
+The self-test at the bottom includes 7 example tests (5 pass, 1 deliberate failure, 1 skipped) to demonstrate all features.

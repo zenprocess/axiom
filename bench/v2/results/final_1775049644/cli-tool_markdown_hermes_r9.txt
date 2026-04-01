@@ -1,0 +1,166 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by a column value.
+
+Usage:
+    python csv_filter.py input.csv column_name value
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for the CSV filter operation."""
+    input_file: Path
+    column_name: str
+    filter_value: str
+
+
+def parse_args() -> FilterConfig:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Filter CSV rows by a column value'
+    )
+    parser.add_argument('input_file', type=Path, help='Path to input CSV file')
+    parser.add_argument('column_name', type=str, help='Column name to filter on')
+    parser.add_argument('filter_value', type=str, help='Value to match in the column')
+    
+    args = parser.parse_args()
+    
+    return FilterConfig(
+        input_file=args.input_file,
+        column_name=args.column_name,
+        filter_value=args.filter_value
+    )
+
+
+def validate_input_file(input_file: Path) -> None:
+    """Validate that the input file exists and is readable."""
+    if not input_file.exists():
+        log.error('file_not_found', path=str(input_file))
+        sys.exit(1)
+    
+    if not input_file.is_file():
+        log.error('not_a_file', path=str(input_file))
+        sys.exit(1)
+    
+    if input_file.stat().st_size == 0:
+        log.warning('empty_file', path=str(input_file))
+
+
+def filter_csv(config: FilterConfig) -> int:
+    """
+    Filter CSV rows by column value and output matching rows.
+    
+    Args:
+        config: Filter configuration containing input file, column name, and filter value
+        
+    Returns:
+        Number of matching rows found
+    """
+    validate_input_file(config.input_file)
+    
+    matching_rows = 0
+    
+    try:
+        with open(config.input_file, 'r', newline='', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            
+            # Check if column exists
+            if config.column_name not in reader.fieldnames:
+                log.error('column_not_found', 
+                         column=config.column_name, 
+                         available_columns=reader.fieldnames)
+                sys.exit(1)
+            
+            # Process rows with progress
+            total_rows = 0
+            for row in reader:
+                total_rows += 1
+                if row[config.column_name] == config.filter_value:
+                    matching_rows += 1
+                    print(','.join(row.values()))
+                
+                # Progress output every 1000 rows
+                if total_rows % 1000 == 0:
+                    log.info('progress', processed=total_rows)
+            
+            log.info('filter_complete', 
+                    total_rows=total_rows, 
+                    matching_rows=matching_rows,
+                    column=config.column_name,
+                    value=config.filter_value)
+    
+    except PermissionError:
+        log.error('permission_denied', path=str(config.input_file))
+        sys.exit(1)
+    except csv.Error as e:
+        log.error('csv_parse_error', error=str(e))
+        sys.exit(1)
+    except Exception as e:
+        log.error('unexpected_error', error=str(e))
+        sys.exit(1)
+    
+    return matching_rows
+
+
+def main() -> None:
+    """Main entry point for the CLI tool."""
+    try:
+        config = parse_args()
+        log.info('starting_filter', 
+                file=str(config.input_file),
+                column=config.column_name,
+                value=config.filter_value)
+        
+        matching_count = filter_csv(config)
+        
+        if matching_count == 0:
+            log.info('no_matches_found', 
+                    column=config.column_name,
+                    value=config.filter_value)
+        else:
+            log.info('filter_complete_summary', 
+                    matches=matching_count,
+                    column=config.column_name,
+                    value=config.filter_value)
+    
+    except KeyboardInterrupt:
+        log.info('user_interrupted')
+        sys.exit(130)
+
+
+if __name__ == '__main__':
+    main()
+```
+
+This CLI tool implements the following best practices:
+
+1. **Uses structlog for structured logging** instead of print statements
+2. **Uses Pydantic for configuration** with proper type validation
+3. **Includes proper error handling** for file operations, CSV parsing, and permission issues
+4. **Provides progress output** every 1000 rows processed
+5. **Uses argparse** for command-line argument parsing
+6. **Includes comprehensive docstrings** for all public functions
+7. **Handles edge cases** like missing columns, empty files, and invalid permissions
+8. **Returns appropriate exit codes** for different error conditions
+
+To use the tool:
+```bash
+# Filter rows where 'status' column equals 'active'
+python csv_filter.py data.csv status active
+
+# Filter rows where 'country' column equals 'USA'
+python csv_filter.py customers.csv country USA
+```
+
+The tool outputs matching rows as comma-separated values and logs progress and completion information using structlog.

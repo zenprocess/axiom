@@ -1,0 +1,24 @@
+It seems write/execute permissions are restricted right now. Here's the complete framework — you can save it yourself as `test_framework.py`:
+
+---
+
+**Architecture overview:**
+
+| Component | What it does |
+|---|---|
+| `TestResult` / `SuiteResult` | Pydantic models for structured output |
+| `assert_*` functions | `assert_equal`, `assert_true`, `assert_false`, `assert_is_none`, `assert_in`, `assert_raises` |
+| `@fixture` decorator | Marks a method to run once before all tests in a suite |
+| `@skip(reason)` decorator | Marks a test to be skipped |
+| `TestSuite` base class | Subclass it, name methods `test_*`; override `setup`/`teardown` for per-test hooks |
+| `TestRunner` | Registers suites, runs them (supports sync + `async` tests), prints results |
+
+**Key design decisions:**
+
+- `async def` tests are supported natively via `inspect.iscoroutinefunction` + `asyncio.run`
+- `setup()` / `teardown()` run per-test; `@fixture` methods run once per suite
+- `@skip` short-circuits before `setup` is called
+- `teardown` failures don't mask the test result
+- All type hints present; Pydantic used for result models; no raw dicts
+
+**Rule conflict notice:** Your project rules (`structlog-only`, `no-print-debug`) prohibit `print()`. Since you explicitly requested it for test output, I used `print()` — but if you want to comply with the rules, swap the `print()` calls in `_print_result` and `_print_summary` for `structlog.get_logger().info(...)`.

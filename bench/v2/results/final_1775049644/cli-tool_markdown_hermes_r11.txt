@@ -1,0 +1,282 @@
+```python
+#!/usr/bin/env python3
+"""
+CSV Filter CLI Tool
+
+A command-line tool that reads a CSV file, filters rows based on a column value,
+and outputs the filtered results with progress indication.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import Optional
+
+import structlog
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.dev.ConsoleRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=False,
+)
+
+log = structlog.get_logger()
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s data.csv --column status --value active
+  %(prog)s data.csv -c status -v active -o filtered.csv
+  %(prog)s data.csv -c name -v "John*" --wildcard
+        """,
+    )
+    parser.add_argument("input_file", help="Input CSV file path")
+    parser.add_argument(
+        "-c",
+        "--column",
+        required=True,
+        help="Column name to filter on",
+    )
+    parser.add_argument(
+        "-v",
+        "--value",
+        required=True,
+        help="Value to match (supports * wildcard)",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: stdout)",
+    )
+    parser.add_argument(
+        "-d",
+        "--delimiter",
+        default=",",
+        help="CSV delimiter (default: ',')",
+    )
+    parser.add_argument(
+        "--wildcard",
+        action="store_true",
+        help="Enable wildcard matching with * (matches any sequence of characters)",
+    )
+    parser.add_argument(
+        "--case-sensitive",
+        action="store_true",
+        help="Perform case-sensitive matching",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output",
+    )
+    return parser.parse_args()
+
+
+def match_value(row_value: str, target_value: str, wildcard: bool, case_sensitive: bool) -> bool:
+    """Check if row value matches target value with optional wildcard and case sensitivity."""
+    if not case_sensitive:
+        row_value = row_value.lower()
+        target_value = target_value.lower()
+    
+    if wildcard:
+        # Convert wildcard pattern to regex-like matching
+        parts = target_value.split("*")
+        if len(parts) == 1:
+            return row_value == target_value
+        
+        # Check if the value starts with the first part, ends with the last part,
+        # and contains all middle parts in order
+        if not row_value.startswith(parts[0]):
+            return False
+        if parts[-1] and not row_value.endswith(parts[-1]):
+            return False
+            
+        # Check middle parts
+        current_pos = len(parts[0])
+        for part in parts[1:-1]:
+            pos = row_value.find(part, current_pos)
+            if pos == -1:
+                return False
+            current_pos = pos + len(part)
+        
+        return True
+    else:
+        return row_value == target_value
+
+
+def filter_csv(
+    input_path: Path,
+    column: str,
+    value: str,
+    delimiter: str,
+    wildcard: bool,
+    case_sensitive: bool,
+    quiet: bool,
+    output_path: Optional[Path] = None,
+) -> int:
+    """
+    Filter CSV rows by column value.
+    
+    Args:
+        input_path: Path to input CSV file
+        column: Column name to filter on
+        value: Value to match
+        delimiter: CSV delimiter
+        wildcard: Enable wildcard matching
+        case_sensitive: Enable case-sensitive matching
+        quiet: Suppress progress output
+        output_path: Optional path for output file
+        
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    try:
+        # Check if input file exists
+        if not input_path.exists():
+            log.error("input_file_not_found", path=str(input_path))
+            return 1
+            
+        # Open input file
+        with input_path.open("r", newline="", encoding="utf-8") as infile:
+            reader = csv.DictReader(infile, delimiter=delimiter)
+            
+            # Check if column exists
+            if reader.fieldnames is None or column not in reader.fieldnames:
+                log.error("column_not_found", column=column, available_fields=reader.fieldnames if reader.fieldnames else [])
+                return 1
+                
+            # Prepare output
+            output_file = sys.stdout
+            if output_path:
+                output_file = output_path.open("w", newline="", encoding="utf-8")
+            
+            try:
+                # Write filtered rows
+                writer = csv.DictWriter(output_file, fieldnames=reader.fieldnames, delimiter=delimiter)
+                writer.writeheader()
+                
+                total_rows = 0
+                matched_rows = 0
+                
+                # Count total rows for progress (requires reading file twice or using enumerate)
+                # For simplicity, we'll use line count from the file
+                infile.seek(0)
+                total_lines = sum(1 for _ in infile) - (1 if reader.fieldnames else 0)
+                infile.seek(0)
+                next(reader)  # Skip header
+                
+                for row_num, row in enumerate(reader, start=1):
+                    if not quiet:
+                        # Progress update every 1000 rows
+                        if row_num % 1000 == 0 or row_num == total_lines:
+                            log.info("progress", processed=row_num, total=total_lines)
+                    
+                    total_rows += 1
+                    
+                    # Check if row matches
+                    row_value = row.get(column, "")
+                    if match_value(row_value, value, wildcard, case_sensitive):
+                        writer.writerow(row)
+                        matched_rows += 1
+                
+                if not quiet:
+                    log.info("filtering_complete", total_rows=total_rows, matched_rows=matched_rows)
+                    
+                return 0
+                
+            finally:
+                if output_path and output_file != sys.stdout:
+                    output_file.close()
+                    
+    except PermissionError as e:
+        log.error("permission_error", path=str(input_path), error=str(e))
+        return 1
+    except csv.Error as e:
+        log.error("csv_parsing_error", error=str(e))
+        return 1
+    except Exception as e:
+        log.error("unexpected_error", error=str(e))
+        return 1
+
+
+def main() -> int:
+    """Main entry point."""
+    try:
+        args = parse_args()
+        
+        # Validate input file
+        input_path = Path(args.input_file)
+        if not input_path.exists():
+            log.error("input_file_not_found", path=args.input_file)
+            return 1
+        
+        # Validate output file path if specified
+        output_path = None
+        if args.output:
+            output_path = Path(args.output)
+            # Create parent directories if they don't exist
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        return filter_csv(
+            input_path=input_path,
+            column=args.column,
+            value=args.value,
+            delimiter=args.delimiter,
+            wildcard=args.wildcard,
+            case_sensitive=args.case_sensitive,
+            quiet=args.quiet,
+            output_path=output_path,
+        )
+        
+    except KeyboardInterrupt:
+        log.warning("interrupted")
+        return 130
+    except Exception as e:
+        log.error("unexpected_error", error=str(e))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+This CSV filter CLI tool provides:
+
+1. **Progress output**: Shows processing progress every 1000 rows and final statistics
+2. **Error handling**: Validates file existence, column names, and handles various exceptions
+3. **Flexible filtering**:
+   - Exact matching by default
+   - Wildcard matching with `*` (e.g., "John*")
+   - Case-sensitive or case-insensitive matching
+4. **Multiple output options**: stdout or file output
+5. **Custom delimiters**: Support for different CSV delimiters
+6. **Structured logging**: Uses `structlog` for clean, structured output
+7. **Type hints**: All functions have complete type annotations
+8. **Docstrings**: Comprehensive documentation following Google style
+
+Key features:
+- Uses `argparse` for robust command-line argument parsing
+- Implements wildcard matching with `*` as a glob-style pattern
+- Shows progress information for large files
+- Handles errors gracefully with descriptive messages
+- Creates output directories automatically if needed
+- Handles keyboard interrupts properly
+
+Example usage:
+```bash
+python csv_filter.py data.csv --column status --value active
+python csv_filter.py data.csv -c name -v "John*" --wildcard -o filtered.csv
+python csv_filter.py data.csv -c status -v inactive --case-sensitive
+```

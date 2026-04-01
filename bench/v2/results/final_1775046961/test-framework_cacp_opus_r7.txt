@@ -1,0 +1,20 @@
+It seems write permissions aren't being granted. Would you like me to try a different location, or could you grant write access to `examples/test_framework.py`?
+
+In the meantime, here's the framework I wrote — note I used **structlog** instead of `print()` per the project's coding standards (`structlog-only` and `no-print-debug` rules):
+
+**Key components:**
+
+1. **Data models** — `TestResult` and `SuiteResult` as Pydantic `BaseModel`s (not raw dicts)
+2. **Assertions** — `assert_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in`
+3. **Fixtures** — `@fixture` decorator registers a factory by name; test functions receive fixtures via parameter name matching (pytest-style)
+4. **Discovery** — `discover_tests(path)` recursively finds `test_*.py` files and collects `test_`-prefixed functions
+5. **Runner** — `async run_suite()` / `async run_test()` execute tests, handle async tests, and log results via structlog
+6. **Markers** — `@skip(reason=...)` to skip tests
+
+**Standards compliance:**
+- `structlog` for all output (no `print()`)
+- Pydantic models for data structures
+- `async def` for all runner I/O functions
+- Full type hints on every signature
+- Docstrings on all public functions
+- No star imports, no hardcoded secrets

@@ -1,0 +1,183 @@
+```python
+#!/usr/bin/env python3
+"""
+CSV Filter CLI Tool
+
+A command-line tool to filter rows from a CSV file based on a column value.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import structlog
+
+# Configure structlog for structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.ConsoleRenderer(),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(min_level="INFO"),
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=False,
+)
+
+log = structlog.get_logger()
+
+
+def read_csv_file(file_path: Path) -> list[dict]:
+    """Read CSV file and return list of dictionaries."""
+    try:
+        with file_path.open("r", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile)
+            return list(reader)
+    except FileNotFoundError:
+        log.error("file_not_found", file_path=str(file_path))
+        raise
+    except csv.Error as e:
+        log.error("csv_parsing_error", file_path=str(file_path), error=str(e))
+        raise
+
+
+def filter_rows(rows: list[dict], column_name: str, value: str) -> list[dict]:
+    """Filter rows where column_name equals value."""
+    filtered = []
+    total_rows = len(rows)
+    
+    log.info("filtering_rows", total_rows=total_rows, column=column_name, value=value)
+    
+    for i, row in enumerate(rows):
+        # Progress output for large files
+        if total_rows > 1000 and i % 1000 == 0:
+            log.debug("progress", processed=i, total=total_rows, percentage=(i/total_rows)*100)
+        
+        # Check if column exists and matches value
+        if column_name in row and row[column_name] == value:
+            filtered.append(row)
+    
+    log.info("filtering_complete", total_filtered=len(filtered))
+    return filtered
+
+
+def write_output(rows: list[dict], output_file: Path) -> None:
+    """Write filtered rows to output file."""
+    if not rows:
+        log.warning("no_rows_to_write")
+        return
+    
+    try:
+        fieldnames = list(rows[0].keys())
+        
+        with output_file.open("w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+            
+        log.info("output_written", rows_written=len(rows), output_file=str(output_file))
+    except Exception as e:
+        log.error("output_write_error", error=str(e))
+        raise
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter rows from a CSV file based on a column value"
+    )
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Input CSV file path"
+    )
+    parser.add_argument(
+        "-c", "--column",
+        required=True,
+        help="Column name to filter on"
+    )
+    parser.add_argument(
+        "-v", "--value",
+        required=True,
+        help="Value to match in the specified column"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=Path("filtered_output.csv"),
+        help="Output file path (default: filtered_output.csv)"
+    )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Suppress progress output"
+    )
+    
+    return parser.parse_args()
+
+
+def main() -> int:
+    """Main entry point for the CLI tool."""
+    args = parse_args()
+    
+    # Adjust logging level based on quiet flag
+    if args.quiet:
+        structlog.configure(
+            processors=[
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.processors.add_log_level,
+                structlog.processors.StackInfoRenderer(),
+                structlog.dev.ConsoleRenderer(),
+            ],
+            wrapper_class=structlog.make_filtering_bound_logger(min_level="ERROR"),
+            context_class=dict,
+            logger_factory=structlog.PrintLoggerFactory(),
+            cache_logger_on_first_use=False,
+        )
+        log.info("quiet_mode_enabled")
+    
+    try:
+        # Check if input file exists
+        if not args.input_file.exists():
+            log.error("input_file_not_found", file_path=str(args.input_file))
+            return 1
+        
+        log.info("reading_csv", file_path=str(args.input_file))
+        rows = read_csv_file(args.input_file)
+        log.info("rows_loaded", count=len(rows))
+        
+        if not rows:
+            log.warning("empty_csv_file", file_path=str(args.input_file))
+            return 0
+        
+        # Check if column exists
+        if args.column not in rows[0]:
+            log.error("column_not_found", column=args.column, available_columns=list(rows[0].keys()))
+            return 1
+        
+        # Filter rows
+        filtered_rows = filter_rows(rows, args.column, args.value)
+        
+        # Write output
+        write_output(filtered_rows, args.output)
+        
+        log.info("success", output_file=str(args.output))
+        return 0
+        
+    except FileNotFoundError as e:
+        log.error("file_operation_failed", error=str(e))
+        return 1
+    except csv.Error as e:
+        log.error("csv_error", error=str(e))
+        return 1
+    except Exception as e:
+        log.error("unexpected_error", error=str(e))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

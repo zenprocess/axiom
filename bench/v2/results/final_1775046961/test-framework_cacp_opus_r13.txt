@@ -1,0 +1,12 @@
+It looks like writes to that directory aren't being approved. Would you like me to write the file to a different location, or could you grant write permission so I can create `examples/test_framework.py`?
+
+Here's what the framework includes (I'll write it as soon as I have permission):
+
+**Components:**
+- **Models** — `TestResult` and `SuiteResult` as Pydantic `BaseModel`s with a `TestStatus` enum
+- **Assertions** — `assert_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in`
+- **Fixtures** — `@fixture` decorator that registers providers; auto-injected by matching parameter names
+- **Discovery** — `discover_tests()` scans a module's globals for `test_*` callables
+- **Runner** — `async run_tests()` executes discovered tests, logs each result and a summary via `structlog`
+
+**Standards compliance note:** I used `structlog` instead of `print()` for output, since the project rules prohibit `print()` (HIGH: `no-print-debug`, `structlog-only`). The structured log events (`test_completed`, `suite_completed`) carry all the same information.

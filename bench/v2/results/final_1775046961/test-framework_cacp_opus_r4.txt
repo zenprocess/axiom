@@ -1,0 +1,16 @@
+It looks like write permissions aren't being granted. Could you approve the file write, or would you prefer I place the file in a different location?
+
+In the meantime, here's what I built and a note on one deviation from your request:
+
+**Note on `print()`**: The project coding standards (MUST_NOT rules) prohibit `print()` and require `structlog` for all output. I used `structlog` instead of `print()` to stay compliant. The framework logs each test result, discovery info, and suite summary as structured events.
+
+**What the framework includes:**
+
+1. **Pydantic data models** — `TestResult`, `SuiteResult`, `TestStatus` enum for structured results
+2. **Assertions** — `assert_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in`
+3. **Fixtures** — `@fixture` decorator registers callables; test function parameters are auto-resolved by name
+4. **Discovery** — `async discover_tests(path)` scans a file or directory for `test_*.py` modules and collects `test_*` functions
+5. **Runner** — `run_test()` runs a single test (resolving fixtures, handling async tests), `run_suite()` aggregates results
+6. **CLI** — `python test_framework.py [path]` discovers and runs tests, exits 0 on success
+
+All functions have type hints and docstrings, I/O functions are `async def`, and no `print()` or `logging` imports are used.

@@ -1,0 +1,118 @@
+```python
+"""
+Module for fetching user data from a REST API.
+"""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+logger = structlog.get_logger(__name__)
+
+
+class User(BaseModel):
+    """
+    Pydantic model representing a user.
+    """
+    id: int
+    name: str
+    email: str
+    username: str
+    phone: Optional[str] = None
+    website: Optional[str] = None
+
+
+class APIClient:
+    """
+    Client for fetching user data from the REST API.
+    """
+
+    def __init__(self, base_url: str = "https://api.example.com") -> None:
+        """
+        Initialize the API client.
+
+        Args:
+            base_url: The base URL of the API.
+        """
+        self.base_url = base_url
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def __aenter__(self) -> "APIClient":
+        """
+        Enter the async context manager.
+        """
+        self._client = httpx.AsyncClient()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """
+        Exit the async context manager and close the client.
+        """
+        if self._client:
+            await self._client.aclose()
+
+    async def fetch_user(self, user_id: int) -> User:
+        """
+        Fetch user data by ID from the API.
+
+        Args:
+            user_id: The ID of the user to fetch.
+
+        Returns:
+            User: The fetched user data.
+
+        Raises:
+            UserNotFoundError: If the user is not found (404).
+            APIError: For other API errors.
+        """
+        if self._client is None:
+            raise RuntimeError("Client not initialized. Use async context manager.")
+
+        url = f"{self.base_url}/users/{user_id}"
+        try:
+            response = await self._client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            return User(**data)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                logger.warning("User not found", user_id=user_id)
+                raise UserNotFoundError(f"User {user_id} not found") from exc
+            logger.error("HTTP error occurred", status_code=exc.response.status_code, url=url)
+            raise APIError(f"HTTP error {exc.response.status_code}") from exc
+        except httpx.RequestError as exc:
+            logger.error("Request error occurred", url=url, error=str(exc))
+            raise APIError(f"Request failed: {exc}") from exc
+
+
+class UserNotFoundError(Exception):
+    """Exception raised when a user is not found."""
+    pass
+
+
+class APIError(Exception):
+    """Exception raised for general API errors."""
+    pass
+
+
+async def main() -> None:
+    """
+    Main function to fetch user #42 from the API.
+    """
+    try:
+        async with APIClient() as client:
+            user = await client.fetch_user(42)
+            logger.info("User fetched successfully", user_id=user.id, name=user.name)
+            # In production, you might return or process the user object
+    except UserNotFoundError as exc:
+        logger.error("User not found", error=str(exc))
+    except APIError as exc:
+        logger.error("API error occurred", error=str(exc))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```

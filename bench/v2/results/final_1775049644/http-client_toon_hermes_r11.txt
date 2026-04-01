@@ -1,0 +1,68 @@
+```python
+"""Module for fetching user data from a REST API."""
+
+from typing import Optional
+
+import httpx
+from pydantic import BaseModel
+
+
+class User(BaseModel):
+    """Represents a user from the API."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+
+
+class ApiClient:
+    """Client for interacting with the user API."""
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        """Initialize the API client with a base URL."""
+        self.base_url = base_url.rstrip("/")
+
+    async def get_user(self, user_id: int) -> User:
+        """Fetch a user by ID from the API.
+
+        Args:
+            user_id: The ID of the user to fetch.
+
+        Returns:
+            User: The fetched user data.
+
+        Raises:
+            httpx.HTTPError: If the HTTP request fails.
+            ValueError: If the response data is invalid.
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                user_data = response.json()
+                return User(**user_data)
+        except httpx.HTTPError as exc:
+            # Log error details if structlog were available (per rules)
+            # For now, we'll just re-raise with context
+            raise RuntimeError(f"Failed to fetch user {user_id}: {exc}") from exc
+
+
+async def main() -> User:
+    """Fetch user #42 from the API.
+
+    Returns:
+        User: The fetched user data.
+    """
+    client = ApiClient()
+    return await client.get_user(42)
+
+
+if __name__ == "__main__":
+    import asyncio
+    user = asyncio.run(main())
+    print(user)
+```

@@ -1,0 +1,210 @@
+```python
+#!/usr/bin/env python3
+"""
+A CLI tool to filter rows from a CSV file based on a column value.
+
+Usage:
+    python csv_filter.py input.csv column_name column_value [--output output.csv]
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.dev.ConsoleRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger()
+
+
+def read_csv_file(file_path: Path) -> List[dict]:
+    """
+    Read a CSV file and return its contents as a list of dictionaries.
+
+    Args:
+        file_path: Path to the CSV file.
+
+    Returns:
+        List of dictionaries representing CSV rows.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the file is empty or not a valid CSV.
+    """
+    try:
+        with file_path.open("r", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile)
+            rows = list(reader)
+            
+            if not rows:
+                raise ValueError(f"CSV file '{file_path}' is empty or has no headers.")
+                
+            logger.info("csv_read_success", path=str(file_path), row_count=len(rows))
+            return rows
+    except FileNotFoundError:
+        logger.error("file_not_found", path=str(file_path))
+        raise
+    except csv.Error as e:
+        logger.error("csv_parse_error", path=str(file_path), error=str(e))
+        raise ValueError(f"Invalid CSV format in '{file_path}': {e}")
+
+
+def filter_rows(rows: List[dict], column_name: str, value: str) -> List[dict]:
+    """
+    Filter rows where the specified column matches the given value.
+
+    Args:
+        rows: List of CSV row dictionaries.
+        column_name: Name of the column to filter on.
+        value: Value to match in the specified column.
+
+    Returns:
+        List of filtered rows.
+    """
+    filtered = []
+    total = len(rows)
+    
+    for i, row in enumerate(rows):
+        if column_name not in row:
+            logger.warning("column_not_found", column=column_name, 
+                          available_columns=list(row.keys()))
+            continue
+            
+        if row[column_name] == value:
+            filtered.append(row)
+        
+        # Progress output every 10% to avoid overwhelming output
+        if (i + 1) % max(1, total // 10) == 0:
+            progress = int(((i + 1) / total) * 100)
+            logger.info("filter_progress", processed=i + 1, total=total, 
+                       progress=f"{progress}%", matches=len(filtered))
+    
+    logger.info("filter_complete", total_processed=total, matches=len(filtered))
+    return filtered
+
+
+def write_csv_file(file_path: Path, rows: List[dict], fieldnames: Optional[List[str]] = None) -> None:
+    """
+    Write rows to a CSV file.
+
+    Args:
+        file_path: Path for the output CSV file.
+        rows: List of dictionaries to write.
+        fieldnames: Optional list of column names. If None, uses keys from first row.
+    """
+    if not rows:
+        logger.warning("no_data_to_write", path=str(file_path))
+        return
+    
+    # Use fieldnames from the first row if not provided
+    if fieldnames is None:
+        fieldnames = list(rows[0].keys())
+    
+    try:
+        with file_path.open("w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+            
+        logger.info("csv_written_successfully", path=str(file_path), row_count=len(rows))
+    except IOError as e:
+        logger.error("io_error", path=str(file_path), error=str(e))
+        raise
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter rows from a CSV file based on a column value."
+    )
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Path to the input CSV file"
+    )
+    parser.add_argument(
+        "column_name",
+        type=str,
+        help="Name of the column to filter on"
+    )
+    parser.add_argument(
+        "value",
+        type=str,
+        help="Value to match in the specified column"
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=Path,
+        default=None,
+        help="Path for the output CSV file (default: stdout)"
+    )
+    
+    return parser.parse_args()
+
+
+def main() -> int:
+    """Main entry point for the CLI tool."""
+    try:
+        args = parse_args()
+        
+        # Validate input file exists
+        if not args.input_file.exists():
+            logger.error("input_file_not_found", path=str(args.input_file))
+            return 1
+            
+        logger.info("starting_filter", 
+                   input_file=str(args.input_file),
+                   column=args.column_name,
+                   value=args.value)
+        
+        # Read the CSV file
+        rows = read_csv_file(args.input_file)
+        
+        # Filter the rows
+        filtered_rows = filter_rows(rows, args.column_name, args.value)
+        
+        # Output results
+        if args.output:
+            write_csv_file(args.output, filtered_rows)
+            logger.info("filtering_complete", output=str(args.output), 
+                       matches=len(filtered_rows))
+        else:
+            # Output to stdout
+            if filtered_rows:
+                fieldnames = list(filtered_rows[0].keys())
+                writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(filtered_rows)
+            else:
+                logger.info("no_matching_rows_found")
+        
+        return 0
+        
+    except FileNotFoundError as e:
+        logger.error("file_operation_failed", error=str(e))
+        return 1
+    except ValueError as e:
+        logger.error("validation_error", error=str(e))
+        return 1
+    except Exception as e:
+        logger.error("unexpected_error", error=str(e))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

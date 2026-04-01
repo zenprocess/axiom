@@ -1,0 +1,82 @@
+```python
+"""Module for fetching user data from a REST API."""
+
+import os
+from typing import Optional
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data model."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+
+
+class APIError(Exception):
+    """Custom exception for API-related errors."""
+    pass
+
+
+async def fetch_user(user_id: int) -> User:
+    """
+    Fetch user data from the REST API.
+    
+    Args:
+        user_id: The ID of the user to fetch.
+        
+    Returns:
+        User: The user data model.
+        
+    Raises:
+        APIError: If the API call fails or returns an unexpected response.
+    """
+    api_url = os.environ.get("API_BASE_URL", "https://api.example.com")
+    endpoint = f"{api_url}/users/{user_id}"
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(endpoint)
+            response.raise_for_status()
+            data = response.json()
+            
+        return User(**data)
+        
+    except httpx.HTTPStatusError as e:
+        log.error("api_status_error", 
+                 status_code=e.response.status_code, 
+                 url=endpoint,
+                 error=str(e))
+        raise APIError(f"API returned status {e.response.status_code}") from e
+        
+    except httpx.RequestError as e:
+        log.error("api_request_error", url=endpoint, error=str(e))
+        raise APIError(f"Request failed: {str(e)}") from e
+        
+    except Exception as e:
+        log.error("unexpected_error", url=endpoint, error=str(e))
+        raise APIError(f"Unexpected error: {str(e)}") from e
+
+
+async def main():
+    """Main function to fetch user #42."""
+    try:
+        user = await fetch_user(42)
+        log.info("user_fetched", user_id=user.id, name=user.name, email=user.email)
+        return user
+    except APIError as e:
+        log.error("failed_to_fetch_user", user_id=42, error=str(e))
+        raise
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```

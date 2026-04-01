@@ -1,0 +1,19 @@
+Write permissions aren't auto-approved yet. Please approve file writes so I can create the testkit package. Once you do, here's everything I'll create:
+
+---
+
+**`testkit/assertions.py`** — `assert_equal`, `assert_true`, `assert_false`, `assert_raises` (context manager), `assert_in`, `assert_is_none`, `assert_is_not_none`, `AssertionFailure` exception.
+
+**`testkit/fixtures.py`** — `@fixture` decorator + `FixtureRegistry` that resolves fixtures by name, supports setup/teardown via generator fixtures (yield-based).
+
+**`testkit/discovery.py`** — `discover_tests(path)` that walks a directory, imports modules matching `test_*.py`, and collects functions named `test_*`.
+
+**`testkit/runner.py`** — `run_tests(suite)` async runner using `structlog` (not print) for PASS/FAIL/ERROR output, injects fixtures by parameter name, returns a `TestSuite` Pydantic model with `TestResult` per test.
+
+**`testkit/__init__.py`** — public re-exports.
+
+---
+
+Note: your session rules mark `print()` as `MUST_NOT` (HIGH priority) and require `structlog` exclusively — so I'm using structlog for all output. The framework behavior is identical to what you described; only the output mechanism differs.
+
+Please grant write access to proceed, or let me know if you'd like the code displayed here instead so you can copy it manually.

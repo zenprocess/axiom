@@ -1,0 +1,187 @@
+```python
+#!/usr/bin/env python3
+"""
+CSV Filter Tool
+
+A CLI tool to filter CSV rows based on a column value.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+
+import structlog
+
+# Initialize structlog
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(
+        structlog.stdlib.FilteringLogAdapter
+    ),
+)
+
+logger = structlog.get_logger()
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value."
+    )
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Path to the input CSV file",
+    )
+    parser.add_argument(
+        "-c", "--column",
+        required=True,
+        help="Column name to filter on",
+    )
+    parser.add_argument(
+        "-v", "--value",
+        required=True,
+        help="Value to match in the specified column",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=None,
+        help="Path to output CSV file (default: stdout)",
+    )
+    parser.add_argument(
+        "-d", "--delimiter",
+        default=",",
+        help="CSV delimiter (default: ',')",
+    )
+    parser.add_argument(
+        "-q", "--quotechar",
+        default='"',
+        help="Quote character (default: '\"')",
+    )
+    return parser.parse_args()
+
+
+def read_csv_file(file_path: Path, delimiter: str, quotechar: str) -> List[Dict[str, str]]:
+    """Read CSV file and return list of dictionaries."""
+    try:
+        with file_path.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter=delimiter, quotechar=quotechar)
+            return list(reader)
+    except FileNotFoundError:
+        logger.error("File not found", file_path=str(file_path))
+        sys.exit(1)
+    except PermissionError:
+        logger.error("Permission denied", file_path=str(file_path))
+        sys.exit(1)
+    except csv.Error as e:
+        logger.error("CSV parsing error", error=str(e))
+        sys.exit(1)
+
+
+def filter_rows(
+    rows: List[Dict[str, str]], column: str, value: str
+) -> List[Dict[str, str]]:
+    """Filter rows where the column matches the given value."""
+    filtered_rows = []
+    total = len(rows)
+    
+    for i, row in enumerate(rows, start=1):
+        # Handle missing column gracefully
+        if column not in row:
+            logger.warning(
+                "Column not found in row",
+                row=i,
+                column=column,
+                available_columns=list(row.keys()),
+            )
+            continue
+            
+        if row[column] == value:
+            filtered_rows.append(row)
+            
+        # Progress output (every 10% or every 1000 rows, whichever is larger)
+        if i % max(1000, total // 10) == 0 or i == total:
+            progress = int((i / total) * 100) if total > 0 else 100
+            logger.info(
+                "Processing rows",
+                current=i,
+                total=total,
+                progress=f"{progress}%",
+                filtered_so_far=len(filtered_rows),
+            )
+    
+    return filtered_rows
+
+
+def write_csv_output(
+    rows: List[Dict[str, str]], 
+    output_path: Optional[Path],
+    delimiter: str,
+    quotechar: str
+) -> None:
+    """Write filtered rows to output file or stdout."""
+    if not rows:
+        logger.warning("No matching rows found")
+        return
+    
+    try:
+        if output_path:
+            with output_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=rows[0].keys(),
+                    delimiter=delimiter,
+                    quotechar=quotechar,
+                    quoting=csv.QUOTE_MINIMAL,
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+            logger.info("Output written", file=str(output_path), rows=len(rows))
+        else:
+            # Output to stdout
+            writer = csv.DictWriter(
+                sys.stdout,
+                fieldnames=rows[0].keys(),
+                delimiter=delimiter,
+                quotechar=quotechar,
+                quoting=csv.QUOTE_MINIMAL,
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+            logger.info("Output written", destination="stdout", rows=len(rows))
+    except PermissionError:
+        logger.error("Permission denied", file_path=str(output_path))
+        sys.exit(1)
+    except Exception as e:
+        logger.error("Error writing output", error=str(e))
+        sys.exit(1)
+
+
+def main() -> None:
+    """Main entry point."""
+    args = parse_args()
+    
+    # Validate input file
+    if not args.input_file.exists():
+        logger.error("Input file does not exist", file=str(args.input_file))
+        sys.exit(1)
+    
+    # Read CSV file
+    logger.info("Reading CSV file", file=str(args.input_file))
+    rows = read_csv_file(args.input_file, args.delimiter, args.quotechar)
+    logger.info("Read rows", count=len(rows))
+    
+    # Filter rows
+    logger.info("Filtering rows", column=args.column, value=args.value)
+    filtered_rows = filter_rows(rows, args.column, args.value)
+    logger.info("Filtering complete", count=len(filtered_rows))
+    
+    # Write output
+    write_csv_output(filtered_rows, args.output, args.delimiter, args.quotechar)
+
+
+if __name__ == "__main__":
+    main()
+```

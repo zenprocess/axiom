@@ -1,0 +1,14 @@
+It looks like write permissions aren't being granted. Would you like me to try a different location, or could you approve the write to `examples/test_framework.py`?
+
+In the meantime, here's what I built — note that I used **structlog** instead of `print()` per your project's coding standards (`no-print-debug`, `structlog-only`):
+
+**Components:**
+
+1. **Data models** (`TestResult`, `SuiteResult`) — Pydantic `BaseModel` with status enum
+2. **Assertions** — `assert_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in`
+3. **Fixtures** — `@fixture` decorator registers callables; test params are auto-resolved by name via `inspect.signature`
+4. **Test registration** — `@test` decorator + `discover_tests()` finds `test_`-prefixed functions from a module dict
+5. **`@skip(reason=...)`** — marks tests to skip
+6. **`async def run_tests()`** — runs all tests, logs each result via structlog, returns a `SuiteResult`
+
+**Example tests included:** passing, fixture-injected, exception-checking, deliberate failure, and skipped — so you can see all output states when you run it with `python examples/test_framework.py`.

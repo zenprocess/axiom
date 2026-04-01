@@ -1,0 +1,96 @@
+```python
+"""
+A module for fetching user data from a REST API.
+"""
+
+import structlog
+from typing import Optional
+from pydantic import BaseModel, Field
+import httpx
+
+logger = structlog.get_logger(__name__)
+
+
+class User(BaseModel):
+    """
+    Pydantic model representing a user.
+    """
+    id: int = Field(..., description="User ID")
+    name: str = Field(..., description="User's full name")
+    username: str = Field(..., description="User's username")
+    email: str = Field(..., description="User's email address")
+    address: dict = Field(..., description="User's address details")
+    phone: str = Field(..., description="User's phone number")
+    website: str = Field(..., description="User's website URL")
+    company: dict = Field(..., description="User's company details")
+
+
+class UserNotFoundError(Exception):
+    """Custom exception for when a user is not found."""
+    pass
+
+
+class APIClientError(Exception):
+    """Custom exception for API client errors."""
+    pass
+
+
+async def fetch_user(user_id: int) -> User:
+    """
+    Fetch user data from the REST API.
+
+    Args:
+        user_id: The ID of the user to fetch.
+
+    Returns:
+        User: A User model instance with the fetched data.
+
+    Raises:
+        UserNotFoundError: If the user with the given ID does not exist.
+        APIClientError: If there is an error communicating with the API.
+    """
+    url = f"https://api.example.com/users/{user_id}"
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            
+            user_data = response.json()
+            return User(**user_data)
+    
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            logger.warning("User not found", user_id=user_id, status_code=404)
+            raise UserNotFoundError(f"User with ID {user_id} not found") from exc
+        else:
+            logger.error("HTTP error", user_id=user_id, status_code=exc.response.status_code)
+            raise APIClientError(f"HTTP error {exc.response.status_code} for user {user_id}") from exc
+    
+    except httpx.RequestError as exc:
+        logger.error("Request error", user_id=user_id, error=str(exc))
+        raise APIClientError(f"Request error for user {user_id}: {exc}") from exc
+
+
+async def main() -> Optional[User]:
+    """
+    Main function to fetch user #42 from the API.
+
+    Returns:
+        User: The fetched user data if successful, None otherwise.
+    """
+    user_id = 42
+    
+    try:
+        user = await fetch_user(user_id)
+        logger.info("User fetched successfully", user_id=user_id, username=user.username)
+        return user
+    
+    except UserNotFoundError as exc:
+        logger.warning("User not found", user_id=user_id, error=str(exc))
+        return None
+    
+    except APIClientError as exc:
+        logger.error("API client error", user_id=user_id, error=str(exc))
+        return None
+```

@@ -1,0 +1,284 @@
+```python
+#!/usr/bin/env python3
+"""
+A CLI tool to filter CSV rows by a column value.
+
+Usage:
+    python csv_filter.py input.csv --column status --value active --output filtered.csv
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Dict, Any
+
+import structlog
+from pydantic import BaseModel, Field
+
+log = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for CSV filtering."""
+    input_file: Path = Field(..., description="Input CSV file path")
+    output_file: Path = Field(..., description="Output CSV file path")
+    column: str = Field(..., description="Column name to filter on")
+    value: str = Field(..., description="Value to match in the column")
+    delimiter: str = Field(",", description="CSV delimiter character")
+    encoding: str = Field("utf-8", description="File encoding")
+
+
+def parse_args() -> FilterConfig:
+    """Parse command line arguments and return a FilterConfig."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value"
+    )
+    parser.add_argument("input_file", type=Path, help="Path to input CSV file")
+    parser.add_argument("output_file", type=Path, help="Path to output CSV file")
+    parser.add_argument(
+        "--column", "-c", required=True, help="Column name to filter on"
+    )
+    parser.add_argument(
+        "--value", "-v", required=True, help="Value to match in the column"
+    )
+    parser.add_argument(
+        "--delimiter", "-d", default=",",
+        help="CSV delimiter character (default: ,)"
+    )
+    parser.add_argument(
+        "--encoding", "-e", default="utf-8",
+        help="File encoding (default: utf-8)"
+    )
+    
+    args = parser.parse_args()
+    return FilterConfig(
+        input_file=args.input_file,
+        output_file=args.output_file,
+        column=args.column,
+        value=args.value,
+        delimiter=args.delimiter,
+        encoding=args.encoding
+    )
+
+
+async def filter_csv(config: FilterConfig) -> int:
+    """
+    Filter a CSV file by column value and write results to output file.
+    
+    Args:
+        config: FilterConfig with filtering parameters
+        
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    try:
+        # Check if input file exists
+        if not config.input_file.exists():
+            log.error("input_file_not_found", path=str(config.input_file))
+            return 1
+        
+        # Read and filter the CSV file
+        rows_read = 0
+        rows_written = 0
+        
+        log.info("starting_filter", 
+                input_file=str(config.input_file),
+                column=config.column,
+                value=config.value)
+        
+        with open(config.input_file, "r", encoding=config.encoding, newline="") as infile:
+            reader = csv.DictReader(infile, delimiter=config.delimiter)
+            
+            # Get fieldnames from the reader
+            fieldnames = reader.fieldnames or []
+            
+            # Prepare output file
+            with open(config.output_file, "w", encoding=config.encoding, newline="") as outfile:
+                writer = csv.DictWriter(outfile, fieldnames=fieldnames, delimiter=config.delimiter)
+                writer.writeheader()
+                
+                # Process each row with progress output
+                for row in reader:
+                    rows_read += 1
+                    if rows_read % 1000 == 0:
+                        log.info("progress", rows_processed=rows_read)
+                    
+                    # Check if the column exists and matches the value
+                    if config.column in row and row[config.column] == config.value:
+                        writer.writerow(row)
+                        rows_written += 1
+        
+        log.info("filtering_complete", 
+                rows_read=rows_read, 
+                rows_written=rows_written,
+                output_file=str(config.output_file))
+        
+        return 0
+        
+    except Exception as e:
+        log.error("filtering_failed", error=str(e), exc_info=True)
+        return 1
+
+
+async def main() -> int:
+    """Main entry point for the CLI tool."""
+    try:
+        config = parse_args()
+        return await filter_csv(config)
+    except SystemExit as e:
+        # argparse exits on --help or invalid arguments
+        return e.code if isinstance(e.code, int) else 1
+    except Exception as e:
+        log.error("unexpected_error", error=str(e), exc_info=True)
+        return 1
+
+
+if __name__ == "__main__":
+    # Run the async main function
+    sys.exit(asyncio.run(main()))
+```
+
+Wait, I need to fix this - I forgot to import asyncio at the top. Let me correct that:
+
+```python
+#!/usr/bin/env python3
+"""
+A CLI tool to filter CSV rows by a column value.
+
+Usage:
+    python csv_filter.py input.csv --column status --value active --output filtered.csv
+"""
+
+import argparse
+import asyncio
+import csv
+import sys
+from pathlib import Path
+from typing import List, Dict, Any
+
+import structlog
+from pydantic import BaseModel, Field
+
+log = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for CSV filtering."""
+    input_file: Path = Field(..., description="Input CSV file path")
+    output_file: Path = Field(..., description="Output CSV file path")
+    column: str = Field(..., description="Column name to filter on")
+    value: str = Field(..., description="Value to match in the column")
+    delimiter: str = Field(",", description="CSV delimiter character")
+    encoding: str = Field("utf-8", description="File encoding")
+
+
+def parse_args() -> FilterConfig:
+    """Parse command line arguments and return a FilterConfig."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value"
+    )
+    parser.add_argument("input_file", type=Path, help="Path to input CSV file")
+    parser.add_argument("output_file", type=Path, help="Path to output CSV file")
+    parser.add_argument(
+        "--column", "-c", required=True, help="Column name to filter on"
+    )
+    parser.add_argument(
+        "--value", "-v", required=True, help="Value to match in the column"
+    )
+    parser.add_argument(
+        "--delimiter", "-d", default=",",
+        help="CSV delimiter character (default: ,)"
+    )
+    parser.add_argument(
+        "--encoding", "-e", default="utf-8",
+        help="File encoding (default: utf-8)"
+    )
+    
+    args = parser.parse_args()
+    return FilterConfig(
+        input_file=args.input_file,
+        output_file=args.output_file,
+        column=args.column,
+        value=args.value,
+        delimiter=args.delimiter,
+        encoding=args.encoding
+    )
+
+
+async def filter_csv(config: FilterConfig) -> int:
+    """
+    Filter a CSV file by column value and write results to output file.
+    
+    Args:
+        config: FilterConfig with filtering parameters
+        
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    try:
+        # Check if input file exists
+        if not config.input_file.exists():
+            log.error("input_file_not_found", path=str(config.input_file))
+            return 1
+        
+        # Read and filter the CSV file
+        rows_read = 0
+        rows_written = 0
+        
+        log.info("starting_filter", 
+                input_file=str(config.input_file),
+                column=config.column,
+                value=config.value)
+        
+        with open(config.input_file, "r", encoding=config.encoding, newline="") as infile:
+            reader = csv.DictReader(infile, delimiter=config.delimiter)
+            
+            # Get fieldnames from the reader
+            fieldnames = reader.fieldnames or []
+            
+            # Prepare output file
+            with open(config.output_file, "w", encoding=config.encoding, newline="") as outfile:
+                writer = csv.DictWriter(outfile, fieldnames=fieldnames, delimiter=config.delimiter)
+                writer.writeheader()
+                
+                # Process each row with progress output
+                for row in reader:
+                    rows_read += 1
+                    if rows_read % 1000 == 0:
+                        log.info("progress", rows_processed=rows_read)
+                    
+                    # Check if the column exists and matches the value
+                    if config.column in row and row[config.column] == config.value:
+                        writer.writerow(row)
+                        rows_written += 1
+        
+        log.info("filtering_complete", 
+                rows_read=rows_read, 
+                rows_written=rows_written,
+                output_file=str(config.output_file))
+        
+        return 0
+        
+    except Exception as e:
+        log.error("filtering_failed", error=str(e), exc_info=True)
+        return 1
+
+
+async def main() -> int:
+    """Main entry point for the CLI tool."""
+    try:
+        config = parse_args()
+        return await filter_csv(config)
+    except SystemExit as e:
+        # argparse exits on --help or invalid arguments
+        return e.code if isinstance(e.code, int) else 1
+    except Exception as e:
+        log.error("unexpected_error", error=str(e), exc_info=True)
+        return 1
+
+
+if __name__ == "__main__":
+    # Run the async main function
+    sys.exit(asyncio.run(main()))
+```

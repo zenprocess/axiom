@@ -1,0 +1,223 @@
+Here's a production-ready structured logging system for a web application using `structlog`, with support for log levels, request correlation IDs, and log rotation.
+
+```python
+"""
+Structured logging system for web applications.
+Supports JSON output, request correlation IDs, log levels, and rotation.
+"""
+
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+import structlog
+from structlog.types import Processor
+from structlog.processors import (
+    add_log_level,
+    format_exc_info,
+    TimeStamper,
+    JSONRenderer,
+)
+from structlog.stdlib import (
+    filter_by_level,
+    add_logger_name,
+    BoundLogger,
+    get_logger,
+)
+
+# Configure structlog processors
+def configure_logging(
+    *,
+    log_level: str = "INFO",
+    log_file: Optional[str] = None,
+    log_dir: Optional[str] = None,
+    max_bytes: int = 10 * 1024 * 1024,  # 10MB
+    backup_count: int = 5,
+    enable_correlation_id: bool = True,
+) -> None:
+    """
+    Configure the logging system for the application.
+
+    Args:
+        log_level: Minimum log level to output (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        log_file: Optional filename for file logging (if provided, log_dir must be set)
+        log_dir: Directory to store log files
+        max_bytes: Maximum size of each log file before rotation
+        backup_count: Number of backup files to keep
+        enable_correlation_id: Whether to include correlation IDs in logs
+    """
+    # Validate arguments
+    if log_file and not log_dir:
+        raise ValueError("log_dir must be specified when log_file is provided")
+    
+    # Ensure log directory exists
+    if log_dir:
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+
+    # Configure structlog
+    shared_processors: list[Processor] = [
+        add_log_level,
+        add_logger_name,
+        TimeStamper(fmt="iso", key="timestamp"),
+    ]
+
+    if enable_correlation_id:
+        shared_processors.append(_add_correlation_id)
+
+    # Set up logging configuration
+    logging.basicConfig(
+        format="%(message)s",
+        level=getattr(logging, log_level.upper()),
+        handlers=[
+            # Console handler
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+
+    # Add file handler if log_dir and log_file are specified
+    if log_dir and log_file:
+        file_path = os.path.join(log_dir, log_file)
+        file_handler = logging.handlers.RotatingFileHandler(
+            file_path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(getattr(logging, log_level.upper()))
+        file_handler.setFormatter(logging.Formatter("%(message)s"))
+        logging.getLogger().handlers.append(file_handler)
+
+    # Configure structlog to use the standard library logging handlers
+    structlog.configure(
+        processors=shared_processors
+        + [
+            format_exc_info,
+            JSONRenderer(),
+        ],
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+
+def _add_correlation_id(logger: BoundLogger, method_name: str, event_dict: dict) -> dict:
+    """
+    Processor to add correlation ID to log events.
+    
+    This example uses a thread-local storage pattern, but in a real app you'd
+    typically extract the correlation ID from incoming request headers (e.g., X-Request-ID).
+    """
+    try:
+        # In a real application, this would get the correlation ID from request context
+        # e.g., from FastAPI/Starlette request state or Flask g object
+        from threading import local
+        if not hasattr(local, "correlation_id"):
+            local.correlation_id = None
+        
+        correlation_id = getattr(local, "correlation_id", None)
+        if correlation_id:
+            event_dict["correlation_id"] = correlation_id
+    except Exception:
+        # Silently handle any issues getting correlation ID
+        pass
+    
+    return event_dict
+
+
+def set_correlation_id(correlation_id: str) -> None:
+    """
+    Set the correlation ID for the current context (e.g., current request).
+    
+    In a real web app, you'd typically call this at the start of request processing.
+    """
+    try:
+        from threading import local
+        if not hasattr(local, "correlation_id"):
+            local.correlation_id = None
+        
+        setattr(local, "correlation_id", correlation_id)
+    except Exception:
+        # Silently handle any issues setting correlation ID
+        pass
+
+
+def get_logger_with_context(**kwargs) -> BoundLogger:
+    """
+    Get a logger instance with optional initial context.
+    
+    Args:
+        **kwargs: Initial context key-value pairs to add to all log events
+        
+    Returns:
+        A structlog BoundLogger instance
+    """
+    return get_logger(**kwargs)
+
+
+# Example usage and test functions
+if __name__ == "__main__":
+    # Example configuration for development
+    configure_logging(log_level="DEBUG", log_dir="./logs", log_file="app.log")
+    
+    # Example of setting correlation ID (would typically be done per-request)
+    set_correlation_id("req-12345")
+    
+    # Get logger and use it
+    log = get_logger_with_context(service="myapp", version="1.0.0")
+    
+    log.info("application_started", host="0.0.0.0", port=8000)
+    
+    # Example with exception
+    try:
+        raise ValueError("Test error")
+    except Exception:
+        log.exception("error_handling_example", error_code="ERR001")
+    
+    # Example with structured data
+    log.info(
+        "user_action",
+        user_id=12345,
+        action="login",
+        ip_address="192.168.1.1",
+        user_agent="Mozilla/5.0",
+    )
+```
+
+## Key Features
+
+1. **Structured JSON Output**: Uses `structlog` with `JSONRenderer()` for machine-readable logs
+2. **Log Levels**: Supports standard Python log levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+3. **Request Correlation IDs**: Thread-local storage for correlation IDs (in production, would extract from request headers)
+4. **Log Rotation**: Uses `RotatingFileHandler` for automatic log rotation with configurable size and backup count
+5. **Flexible Configuration**: All configuration is centralized in one function
+
+## Production Usage
+
+For a real web application, you'd typically:
+
+1. Extract correlation IDs from request headers (e.g., `X-Request-ID`)
+2. Set the correlation ID at the start of request processing (middleware)
+3. Use the logger throughout your application code
+
+Example integration with FastAPI:
+
+```python
+# In your FastAPI middleware
+from fastapi import Request, Response
+from your_logging_module import set_correlation_id, get_logger_with_context
+
+@app.middleware("http")
+async def add_correlation_id(request: Request, call_next):
+    correlation_id = request.headers.get("X-Request-ID") or str(time.time_ns())
+    set_correlation_id(correlation_id)
+    
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = correlation_id
+    return response
+```
+
+The logging system will automatically include the correlation ID in all log entries for the current request, enabling easy tracing across services.

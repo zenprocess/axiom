@@ -1,0 +1,160 @@
+Permissions are blocked for writing to the project. Here's the complete script — you can save it yourself as `deploy.sh` and `chmod +x deploy.sh`:
+
+```bash
+#!/usr/bin/env bash
+# deploy.sh — build, push, tag, deploy, rollback
+# Usage:
+#   ./deploy.sh [--rollback]
+#   ./deploy.sh [--tag v1.2.3]   # deploy a specific existing tag
+#
+# Required env vars:
+#   REGISTRY      — e.g. ghcr.io/zenprocess
+#   IMAGE_NAME    — e.g. axiom-rdl  (default: derived from pyproject.toml)
+#   DEPLOY_HOST   — SSH target, e.g. user@prod.example.com
+#   DEPLOY_PATH   — remote working directory, e.g. /opt/axiom
+#
+# Optional env vars:
+#   DOCKER_PLATFORM — default: linux/amd64
+#   ROLLBACK_KEEP   — number of old images to retain (default: 3)
+
+set -euo pipefail
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RESET='\033[0m'
+log()  { echo -e "${GREEN}[deploy]${RESET} $*"; }
+warn() { echo -e "${YELLOW}[deploy]${RESET} $*"; }
+die()  { echo -e "${RED}[deploy] ERROR:${RESET} $*" >&2; exit 1; }
+
+ROLLBACK=false
+EXPLICIT_TAG=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rollback) ROLLBACK=true ;;
+    --tag)      shift; EXPLICIT_TAG="$1" ;;
+    -h|--help)  sed -n '2,15p' "$0" | sed 's/^# //'; exit 0 ;;
+    *) die "Unknown argument: $1" ;;
+  esac
+  shift
+done
+
+: "${REGISTRY:?REGISTRY env var is required}"
+: "${DEPLOY_HOST:?DEPLOY_HOST env var is required}"
+: "${DEPLOY_PATH:?DEPLOY_PATH env var is required}"
+
+IMAGE_NAME="${IMAGE_NAME:-$(grep '^name' pyproject.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')}"
+[[ -n "$IMAGE_NAME" ]] || die "Could not determine IMAGE_NAME"
+
+DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
+ROLLBACK_KEEP="${ROLLBACK_KEEP:-3}"
+FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}"
+
+remote_exec() { ssh -o BatchMode=yes -o ConnectTimeout=10 "${DEPLOY_HOST}" "$@"; }
+
+# ── rollback ──────────────────────────────────────────────────────────────────
+if [[ "$ROLLBACK" == "true" ]]; then
+  log "Rollback requested — finding previous stable tag..."
+  mapfile -t TAGS < <(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | head -2)
+  [[ ${#TAGS[@]} -ge 2 ]] || die "Need at least 2 version tags to roll back (found ${#TAGS[@]})"
+  ROLLBACK_TAG="${TAGS[1]}"
+  warn "Rolling back to ${ROLLBACK_TAG}"
+  remote_exec bash -s <<REMOTE
+    set -euo pipefail
+    cd "${DEPLOY_PATH}"
+    docker pull "${FULL_IMAGE}:${ROLLBACK_TAG}"
+    docker tag  "${FULL_IMAGE}:${ROLLBACK_TAG}" "${FULL_IMAGE}:stable"
+    docker compose up -d --no-build
+REMOTE
+  log "Rollback to ${ROLLBACK_TAG} complete."
+  exit 0
+fi
+
+# ── pinned tag (no build) ─────────────────────────────────────────────────────
+if [[ -n "$EXPLICIT_TAG" ]]; then
+  git rev-parse "$EXPLICIT_TAG" > /dev/null 2>&1 || die "Tag ${EXPLICIT_TAG} does not exist"
+  remote_exec bash -s <<REMOTE
+    set -euo pipefail
+    cd "${DEPLOY_PATH}"
+    docker pull "${FULL_IMAGE}:${EXPLICIT_TAG}"
+    docker tag  "${FULL_IMAGE}:${EXPLICIT_TAG}" "${FULL_IMAGE}:stable"
+    docker compose up -d --no-build
+REMOTE
+  log "Deployed ${EXPLICIT_TAG}."; exit 0
+fi
+
+# ── normal deploy ─────────────────────────────────────────────────────────────
+VERSION="v$(grep '^version' pyproject.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')"
+log "Version: ${VERSION}"
+
+git rev-parse "${VERSION}" > /dev/null 2>&1 && die "Tag ${VERSION} already exists. Bump version first."
+[[ -z "$(git status --porcelain)" ]] || die "Working tree is dirty."
+
+# 1. Build
+log "Building ${FULL_IMAGE}:${VERSION}..."
+docker buildx build \
+  --platform "${DOCKER_PLATFORM}" \
+  --label "org.opencontainers.image.version=${VERSION}" \
+  --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+  --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -t "${FULL_IMAGE}:${VERSION}" \
+  -t "${FULL_IMAGE}:latest" \
+  --load .
+
+# 2. Push
+log "Pushing ${FULL_IMAGE}:${VERSION}..."
+docker push "${FULL_IMAGE}:${VERSION}"
+docker push "${FULL_IMAGE}:latest"
+
+# 3. Git tag
+log "Tagging ${VERSION}..."
+git tag -a "${VERSION}" -m "Release ${VERSION}"
+git push origin "${VERSION}"
+
+# 4. Deploy
+log "Deploying to ${DEPLOY_HOST}:${DEPLOY_PATH}..."
+remote_exec bash -s <<REMOTE
+  set -euo pipefail
+  cd "${DEPLOY_PATH}"
+
+  # Save current image as rollback anchor
+  CURRENT_TAG=\$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
+    "${FULL_IMAGE}:stable" 2>/dev/null || echo "")
+  [[ -n "\$CURRENT_TAG" ]] && docker tag "${FULL_IMAGE}:stable" "${FULL_IMAGE}:\${CURRENT_TAG}-prev" 2>/dev/null || true
+
+  docker pull "${FULL_IMAGE}:${VERSION}"
+  docker tag  "${FULL_IMAGE}:${VERSION}" "${FULL_IMAGE}:stable"
+  docker compose up -d --no-build
+
+  # Health check — up to 60 s
+  for i in \$(seq 1 12); do
+    STATUS=\$(docker compose ps --format json 2>/dev/null \
+      | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('Health','unknown'))" 2>/dev/null \
+      || echo "unknown")
+    [[ "\$STATUS" == "healthy" ]] && { echo "[remote] Healthy."; break; }
+    echo "[remote] Waiting... (\${i}/12)"; sleep 5
+  done
+
+  # Prune old images, keep ROLLBACK_KEEP most recent versioned tags
+  docker images "${FULL_IMAGE}" --format "{{.Tag}}" \
+    | grep -E '^v[0-9]+' | sort -V | head -n -${ROLLBACK_KEEP} \
+    | xargs -r -I{} docker rmi "${FULL_IMAGE}:{}" || true
+REMOTE
+
+log "Deploy of ${VERSION} succeeded."
+log "To roll back: ./deploy.sh --rollback"
+```
+
+---
+
+**Key design decisions:**
+
+| Concern | Approach |
+|---|---|
+| **Guard rails** | Fails if git tag already exists or tree is dirty |
+| **Rollback** | `--rollback` re-pins `:stable` to the previous version tag and restarts |
+| **Pinned deploy** | `--tag v1.1.0` deploys any existing image without rebuilding |
+| **Remote safety** | Snapshots current `:stable` as `:vX.Y.Z-prev` before swapping |
+| **Health check** | Polls `docker compose ps` for up to 60 s post-restart |
+| **Image cleanup** | Keeps `ROLLBACK_KEEP` (default 3) versioned images on the remote |
+| **No secrets in code** | All credentials via env vars; SSH uses key auth (`BatchMode=yes`) |
+
+**You'll need:** a `Dockerfile` in the repo root and a `docker-compose.yml` on the remote host. The `IMAGE_NAME` is auto-read from `pyproject.toml` (`axiom-rdl`).

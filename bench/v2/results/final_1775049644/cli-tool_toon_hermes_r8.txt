@@ -1,0 +1,160 @@
+```python
+#!/usr/bin/env python3
+"""
+A CLI tool to filter CSV rows by a column value.
+
+Usage:
+    python csv_filter.py input.csv column_name value [--output output.csv]
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+
+# Configure structlog for structured logging
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(level=structlog.INFO),
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.dev.ConsoleRenderer(),
+    ],
+)
+logger = structlog.get_logger()
+
+
+def filter_csv_rows(
+    input_path: Path, column_name: str, value: str, output_path: Optional[Path] = None
+) -> int:
+    """
+    Filter CSV rows by a column value.
+
+    Args:
+        input_path: Path to the input CSV file.
+        column_name: Name of the column to filter on.
+        value: Value to match in the specified column.
+        output_path: Optional path for the output CSV file.
+
+    Returns:
+        Number of matching rows found.
+    """
+    try:
+        if not input_path.exists():
+            logger.error("Input file does not exist", path=str(input_path))
+            return 1
+
+        rows = []
+        matching_rows = 0
+
+        # Read CSV file
+        with input_path.open("r", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile)
+
+            if column_name not in reader.fieldnames:
+                logger.error(
+                    "Column not found in CSV",
+                    column=column_name,
+                    available_columns=reader.fieldnames,
+                )
+                return 1
+
+            total_rows = sum(1 for _ in reader)  # Count total rows
+            csvfile.seek(0)  # Reset file pointer
+            next(reader)  # Skip header
+
+            for i, row in enumerate(reader, start=1):
+                if row[column_name] == value:
+                    matching_rows += 1
+                    rows.append(row)
+
+                # Progress logging
+                if i % 1000 == 0 or i == total_rows:
+                    logger.info(
+                        "Processing rows",
+                        processed=i,
+                        total=total_rows,
+                        progress=f"{i/total_rows*100:.1f}%",
+                    )
+
+        # Output results
+        if output_path:
+            with output_path.open("w", newline="", encoding="utf-8") as outfile:
+                if rows:
+                    writer = csv.DictWriter(outfile, fieldnames=rows[0].keys())
+                    writer.writeheader()
+                    writer.writerows(rows)
+                else:
+                    logger.warning("No matching rows found", output_path=str(output_path))
+        else:
+            # Output to stdout
+            for row in rows:
+                print(",".join(row.values()))
+
+        logger.info(
+            "Filtering complete",
+            matching_rows=matching_rows,
+            total_rows=total_rows,
+            output_path=str(output_path) if output_path else "stdout",
+        )
+        return 0
+
+    except PermissionError as e:
+        logger.error("Permission denied", error=str(e))
+        return 1
+    except UnicodeDecodeError as e:
+        logger.error("Encoding error", error=str(e))
+        return 1
+    except Exception as e:
+        logger.error("Unexpected error", error=str(e))
+        return 1
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value"
+    )
+    parser.add_argument("input", type=Path, help="Input CSV file path")
+    parser.add_argument("column", type=str, help="Column name to filter on")
+    parser.add_argument("value", type=str, help="Value to match in the column")
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="Output CSV file path (default: stdout)",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose output",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    """Main entry point."""
+    args = parse_args()
+
+    # Adjust logging level based on verbose flag
+    if args.verbose:
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(level=structlog.DEBUG)
+        )
+    else:
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(level=structlog.INFO)
+        )
+
+    return filter_csv_rows(args.input, args.column, args.value, args.output)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

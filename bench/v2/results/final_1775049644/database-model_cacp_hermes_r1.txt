@@ -1,0 +1,122 @@
+```python
+"""User management system data models and database interaction functions."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import List, Optional
+import urllib.parse
+
+import structlog
+from pydantic import BaseModel, EmailStr, Field, validator
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    
+    class Config:
+        extra = "forbid"
+        validate_assignment = True
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+    
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = Field(default_factory=list)
+    
+    class Config:
+        extra = "forbid"
+        validate_assignment = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    
+    id: int
+    email: EmailStr
+    username: str = Field(..., min_length=1, max_length=30)
+    full_name: Optional[str] = Field(None, max_length=100)
+    role_id: int
+    role: Optional[Role] = None
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime
+    
+    # Validate that email is lowercase
+    @validator('email', pre=True, always=True)
+    def normalize_email(cls, v):
+        return v.lower()
+    
+    class Config:
+        extra = "forbid"
+        validate_assignment = True
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat()
+        }
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database using the provided URL.
+    
+    Args:
+        database_url: Connection string for the database
+        
+    Returns:
+        List of User objects fetched from the database
+        
+    Raises:
+        ValueError: If database_url is invalid
+        RuntimeError: If database connection fails
+    """
+    # Validate the URL format
+    try:
+        parsed = urllib.parse.urlparse(database_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError("Invalid database URL format")
+    except Exception as e:
+        raise ValueError(f"Invalid database URL: {e}")
+    
+    # Simulate database connection and query
+    # In a real implementation, this would use an async database library
+    try:
+        # This is a placeholder implementation
+        # In production, replace with actual database query using async library
+        # like asyncpg, SQLAlchemy asyncio support, etc.
+        
+        # Example of how logging should be done with structlog
+        logger.info("fetching_users", database_url=parsed.netloc)
+        
+        # Simulated data for demonstration
+        # Replace with actual database fetch
+        return [
+            User(
+                id=1,
+                email="user@example.com",
+                username="johndoe",
+                full_name="John Doe",
+                role_id=1,
+                role=Role(
+                    id=1,
+                    name="admin",
+                    description="Administrator",
+                    permissions=[Permission(id=1, name="read", description="Read access")]
+                ),
+                is_active=True,
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+            )
+        ]
+    except Exception as e:
+        logger.error("database_fetch_failed", error=str(e))
+        raise RuntimeError(f"Failed to fetch users: {e}")
+```

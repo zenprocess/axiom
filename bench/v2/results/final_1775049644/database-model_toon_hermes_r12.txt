@@ -1,0 +1,148 @@
+```python
+"""User management system data models and utilities."""
+
+from typing import List, Optional
+from urllib.parse import urlparse
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, validator, root_validator
+
+logger = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission."""
+    name: str
+    description: Optional[str] = None
+
+    class Config:
+        extra = "forbid"
+
+
+class Role(BaseModel):
+    """Represents a role with associated permissions."""
+    name: str
+    permissions: List[Permission] = []
+    description: Optional[str] = None
+
+    @validator("name")
+    def name_must_not_be_empty(cls, v):
+        """Ensure role name is not empty."""
+        if not v or not v.strip():
+            raise ValueError("Role name must not be empty")
+        return v.strip()
+
+    class Config:
+        extra = "forbid"
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: Optional[int] = None
+    email: EmailStr
+    username: str
+    full_name: Optional[str] = None
+    hashed_password: Optional[str] = None
+    is_active: bool = True
+    is_superuser: bool = False
+    role: Optional[Role] = None
+    permissions: List[Permission] = []
+
+    @validator("username")
+    def username_must_not_be_empty(cls, v):
+        """Ensure username is not empty."""
+        if not v or not v.strip():
+            raise ValueError("Username must not be empty")
+        return v.strip()
+
+    @validator("email")
+    def email_must_be_lowercase(cls, v):
+        """Ensure email is lowercase."""
+        return v.lower()
+
+    @root_validator(pre=True)
+    def set_permissions_from_role(cls, values):
+        """Set user permissions from role if role is provided."""
+        role = values.get("role")
+        if isinstance(role, dict) and "permissions" in role:
+            # If role has permissions, merge them with user permissions
+            role_permissions = [Permission(**p) if isinstance(p, dict) else p 
+                               for p in role["permissions"]]
+            user_permissions = values.get("permissions", [])
+            if not isinstance(user_permissions, list):
+                user_permissions = []
+            values["permissions"] = list(set(role_permissions + user_permissions))
+        return values
+
+    class Config:
+        extra = "forbid"
+
+
+class UserListResponse(BaseModel):
+    """Response model for list of users."""
+    users: List[User]
+    total: int
+
+
+async def fetch_users(db_url: str) -> UserListResponse:
+    """
+    Fetch users from a database URL.
+
+    Args:
+        db_url: Database connection URL (e.g., "postgresql://user:pass@localhost:5432/db")
+
+    Returns:
+        UserListResponse containing users and total count
+
+    Raises:
+        ValueError: If db_url is invalid or not a supported scheme
+        RuntimeError: If request fails or response is invalid
+    """
+    # Validate URL format
+    parsed = urlparse(db_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError("Invalid database URL format")
+
+    # Only allow http/https for demo purposes (in real app would handle DB connections)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Unsupported scheme: {parsed.scheme}. Only http/https supported")
+
+    # Simulate API call to a database service
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(db_url, timeout=30.0)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Validate response structure
+            if not isinstance(data, dict) or "users" not in data:
+                raise ValueError("Invalid response format: missing 'users' key")
+            
+            users_data = data.get("users", [])
+            if not isinstance(users_data, list):
+                raise ValueError("Invalid response format: 'users' must be a list")
+            
+            # Validate each user with Pydantic model
+            users = []
+            for user_data in users_data:
+                try:
+                    user = User(**user_data)
+                    users.append(user)
+                except Exception as e:
+                    logger.warning("Failed to validate user", error=str(e))
+                    # Skip invalid users but continue processing
+                    continue
+            
+            total = data.get("total", len(users))
+            if not isinstance(total, int):
+                total = len(users)
+            
+            return UserListResponse(users=users, total=total)
+            
+    except httpx.HTTPError as e:
+        logger.error("HTTP error while fetching users", error=str(e))
+        raise RuntimeError(f"Failed to fetch users: {e}") from e
+    except Exception as e:
+        logger.error("Unexpected error while fetching users", error=str(e))
+        raise RuntimeError(f"Unexpected error: {e}") from e
+```

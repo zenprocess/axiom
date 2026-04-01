@@ -1,0 +1,108 @@
+```python
+"""
+User management system data models and utilities.
+
+This module provides Pydantic models for User, Role, and Permission, along with
+validation, serialization, and a function to fetch users from a database URL.
+"""
+
+from typing import List, Optional
+from enum import Enum
+
+import httpx
+from pydantic import BaseModel, Field, validator, EmailStr
+from structlog import get_logger
+
+logger = get_logger(__name__)
+
+
+class PermissionEnum(str, Enum):
+    """Available permission types."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Permission(BaseModel):
+    """Represents a permission."""
+    id: int = Field(..., ge=1, description="Unique identifier for the permission")
+    name: PermissionEnum = Field(..., description="Name of the permission")
+    description: Optional[str] = Field(None, description="Description of the permission")
+
+    class Config:
+        use_enum_values = True
+
+
+class Role(BaseModel):
+    """Represents a role with associated permissions."""
+    id: int = Field(..., ge=1, description="Unique identifier for the role")
+    name: str = Field(..., min_length=1, max_length=50, description="Name of the role")
+    permissions: List[Permission] = Field(default_factory=list, description="Permissions associated with this role")
+
+    @validator("name")
+    def validate_name(cls, v):
+        """Ensure role name is alphanumeric with possible spaces and underscores."""
+        if not v.replace(" ", "").replace("_", "").isalnum():
+            raise ValueError("Role name must contain only alphanumeric characters, spaces, and underscores")
+        return v
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int = Field(..., ge=1, description="Unique identifier for the user")
+    email: EmailStr = Field(..., description="User's email address")
+    username: str = Field(..., min_length=3, max_length=30, description="User's username")
+    full_name: Optional[str] = Field(None, description="User's full name")
+    role: Role = Field(..., description="Role assigned to the user")
+    is_active: bool = Field(default=True, description="Whether the user account is active")
+    created_at: Optional[str] = Field(None, description="ISO 8601 timestamp of user creation")
+
+    def to_dict(self) -> dict:
+        """Serialize the user model to a dictionary."""
+        return self.dict(exclude_unset=True)
+
+    @validator("username")
+    def validate_username(cls, v):
+        """Ensure username contains only alphanumeric characters, underscores, and hyphens."""
+        if not v.replace("_", "").replace("-", "").isalnum():
+            raise ValueError("Username must contain only alphanumeric characters, underscores, and hyphens")
+        return v
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database URL endpoint.
+
+    Args:
+        database_url: The URL of the database API endpoint that returns user data.
+
+    Returns:
+        List[User]: A list of User objects fetched from the database.
+
+    Raises:
+        httpx.HTTPError: If the HTTP request fails.
+        ValueError: If the response data cannot be validated into User models.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Validate the response data as a list of users
+            if isinstance(data, list):
+                users = [User(**user_data) for user_data in data]
+                logger.info("Successfully fetched users", count=len(users))
+                return users
+            else:
+                # If response is a single user, wrap it in a list
+                return [User(**data)]
+                
+    except httpx.HTTPError as e:
+        logger.error("HTTP error while fetching users", url=database_url, error=str(e))
+        raise
+    except Exception as e:
+        logger.error("Validation error while parsing users", error=str(e))
+        raise ValueError(f"Failed to parse users from database: {e}") from e
+```

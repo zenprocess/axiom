@@ -1,0 +1,114 @@
+```python
+"""User management data models and database fetching utilities."""
+
+from typing import List, Optional
+from datetime import datetime
+from enum import Enum
+import os
+
+import structlog
+from pydantic import BaseModel, EmailStr, validator, root_validator
+import httpx
+
+log = structlog.get_logger()
+
+
+class Permission(Enum):
+    """Available permissions in the system."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Role(BaseModel):
+    """Role model with associated permissions."""
+    id: int
+    name: str
+    permissions: List[Permission]
+
+    class Config:
+        use_enum_values = True
+
+
+class User(BaseModel):
+    """User model with validation and serialization support."""
+    id: int
+    email: EmailStr
+    username: str
+    role_id: int
+    role_name: str
+    role_permissions: List[Permission]
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    @validator('username')
+    def validate_username(cls, v: str) -> str:
+        """Validate username format and length."""
+        if len(v) < 3:
+            raise ValueError('Username must be at least 3 characters long')
+        if len(v) > 30:
+            raise ValueError('Username must be at most 30 characters long')
+        if not v.replace('_', '').replace('.', '').isalnum():
+            raise ValueError('Username must contain only alphanumeric characters, underscores, and dots')
+        return v
+
+    @validator('role_permissions', pre=True)
+    def convert_permissions(cls, v):
+        """Convert string permissions to Permission enum values."""
+        if isinstance(v, list) and v and isinstance(v[0], str):
+            return [Permission(p) for p in v]
+        return v
+
+    class Config:
+        use_enum_values = True
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat(),
+            Permission: lambda p: p.value
+        }
+
+
+class UserList(BaseModel):
+    """Container model for a list of users."""
+    users: List[User]
+    total: int
+
+
+async def fetch_users(db_url: str) -> UserList:
+    """Fetch users from the database URL.
+    
+    Args:
+        db_url: URL of the database API endpoint
+        
+    Returns:
+        UserList containing the fetched users
+        
+    Raises:
+        httpx.HTTPError: For HTTP errors
+        ValueError: For invalid data
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(db_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Validate response structure
+            if not isinstance(data, dict) or 'users' not in data:
+                raise ValueError("Invalid response format: missing 'users' field")
+            
+            # Parse and validate users
+            users = [User(**user_data) for user_data in data['users']]
+            total = data.get('total', len(users))
+            
+            log.info('users_fetched', count=len(users), url=db_url)
+            return UserList(users=users, total=total)
+            
+    except httpx.RequestError as exc:
+        log.error('http_request_failed', url=db_url, error=str(exc))
+        raise
+    except ValueError as exc:
+        log.error('data_validation_failed', url=db_url, error=str(exc))
+        raise
+```

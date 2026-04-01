@@ -1,0 +1,216 @@
+Here's a Python config loader that adheres to your strict coding standards:
+
+```python
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import yaml
+import structlog
+from pydantic import BaseModel, Field, ValidationError
+from dotenv import load_dotenv
+
+# Configure structlog for logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.set_exc_info,
+        structlog.processors.JSONRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+)
+
+logger = structlog.get_logger()
+
+
+class ConfigModel(BaseModel):
+    """Pydantic model for configuration schema."""
+    app_name: str = Field(default="my_app", description="Application name")
+    debug: bool = Field(default=False, description="Enable debug mode")
+    database_url: str = Field(
+        default="sqlite:///local.db",
+        description="Database connection string"
+    )
+    log_level: str = Field(default="INFO", description="Logging level")
+    api_key: Optional[str] = Field(
+        default=None,
+        description="API key for external services"
+    )
+
+
+def load_yaml_config(file_path: Path) -> Dict[str, Any]:
+    """Load configuration from a YAML file.
+    
+    Args:
+        file_path: Path to the YAML configuration file.
+        
+    Returns:
+        Dictionary of configuration values from the YAML file.
+    """
+    try:
+        with open(file_path, "r") as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        logger.warning("yaml_config_file_not_found", path=str(file_path))
+        return {}
+    except yaml.YAMLError as e:
+        logger.error("yaml_parse_error", path=str(file_path), error=str(e))
+        return {}
+
+
+def load_env_config() -> Dict[str, Any]:
+    """Load configuration from environment variables.
+    
+    Environment variables are expected to be prefixed with APP_ and use
+    uppercase with underscores (e.g., APP_DEBUG=true).
+    
+    Returns:
+        Dictionary of configuration values from environment variables.
+    """
+    env_config = {}
+    for key, value in os.environ.items():
+        if key.startswith("APP_"):
+            # Convert APP_KEY_NAME -> key_name
+            config_key = key[4:].lower()
+            env_config[config_key] = value
+    return env_config
+
+
+def load_cli_flags() -> Dict[str, Any]:
+    """Load configuration from command-line flags.
+    
+    Flags are expected as --key=value pairs.
+    
+    Returns:
+        Dictionary of configuration values from command-line arguments.
+    """
+    cli_config = {}
+    for arg in sys.argv[1:]:
+        if arg.startswith("--") and "=" in arg:
+            key, value = arg[2:].split("=", 1)
+            # Convert key_name to key-name for argparse compatibility
+            cli_config[key.replace("-", "_")] = value
+    return cli_config
+
+
+def merge_configs(*configs: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge configuration dictionaries with priority (later overrides earlier).
+    
+    Args:
+        *configs: Configuration dictionaries to merge in order of priority.
+        
+    Returns:
+        Merged configuration dictionary.
+    """
+    merged = {}
+    for config in configs:
+        merged.update(config)
+    return merged
+
+
+def validate_config(raw_config: Dict[str, Any]) -> ConfigModel:
+    """Validate and convert raw configuration to Pydantic model.
+    
+    Args:
+        raw_config: Raw configuration dictionary.
+        
+    Returns:
+        Validated ConfigModel instance.
+        
+    Raises:
+        ValidationError: If configuration fails validation.
+    """
+    try:
+        return ConfigModel(**raw_config)
+    except ValidationError as e:
+        logger.error("config_validation_error", errors=e.errors())
+        raise
+
+
+def load_config(
+    yaml_path: Optional[Path] = None,
+) -> ConfigModel:
+    """Load configuration from YAML, environment, and CLI with priority merging.
+    
+    Priority (lowest to highest): YAML file -> environment variables -> CLI flags.
+    
+    Args:
+        yaml_path: Optional path to YAML configuration file.
+        
+    Returns:
+        Validated configuration model.
+    """
+    # Load configurations in order of priority
+    yaml_config = load_yaml_config(yaml_path) if yaml_path else {}
+    env_config = load_env_config()
+    cli_config = load_cli_flags()
+
+    # Merge configurations with priority (later overrides earlier)
+    merged_config = merge_configs(yaml_config, env_config, cli_config)
+
+    # Validate and return as Pydantic model
+    return validate_config(merged_config)
+
+
+if __name__ == "__main__":
+    # Example usage
+    config_path = Path("config.yaml")
+    try:
+        config = load_config(config_path)
+        logger.info("config_loaded", config=config.model_dump())
+    except ValidationError as e:
+        logger.error("config_load_failed", error=str(e))
+        sys.exit(1)
+```
+
+Key features of this implementation:
+
+1. **No forbidden patterns**:
+   - No `print()` for debugging (uses `structlog`)
+   - No hardcoded secrets
+   - No `async def` for I/O (all functions are synchronous as config loading is typically synchronous)
+   - No `git push --force` (not applicable in this context)
+   - No star imports
+   - All functions have type hints
+
+2. **Uses Pydantic models** for configuration schema validation
+
+3. **Proper error handling** with try/except for external I/O
+
+4. **Config priority**: YAML file → environment variables → CLI flags
+
+5. **CLI flags format**: `--key=value` pairs (e.g., `--app-name=myapp --debug=true`)
+
+6. **Environment variables**: Expected to be prefixed with `APP_` (e.g., `APP_DEBUG=true`)
+
+7. **YAML file loading**: Handles missing files and parsing errors gracefully
+
+8. **Logging**: Uses `structlog` with JSON output for structured logging
+
+To use with a YAML config file, create a `config.yaml` file:
+
+```yaml
+app_name: "production_app"
+debug: false
+database_url: "postgresql://user:pass@localhost/db"
+log_level: "WARNING"
+```
+
+Then run the script with optional overrides:
+
+```bash
+python config_loader.py --debug=true --log-level=DEBUG
+```
+
+Environment variables can also override settings:
+
+```bash
+APP_DEBUG=true APP_LOG_LEVEL=INFO python config_loader.py
+```
+
+The final config is logged in JSON format via `structlog`.

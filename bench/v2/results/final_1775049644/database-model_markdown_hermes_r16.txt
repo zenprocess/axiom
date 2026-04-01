@@ -1,0 +1,141 @@
+```python
+"""User management data models with validation and serialization."""
+
+from typing import List, Optional
+from pydantic import BaseModel, Field, validator, root_validator
+import structlog
+import httpx
+import asyncio
+
+log = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    id: int = Field(..., ge=1, description="Unique identifier for the permission")
+    name: str = Field(..., min_length=1, max_length=100, description="Name of the permission")
+    description: Optional[str] = Field(None, max_length=500, description="Description of the permission")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "name": "read_users",
+                "description": "Can view user information"
+            }
+        }
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+    id: int = Field(..., ge=1, description="Unique identifier for the role")
+    name: str = Field(..., min_length=1, max_length=50, description="Name of the role")
+    description: Optional[str] = Field(None, max_length=200, description="Description of the role")
+    permissions: List[Permission] = Field(default_factory=list, description="List of permissions assigned to this role")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "name": "admin",
+                "description": "System administrator",
+                "permissions": [
+                    {"id": 1, "name": "read_users", "description": "Can view user information"},
+                    {"id": 2, "name": "write_users", "description": "Can modify user information"}
+                ]
+            }
+        }
+    
+    @validator('name')
+    def name_must_be_valid(cls, v):
+        """Validate role name contains only alphanumeric characters and underscores."""
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Role name must contain only alphanumeric characters and underscores')
+        return v
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int = Field(..., ge=1, description="Unique identifier for the user")
+    username: str = Field(..., min_length=3, max_length=50, description="Unique username")
+    email: str = Field(..., description="User's email address")
+    role_id: Optional[int] = Field(None, ge=1, description="ID of the user's role")
+    is_active: bool = Field(True, description="Whether the user account is active")
+    created_at: Optional[str] = Field(None, description="ISO 8601 timestamp of when the user was created")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "username": "alice",
+                "email": "alice@example.com",
+                "role_id": 1,
+                "is_active": True,
+                "created_at": "2023-01-15T10:30:00Z"
+            }
+        }
+    
+    @validator('email')
+    def email_must_be_valid(cls, v):
+        """Validate email format."""
+        if '@' not in v or '.' not in v.split('@')[-1]:
+            raise ValueError('Invalid email format')
+        return v
+    
+    @root_validator
+    def validate_role_and_permissions(cls, values):
+        """Validate that if role_id is present, it's not null."""
+        role_id = values.get('role_id')
+        if role_id is not None and role_id < 1:
+            raise ValueError('role_id must be a positive integer')
+        return values
+    
+    def to_dict(self) -> dict:
+        """Serialize the user model to a dictionary."""
+        return self.dict()
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database endpoint.
+    
+    Args:
+        database_url: URL of the database endpoint that returns user data
+        
+    Returns:
+        List of User models
+        
+    Raises:
+        RuntimeError: If the HTTP request fails or returns invalid data
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            
+            users_data = response.json()
+            if not isinstance(users_data, list):
+                raise ValueError("Expected a list of users from the database endpoint")
+            
+            users = []
+            for user_data in users_data:
+                try:
+                    user = User(**user_data)
+                    users.append(user)
+                except Exception as e:
+                    log.warning("invalid_user_data", error=str(e), data=user_data)
+                    continue
+            
+            log.info("fetched_users", count=len(users), url=database_url)
+            return users
+            
+    except httpx.TimeoutException:
+        log.error("request_timeout", url=database_url)
+        raise RuntimeError(f"Request to {database_url} timed out")
+    except httpx.RequestError as e:
+        log.error("request_failed", url=database_url, error=str(e))
+        raise RuntimeError(f"Failed to connect to {database_url}: {e}")
+    except ValueError as e:
+        log.error("invalid_response", url=database_url, error=str(e))
+        raise RuntimeError(f"Invalid response from {database_url}: {e}")
+```

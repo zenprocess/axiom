@@ -1,0 +1,80 @@
+```python
+"""User management system data models and database utilities."""
+
+from typing import List, Optional
+from datetime import datetime
+from enum import Enum
+
+import httpx
+from pydantic import BaseModel, Field, validator, EmailStr
+
+
+class Permission(Enum):
+    """Available permissions for user roles."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Role(BaseModel):
+    """Represents a role with associated permissions."""
+    name: str = Field(..., min_length=1, max_length=50)
+    permissions: List[Permission]
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        use_enum_values = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int = Field(..., ge=1)
+    username: str = Field(..., min_length=3, max_length=32, pattern=r'^[a-zA-Z0-9_]+$')
+    email: EmailStr
+    role_id: int = Field(..., ge=1)
+    role: Optional[Role] = None
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+
+    @validator('updated_at')
+    def validate_updated_at(cls, v: Optional[datetime], values: dict) -> Optional[datetime]:
+        """Ensure updated_at is not before created_at."""
+        if v is not None and 'created_at' in values and v < values['created_at']:
+            raise ValueError('updated_at cannot be earlier than created_at')
+        return v
+
+    def to_dict(self) -> dict:
+        """Serialize the user model to a dictionary."""
+        return self.dict(exclude_none=True)
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database endpoint.
+
+    Args:
+        database_url: URL of the database API endpoint that returns users.
+
+    Returns:
+        List of User objects.
+
+    Raises:
+        httpx.HTTPError: If the request fails.
+        pydantic.ValidationError: If response data fails validation.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            users_data = response.json()
+            
+            # Validate and convert to User models
+            return [User(**user_data) for user_data in users_data]
+    
+    except httpx.HTTPError as exc:
+        raise exc
+    except Exception as exc:
+        raise RuntimeError(f"Failed to fetch users: {str(exc)}") from exc
+```

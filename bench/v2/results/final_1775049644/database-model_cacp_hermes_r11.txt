@@ -1,0 +1,126 @@
+```python
+"""User management system data models and database operations.
+
+This module provides Pydantic models for User, Role, and Permission entities,
+along with an asynchronous function to fetch users from a database URL.
+"""
+
+import os
+from typing import List, Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, Field, validator
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+
+    id: int = Field(..., ge=1, description="Unique identifier for the permission")
+    name: str = Field(..., min_length=1, max_length=50, description="Name of the permission")
+    description: Optional[str] = Field(None, max_length=255, description="Description of the permission")
+
+    class Config:
+        extra = "forbid"
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "name": "read_users",
+                "description": "Can view user records"
+            }
+        }
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+
+    id: int = Field(..., ge=1, description="Unique identifier for the role")
+    name: str = Field(..., min_length=1, max_length=50, description="Name of the role")
+    description: Optional[str] = Field(None, max_length=255, description="Description of the role")
+    permissions: List[Permission] = Field(default_factory=list, description="List of permissions assigned to the role")
+
+    class Config:
+        extra = "forbid"
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "name": "admin",
+                "description": "Administrator with full access",
+                "permissions": [
+                    {"id": 1, "name": "read_users", "description": "Can view user records"},
+                    {"id": 2, "name": "edit_users", "description": "Can modify user records"}
+                ]
+            }
+        }
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+
+    id: int = Field(..., ge=1, description="Unique identifier for the user")
+    username: str = Field(..., min_length=3, max_length=32, description="Unique username for the user")
+    email: EmailStr = Field(..., description="Email address of the user")
+    role_id: int = Field(..., ge=1, description="ID of the user's role")
+    role_name: Optional[str] = Field(None, description="Name of the user's role")
+    is_active: bool = Field(default=True, description="Whether the user account is active")
+    created_at: str = Field(..., description="ISO 8601 timestamp of user creation")
+
+    @validator("username")
+    def username_must_be_alphanumeric(cls, v: str) -> str:
+        """Validate that username contains only alphanumeric characters and underscores."""
+        if not v.replace("_", "").isalnum():
+            raise ValueError("Username must contain only alphanumeric characters and underscores")
+        return v
+
+    class Config:
+        extra = "forbid"
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "username": "john_doe",
+                "email": "john.doe@example.com",
+                "role_id": 1,
+                "role_name": "admin",
+                "is_active": True,
+                "created_at": "2023-01-15T10:30:00Z"
+            }
+        }
+
+
+async def fetch_users(database_url: Optional[str] = None) -> List[User]:
+    """Fetch users from the database URL.
+
+    Args:
+        database_url: URL to fetch users from. Defaults to DATABASE_URL environment variable.
+
+    Returns:
+        List of User objects fetched from the database.
+
+    Raises:
+        ValueError: If no database URL is provided.
+        RuntimeError: If the database request fails.
+    """
+    url = database_url or os.getenv("DATABASE_URL")
+    if not url:
+        raise ValueError("No database URL provided and DATABASE_URL environment variable not set")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=10.0)
+            response.raise_for_status()
+            users_data = response.json()
+
+        # Validate and convert to User models
+        users = [User(**user_data) for user_data in users_data]
+        logger.info("fetched_users", count=len(users))
+        return users
+
+    except httpx.HTTPError as exc:
+        logger.error("http_request_failed", url=url, error=str(exc))
+        raise RuntimeError(f"Failed to fetch users from {url}: {exc}") from exc
+    except Exception as exc:
+        logger.error("fetch_users_failed", url=url, error=str(exc))
+        raise RuntimeError(f"Unexpected error fetching users from {url}: {exc}") from exc
+```

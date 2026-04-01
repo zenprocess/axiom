@@ -1,0 +1,123 @@
+```python
+"""User management data models and database integration."""
+
+import os
+from typing import List, Optional
+from datetime import datetime
+
+import structlog
+from pydantic import BaseModel, EmailStr, validator, root_validator
+import httpx
+
+log = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    id: int
+    name: str
+    description: str
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+    id: int
+    name: str
+    description: str
+    permissions: List[Permission] = []
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    username: str
+    email: EmailStr
+    full_name: Optional[str] = None
+    is_active: bool = True
+    role_id: int
+    role: Optional[Role] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    @validator('username')
+    def username_must_be_valid(cls, v):
+        """Validate username format."""
+        if not v or len(v) < 3:
+            raise ValueError('Username must be at least 3 characters')
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username can only contain letters, numbers, and underscores')
+        return v
+
+    @validator('full_name')
+    def full_name_must_be_valid(cls, v):
+        """Validate full name format."""
+        if v is not None and len(v) > 100:
+            raise ValueError('Full name must be at most 100 characters')
+        return v
+
+    @root_validator
+    def validate_required_fields(cls, values):
+        """Validate that required fields are present."""
+        if not values.get('username'):
+            raise ValueError('Username is required')
+        if not values.get('email'):
+            raise ValueError('Email is required')
+        if not values.get('role_id'):
+            raise ValueError('Role ID is required')
+        return values
+
+    class Config:
+        orm_mode = True
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat()
+        }
+
+
+async def fetch_users(database_url: Optional[str] = None) -> List[User]:
+    """Fetch users from the database.
+    
+    Args:
+        database_url: Optional override for the database URL. If not provided,
+                     uses DATABASE_URL environment variable.
+    
+    Returns:
+        List of User models fetched from the database.
+    
+    Raises:
+        RuntimeError: If the database URL is not provided and environment
+                     variable is not set.
+        ConnectionError: If unable to connect to the database.
+    """
+    url = database_url or os.environ.get('DATABASE_URL')
+    if not url:
+        raise RuntimeError('Database URL not provided and DATABASE_URL environment variable not set')
+    
+    log.info('fetching_users', url=url)
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            
+            users_data = response.json()
+            users = [User(**user_data) for user_data in users_data]
+            
+            log.info('users_fetched', count=len(users))
+            return users
+            
+    except httpx.HTTPStatusError as e:
+        log.error('http_error', status_code=e.response.status_code, url=url)
+        raise ConnectionError(f'HTTP error {e.response.status_code} while fetching users') from e
+    except httpx.RequestError as e:
+        log.error('connection_error', url=url, error=str(e))
+        raise ConnectionError(f'Failed to connect to database: {str(e)}') from e
+    except Exception as e:
+        log.error('unexpected_error', url=url, error=str(e))
+        raise
+```

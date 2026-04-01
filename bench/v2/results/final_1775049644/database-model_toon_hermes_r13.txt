@@ -1,0 +1,93 @@
+```python
+"""User management system data models and database utilities."""
+
+from typing import List, Optional
+from enum import Enum
+
+import httpx
+from pydantic import BaseModel, EmailStr, validator, root_validator
+
+
+class Permission(Enum):
+    """Available permissions in the system."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Role(BaseModel):
+    """User role model with associated permissions."""
+    name: str
+    permissions: List[Permission]
+    
+    @validator('permissions')
+    def validate_permissions(cls, v):
+        if not v:
+            raise ValueError("Role must have at least one permission")
+        return v
+
+
+class User(BaseModel):
+    """User model with validation and serialization support."""
+    id: Optional[int] = None
+    username: str
+    email: EmailStr
+    role: Role
+    is_active: bool = True
+    
+    @validator('username')
+    def validate_username(cls, v):
+        if not v or len(v) < 3:
+            raise ValueError('Username must be at least 3 characters long')
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username can only contain letters, numbers, and underscores')
+        return v
+    
+    class Config:
+        use_enum_values = True
+
+
+class UserListResponse(BaseModel):
+    """Response model for user list operations."""
+    users: List[User]
+    total: int
+
+
+async def fetch_users(database_url: str) -> UserListResponse:
+    """
+    Fetch users from a database endpoint.
+    
+    Args:
+        database_url: URL of the database API endpoint
+        
+    Returns:
+        UserListResponse containing the list of users and total count
+        
+    Raises:
+        httpx.HTTPError: If the HTTP request fails
+        ValueError: If the response format is invalid
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Validate response structure
+            if not isinstance(data, dict):
+                raise ValueError("Invalid response format: expected JSON object")
+            if "users" not in data or "total" not in data:
+                raise ValueError("Invalid response format: missing 'users' or 'total' field")
+            if not isinstance(data["users"], list) or not isinstance(data["total"], int):
+                raise ValueError("Invalid response format: 'users' must be a list and 'total' an integer")
+            
+            # Parse users with Pydantic validation
+            users = [User(**user_data) for user_data in data["users"]]
+            
+            return UserListResponse(users=users, total=data["total"])
+            
+    except httpx.HTTPError as e:
+        raise httpx.HTTPError(f"Failed to fetch users from database: {str(e)}") from e
+```

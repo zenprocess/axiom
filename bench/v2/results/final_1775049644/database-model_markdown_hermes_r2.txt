@@ -1,0 +1,123 @@
+```python
+"""User management system data models and database interface."""
+
+from typing import List, Optional
+from enum import Enum
+
+from pydantic import BaseModel, EmailStr, field_validator
+import structlog
+import httpx
+
+log = structlog.get_logger()
+
+
+class RoleName(Enum):
+    """Available user roles."""
+    ADMIN = "admin"
+    MANAGER = "manager"
+    USER = "user"
+    GUEST = "guest"
+
+
+class PermissionName(Enum):
+    """Available permissions."""
+    CREATE_USER = "create_user"
+    DELETE_USER = "delete_user"
+    MANAGE_ROLES = "manage_roles"
+    VIEW_REPORTS = "view_reports"
+    EDIT_CONTENT = "edit_content"
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    id: int
+    name: PermissionName
+    description: str
+
+    class Config:
+        use_enum_values = True
+
+
+class Role(BaseModel):
+    """Represents a role with associated permissions."""
+    id: int
+    name: RoleName
+    description: str
+    permissions: List[Permission]
+
+    class Config:
+        use_enum_values = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    username: str
+    email: EmailStr
+    role: Role
+    is_active: bool = True
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    @field_validator('username')
+    @classmethod
+    def username_must_be_valid(cls, v: str) -> str:
+        """Validate username format and constraints."""
+        if len(v) < 3:
+            raise ValueError('Username must be at least 3 characters long')
+        if len(v) > 30:
+            raise ValueError('Username must not exceed 30 characters')
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username can only contain alphanumeric characters and underscores')
+        return v
+
+
+class UserResponse(BaseModel):
+    """Response model for user data."""
+    users: List[User]
+    total: int
+
+
+async def fetch_users(database_url: str) -> UserResponse:
+    """
+    Fetch users from the database API.
+
+    Args:
+        database_url: URL of the database API endpoint
+
+    Returns:
+        UserResponse containing list of users and total count
+
+    Raises:
+        httpx.HTTPError: If the request fails
+        ValueError: If the response format is invalid
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url, timeout=30.0)
+            response.raise_for_status()
+            data = response.json()
+
+            # Validate response structure
+            if not isinstance(data, dict):
+                raise ValueError("Invalid response format: expected JSON object")
+            if "users" not in data:
+                raise ValueError("Invalid response format: missing 'users' key")
+            if "total" not in data:
+                raise ValueError("Invalid response format: missing 'total' key")
+
+            # Parse users with Pydantic validation
+            users_data = data["users"]
+            if not isinstance(users_data, list):
+                raise ValueError("Invalid response format: 'users' must be a list")
+
+            users = [User(**user_data) for user_data in users_data]
+            return UserResponse(users=users, total=data["total"])
+
+    except httpx.HTTPError as e:
+        log.error("database_request_failed", url=database_url, error=str(e))
+        raise
+    except ValueError as e:
+        log.error("invalid_response_format", url=database_url, error=str(e))
+        raise
+```

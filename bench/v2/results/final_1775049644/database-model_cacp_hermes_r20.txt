@@ -1,0 +1,100 @@
+```python
+"""User management data models and database interaction utilities."""
+
+from typing import List, Optional
+from datetime import datetime
+from pydantic import BaseModel, EmailStr, validator, root_validator
+import structlog
+import httpx
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission granted to roles."""
+    id: int
+    name: str
+    description: str
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+    id: int
+    name: str
+    description: str
+    permissions: List[Permission]
+
+    @validator("name")
+    def name_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Role name must not be empty")
+        return v.strip()
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    username: str
+    email: EmailStr
+    role: Role
+    is_active: bool = True
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    @validator("username")
+    def username_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Username must not be empty")
+        return v.strip()
+
+    @root_validator(skip_on_failure=True)
+    def validate_email_domain(cls, values):
+        email = values.get("email")
+        if email and not email.endswith("@company.com"):
+            logger.warning("user_email_not_company_domain", email=email)
+        return values
+
+    def to_dict(self) -> dict:
+        """Serialize the User model to a dictionary."""
+        return self.dict()
+
+    class Config:
+        orm_mode = True
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database endpoint.
+
+    Args:
+        database_url: URL of the users API endpoint
+
+    Returns:
+        List of User objects
+
+    Raises:
+        RuntimeError: If the HTTP request fails or returns an error status
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            users_data = response.json()
+            
+            # Validate and convert to User models
+            users = [User(**user_data) for user_data in users_data]
+            logger.info("users_fetched", count=len(users))
+            return users
+    except httpx.HTTPError as exc:
+        logger.error("http_request_failed", url=database_url, error=str(exc))
+        raise RuntimeError(f"Failed to fetch users: {exc}") from exc
+    except Exception as exc:
+        logger.error("unexpected_error_fetching_users", url=database_url, error=str(exc))
+        raise RuntimeError(f"Unexpected error while fetching users: {exc}") from exc
+```

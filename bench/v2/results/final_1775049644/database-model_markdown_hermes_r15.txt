@@ -1,0 +1,107 @@
+```python
+"""User management system data models and database utilities."""
+
+import os
+from typing import Optional
+
+import structlog
+from pydantic import BaseModel, EmailStr, validator, root_validator
+
+log = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission that can be assigned to roles."""
+    id: int
+    name: str
+    description: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role in the system with associated permissions."""
+    id: int
+    name: str
+    description: Optional[str] = None
+    permissions: list[Permission] = []
+
+    class Config:
+        orm_mode = True
+
+    @validator('name')
+    def name_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError('Role name cannot be empty or whitespace only')
+        return v.strip()
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    email: EmailStr
+    username: str
+    full_name: Optional[str] = None
+    role_id: Optional[int] = None
+    is_active: bool = True
+    is_admin: bool = False
+
+    # Nested models
+    role: Optional[Role] = None
+
+    class Config:
+        orm_mode = True
+
+    @validator('username')
+    def username_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError('Username cannot be empty or whitespace only')
+        return v.strip()
+
+    @validator('full_name')
+    def full_name_must_not_be_empty(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            return None
+        return v
+
+    @root_validator
+    def admin_requires_admin_role(cls, values):
+        if values.get('is_admin') and not values.get('role_id'):
+            raise ValueError('Admin users must have a role assigned')
+        return values
+
+
+async def fetch_users(database_url: Optional[str] = None) -> list[User]:
+    """Fetch users from the database.
+    
+    Args:
+        database_url: Optional database connection URL. If not provided,
+                     uses the DATABASE_URL environment variable.
+    
+    Returns:
+        List of User models fetched from the database.
+    
+    Raises:
+        RuntimeError: If database connection fails or query fails.
+    """
+    if database_url is None:
+        database_url = os.environ.get('DATABASE_URL')
+        if not database_url:
+            raise RuntimeError('DATABASE_URL environment variable not set and no URL provided')
+
+    # This is a placeholder implementation - in a real application,
+    # you would use an async ORM like SQLAlchemy with async support
+    # or a dedicated async database client
+    try:
+        # Example placeholder: would use asyncpg, sqlalchemy.ext.asyncio, etc.
+        # For demonstration, we'll return empty list
+        log.info('fetching_users', database_url=database_url)
+        # Simulated async operation
+        import asyncio
+        await asyncio.sleep(0.001)
+        return []
+    except Exception as e:
+        log.error('fetch_users_failed', error=str(e), database_url=database_url)
+        raise RuntimeError(f'Failed to fetch users: {str(e)}') from e
+```

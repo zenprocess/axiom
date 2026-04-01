@@ -1,0 +1,179 @@
+```python
+import argparse
+import os
+from typing import Any, Dict, Optional
+
+import yaml
+from dotenv import load_dotenv
+from pydantic import BaseModel
+import structlog
+
+# Initialize structlog for logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.dev.ConsoleRenderer(),
+    ],
+    wrapper_class=structlog.stdlib.BoundLogger,
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+log = structlog.get_logger()
+
+
+class Config(BaseModel):
+    """Configuration model using Pydantic for type safety."""
+    app_name: str = "default_app"
+    debug: bool = False
+    log_level: str = "INFO"
+    database_url: str = "sqlite:///default.db"
+    api_key: Optional[str] = None
+
+
+def load_yaml_config(file_path: str) -> Dict[str, Any]:
+    """Load configuration from a YAML file.
+
+    Args:
+        file_path: Path to the YAML configuration file.
+
+    Returns:
+        Dictionary with configuration values.
+    """
+    try:
+        with open(file_path, "r") as file:
+            config = yaml.safe_load(file)
+            return config if config else {}
+    except FileNotFoundError:
+        log.warning("yaml_config_file_not_found", file_path=file_path)
+        return {}
+    except yaml.YAMLError as e:
+        log.error("yaml_parse_error", error=str(e))
+        return {}
+
+
+def load_env_config() -> Dict[str, Any]:
+    """Load configuration from environment variables.
+
+    Returns:
+        Dictionary with environment variable values.
+    """
+    load_dotenv()
+    config = {}
+
+    # Map environment variables to config fields
+    env_vars = {
+        "APP_NAME": "app_name",
+        "DEBUG": "debug",
+        "LOG_LEVEL": "log_level",
+        "DATABASE_URL": "database_url",
+        "API_KEY": "api_key",
+    }
+
+    for env_name, config_name in env_vars.items():
+        value = os.getenv(env_name)
+        if value is not None:
+            # Convert to appropriate type
+            if config_name == "debug":
+                config[config_name] = value.lower() in ("true", "1", "yes")
+            else:
+                config[config_name] = value
+
+    return config
+
+
+def parse_cli_args() -> Dict[str, Any]:
+    """Parse command-line arguments for configuration.
+
+    Returns:
+        Dictionary with CLI argument values.
+    """
+    parser = argparse.ArgumentParser(description="Application configuration")
+    parser.add_argument("--app-name", type=str, help="Application name")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--log-level", type=str, help="Logging level")
+    parser.add_argument("--database-url", type=str, help="Database connection URL")
+    parser.add_argument("--api-key", type=str, help="API key")
+
+    args = parser.parse_args()
+    cli_config = {}
+
+    # Only include arguments that were explicitly provided
+    for arg, value in vars(args).items():
+        if value is not None:
+            cli_config[arg.replace("-", "_")] = value
+
+    # Handle boolean flag for debug
+    if args.debug:
+        cli_config["debug"] = True
+
+    return cli_config
+
+
+def merge_configs(
+    base: Dict[str, Any], *overrides: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Merge multiple configuration dictionaries with priority.
+
+    Args:
+        base: Base configuration dictionary.
+        *overrides: Override configuration dictionaries in priority order (later overrides first).
+
+    Returns:
+        Merged configuration dictionary.
+    """
+    result = base.copy()
+    for override in reversed(overrides):
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = merge_configs(result[key], value)
+            else:
+                result[key] = value
+    return result
+
+
+def load_config(yaml_path: str = "config.yaml") -> Config:
+    """Load and merge configuration from YAML file, environment, and CLI.
+
+    Priority (lowest to highest): YAML file → environment variables → CLI flags.
+
+    Args:
+        yaml_path: Path to the YAML configuration file.
+
+    Returns:
+        Pydantic Config model with merged configuration.
+    """
+    yaml_config = load_yaml_config(yaml_path)
+    env_config = load_env_config()
+    cli_config = parse_cli_args()
+
+    # Merge with priority: CLI > env > yaml
+    merged_config = merge_configs(yaml_config, env_config, cli_config)
+
+    try:
+        config = Config(**merged_config)
+        # Log the final configuration without secrets
+        safe_config = config.dict()
+        if "api_key" in safe_config:
+            safe_config["api_key"] = (
+                "***" + safe_config["api_key"][-4:]
+                if safe_config["api_key"] and len(safe_config["api_key"]) >= 4
+                else "***"
+            )
+        log.info("config_loaded", config=safe_config)
+        return config
+    except Exception as e:
+        log.error("config_validation_error", error=str(e))
+        raise
+
+
+# Example usage (commented out for production)
+# if __name__ == "__main__":
+#     config = load_config()
+#     print(config)  # This would violate no-print-debug rule in production
+```

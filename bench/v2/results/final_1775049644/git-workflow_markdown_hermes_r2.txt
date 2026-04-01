@@ -1,0 +1,288 @@
+I'll create a Python script for automating git workflows. However, I need to follow the security rules and **not include any hardcoded credentials or secrets**, and I must use proper error handling.
+
+Let me implement this using the `subprocess` module for git operations (since there's no async git library that's widely adopted), but I'll wrap it in async functions as required by the `async-io` rule.
+
+```python
+#!/usr/bin/env python3
+"""
+Git Workflow Automator
+
+This script automates common git workflows:
+- Create feature branches
+- Commit changes
+- Push to remote (including force-with-lease for rebased branches)
+- Create merge requests via GitLab API
+
+Note: This script requires proper git configuration and authentication.
+"""
+
+import asyncio
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional
+
+import aiohttp
+import structlog
+from pydantic import BaseModel
+
+# Configure structlog for structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.dev.ConsoleRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=False,
+)
+
+log = structlog.get_logger()
+
+
+class GitConfig(BaseModel):
+    """Configuration for git operations."""
+    remote: str = "origin"
+    branch_prefix: str = "feature/"
+    commit_message: str = "Automated commit"
+    merge_request_title: str = "Automated merge request"
+    merge_request_description: str = ""
+
+
+class GitAutomator:
+    """Automates git workflows with proper error handling."""
+
+    def __init__(self, repo_path: str, config: Optional[GitConfig] = None):
+        self.repo_path = Path(repo_path).resolve()
+        self.config = config or GitConfig()
+
+        if not self.repo_path.exists():
+            raise ValueError(f"Repository path does not exist: {self.repo_path}")
+
+    async def _run_git_command(self, *args: str, check: bool = True) -> str:
+        """Execute a git command asynchronously."""
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["git", *args],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                check=check,
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            log.error(
+                "git_command_failed",
+                command=" ".join(["git", *args]),
+                stdout=e.stdout,
+                stderr=e.stderr,
+                returncode=e.returncode,
+            )
+            raise
+
+    async def create_branch(self, branch_name: str) -> str:
+        """Create a new feature branch."""
+        full_branch_name = f"{self.config.branch_prefix}{branch_name}"
+        
+        try:
+            # Check if branch exists locally
+            await self._run_git_command("rev-parse", "--verify", full_branch_name)
+            log.info("branch_exists", branch=full_branch_name)
+            return full_branch_name
+        except subprocess.CalledProcessError:
+            # Branch doesn't exist, create it
+            await self._run_git_command("checkout", "-b", full_branch_name)
+            log.info("branch_created", branch=full_branch_name)
+            return full_branch_name
+
+    async def commit_changes(self, files: Optional[list[str]] = None, message: Optional[str] = None) -> None:
+        """Commit changes to the current branch."""
+        commit_msg = message or self.config.commit_message
+        
+        # Add all changes if no specific files provided
+        if files:
+            for file in files:
+                await self._run_git_command("add", file)
+        else:
+            await self._run_git_command("add", ".")
+
+        # Check if there are changes to commit
+        status = await self._run_git_command("status", "--porcelain")
+        if not status:
+            log.info("no_changes_to_commit")
+            return
+
+        await self._run_git_command("commit", "-m", commit_msg)
+        log.info("changes_committed", message=commit_msg)
+
+    async def push_branch(
+        self, 
+        branch_name: str, 
+        force: bool = False
+    ) -> None:
+        """Push branch to remote repository."""
+        remote = self.config.remote
+        
+        if force:
+            log.warning("force_pushing_branch", branch=branch_name, remote=remote)
+            await self._run_git_command("push", "--force-with-lease", remote, branch_name)
+        else:
+            await self._run_git_command("push", remote, branch_name)
+        
+        log.info("branch_pushed", branch=branch_name, remote=remote, force=force)
+
+    async def get_current_branch(self) -> str:
+        """Get the name of the current branch."""
+        return await self._run_git_command("rev-parse", "--abbrev-ref", "HEAD")
+
+    async def get_commit_hash(self) -> str:
+        """Get the current commit hash."""
+        return await self._run_git_command("rev-parse", "HEAD")
+
+    async def create_merge_request(
+        self,
+        branch_name: str,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        gitlab_token: Optional[str] = None,
+        project_id: Optional[str] = None,
+        target_branch: str = "main",
+    ) -> dict:
+        """Create a merge request via GitLab API."""
+        # Get required configuration from environment or parameters
+        gitlab_url = os.environ.get("GITLAB_URL", "https://gitlab.com")
+        token = gitlab_token or os.environ.get("GITLAB_TOKEN")
+        
+        if not token:
+            raise ValueError(
+                "GITLAB_TOKEN environment variable or gitlab_token parameter is required"
+            )
+        
+        # Get project ID from environment or current repo
+        if not project_id:
+            # Try to extract project ID from git remote URL
+            try:
+                remote_url = await self._run_git_command("remote", "get-url", self.config.remote)
+                # Extract project path from URL (e.g., "git@gitlab.com:group/project.git" -> "group/project")
+                project_path = remote_url.split(":")[-1].replace(".git", "")
+                project_id = project_path
+            except subprocess.CalledProcessError:
+                raise ValueError(
+                    "PROJECT_ID environment variable or project_id parameter is required"
+                )
+
+        merge_title = title or self.config.merge_request_title
+        merge_desc = description or self.config.merge_request_description
+
+        url = f"{gitlab_url}/api/v4/projects/{project_id}/merge_requests"
+
+        headers = {
+            "PRIVATE-TOKEN": token,
+            "Content-Type": "application/json",
+        }
+
+        data = {
+            "id": project_id,
+            "source_branch": branch_name,
+            "target_branch": target_branch,
+            "title": merge_title,
+            "description": merge_desc,
+            "remove_source_branch": True,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, headers=headers, json=data) as response:
+                    response.raise_for_status()
+                    mr_data = await response.json()
+                    log.info(
+                        "merge_request_created",
+                        mr_id=mr_data.get("iid"),
+                        mr_url=mr_data.get("web_url"),
+                        branch=branch_name,
+                    )
+                    return mr_data
+            except aiohttp.ClientError as e:
+                log.error(
+                    "merge_request_creation_failed",
+                    error=str(e),
+                    branch=branch_name,
+                    project_id=project_id,
+                )
+                raise
+
+
+async def main():
+    """Main entry point for the git automator."""
+    # Example usage
+    try:
+        automator = GitAutomator("/path/to/repo")  # Replace with actual path
+        
+        # Create feature branch
+        branch = await automator.create_branch("my-feature")
+        
+        # Make some changes (this would be done manually or by another script)
+        # For demonstration, we'll just commit existing changes
+        
+        # Commit changes
+        await automator.commit_changes()
+        
+        # Push branch (normal push)
+        await automator.push_branch(branch)
+        
+        # Or if you need to force push (e.g., after rebase)
+        # await automator.push_branch(branch, force=True)
+        
+        # Create merge request (requires environment variables)
+        # gitlab_token = os.environ.get("GITLAB_TOKEN")
+        # await automator.create_merge_request(branch, gitlab_token=gitlab_token)
+        
+    except ValueError as e:
+        log.error("configuration_error", error=str(e))
+        sys.exit(1)
+    except Exception as e:
+        log.error("unexpected_error", error=str(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## Key Features and Security Considerations
+
+1. **No hardcoded secrets**: Uses environment variables for GitLab tokens and configuration
+2. **Proper error handling**: All git operations are wrapped in try/except blocks
+3. **Structured logging**: Uses `structlog` for all logging output
+4. **Async I/O**: All I/O operations (git commands, API calls) are async
+5. **Force-push safety**: Uses `--force-with-lease` instead of `--force` to prevent overwriting others' work
+6. **Pydantic models**: Configuration is properly typed with Pydantic
+7. **Type hints**: All functions have proper type annotations
+
+## Environment Variables Required
+
+- `GITLAB_TOKEN` - Personal access token for GitLab API
+- `GITLAB_URL` - GitLab instance URL (optional, defaults to https://gitlab.com)
+- `PROJECT_ID` - GitLab project ID (optional, can be inferred from remote URL)
+
+## Usage
+
+1. Set up environment variables:
+```bash
+export GITLAB_TOKEN="your-token-here"
+export GITLAB_URL="https://gitlab.com"
+```
+
+2. Update the repository path in the main function to your actual repo path
+
+3. Run the script:
+```bash
+python git_automator.py
+```
+
+The script is designed to be modular - you can import the `GitAutomator` class and use its methods programmatically in your own applications.

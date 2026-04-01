@@ -1,0 +1,149 @@
+```python
+"""User management system data models and database operations."""
+
+from typing import List, Optional
+from enum import Enum
+import os
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, validator, root_validator
+
+log = structlog.get_logger()
+
+
+class RoleName(str, Enum):
+    """Available roles in the system."""
+    ADMIN = "admin"
+    MANAGER = "manager"
+    USER = "user"
+
+
+class PermissionName(str, Enum):
+    """Available permissions in the system."""
+    CREATE_USER = "create_user"
+    DELETE_USER = "delete_user"
+    VIEW_USERS = "view_users"
+    EDIT_SETTINGS = "edit_settings"
+
+
+class Permission(BaseModel):
+    """Permission model with name and description."""
+    name: PermissionName
+    description: str
+
+    class Config:
+        use_enum_values = True
+
+
+class Role(BaseModel):
+    """Role model with name, description, and associated permissions."""
+    name: RoleName
+    description: str = ""
+    permissions: List[PermissionName]
+
+    class Config:
+        use_enum_values = True
+
+    @validator("permissions", each_item=True)
+    def validate_permissions(cls, v):
+        """Ensure permissions are valid."""
+        if not isinstance(v, PermissionName):
+            raise ValueError(f"Invalid permission: {v}")
+        return v
+
+
+class User(BaseModel):
+    """User model with validation and serialization support."""
+    id: Optional[int] = None
+    username: str
+    email: EmailStr
+    role: RoleName
+    permissions: List[PermissionName] = []
+    is_active: bool = True
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    class Config:
+        use_enum_values = True
+
+    @validator("username")
+    def validate_username(cls, v):
+        """Ensure username meets requirements."""
+        if len(v) < 3:
+            raise ValueError("Username must be at least 3 characters")
+        if len(v) > 30:
+            raise ValueError("Username must be at most 30 characters")
+        return v
+
+    @validator("email")
+    def validate_email(cls, v):
+        """Normalize email to lowercase."""
+        return v.lower()
+
+    @root_validator(pre=True)
+    def generate_permissions(cls, values):
+        """Generate permissions based on role if not explicitly provided."""
+        role = values.get("role")
+        permissions = values.get("permissions")
+        
+        if permissions is None or len(permissions) == 0:
+            # Define permissions by role
+            role_permissions = {
+                RoleName.ADMIN: [
+                    PermissionName.CREATE_USER,
+                    PermissionName.DELETE_USER,
+                    PermissionName.VIEW_USERS,
+                    PermissionName.EDIT_SETTINGS,
+                ],
+                RoleName.MANAGER: [
+                    PermissionName.CREATE_USER,
+                    PermissionName.VIEW_USERS,
+                    PermissionName.EDIT_SETTINGS,
+                ],
+                RoleName.USER: [
+                    PermissionName.VIEW_USERS,
+                ],
+            }
+            values["permissions"] = role_permissions.get(role, [])
+        
+        return values
+
+
+async def fetch_users(database_url: Optional[str] = None) -> List[User]:
+    """
+    Fetch users from a database URL.
+
+    Args:
+        database_url: URL to the user database API endpoint.
+                     Defaults to DATABASE_URL environment variable.
+
+    Returns:
+        List of User models fetched from the database.
+
+    Raises:
+        RuntimeError: If the database URL is not provided and not set in environment.
+        httpx.HTTPError: For HTTP request errors.
+    """
+    if database_url is None:
+        database_url = os.environ.get("DATABASE_URL")
+    
+    if not database_url:
+        raise RuntimeError("DATABASE_URL environment variable not set")
+
+    log.info("fetching_users", url=database_url)
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(database_url, timeout=30.0)
+            response.raise_for_status()
+            users_data = response.json()
+            
+            # Parse and validate each user
+            users = [User(**user_data) for user_data in users_data]
+            log.info("users_fetched", count=len(users))
+            return users
+            
+        except httpx.HTTPError as e:
+            log.error("fetch_users_failed", url=database_url, error=str(e))
+            raise
+```

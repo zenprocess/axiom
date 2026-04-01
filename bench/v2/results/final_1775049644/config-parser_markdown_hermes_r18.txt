@@ -1,0 +1,317 @@
+I'll create a config loader that reads from YAML files, environment variables, and command-line flags with proper priority merging. I'll follow all the development rules, using structlog for logging, Pydantic models for data structures, async I/O where appropriate, and proper error handling.
+
+```python
+#!/usr/bin/env python3
+"""
+Configuration loader with support for YAML files, environment variables, and CLI flags.
+
+Priority (lowest to highest):
+1. YAML file defaults
+2. Environment variables
+3. CLI flags
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import yaml
+from pydantic import BaseModel, Field
+import structlog
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.set_exc_info,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.dev.ConsoleRenderer(),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=False,
+)
+
+log = structlog.get_logger()
+
+
+class ConfigModel(BaseModel):
+    """Configuration model with Pydantic validation."""
+    
+    # Application settings
+    app_name: str = Field(default="myapp", description="Application name")
+    debug: bool = Field(default=False, description="Enable debug mode")
+    log_level: str = Field(default="INFO", description="Logging level")
+    
+    # Database settings
+    database_url: str = Field(default="sqlite:///app.db", description="Database connection URL")
+    database_pool_size: int = Field(default=5, description="Database connection pool size")
+    
+    # API settings
+    api_host: str = Field(default="0.0.0.0", description="API host address")
+    api_port: int = Field(default=8000, description="API port number")
+    
+    # Feature flags
+    enable_cache: bool = Field(default=True, description="Enable caching layer")
+    enable_metrics: bool = Field(default=False, description="Enable metrics collection")
+
+
+class ConfigLoader:
+    """Configuration loader with priority merging from multiple sources."""
+    
+    def __init__(self, config_path: Optional[str] = None):
+        """
+        Initialize the config loader.
+        
+        Args:
+            config_path: Path to the YAML configuration file.
+        """
+        self.config_path = config_path
+        self._raw_config: Dict[str, Any] = {}
+        self._config: Optional[ConfigModel] = None
+    
+    async def load(self) -> ConfigModel:
+        """
+        Load configuration from all sources with priority merging.
+        
+        Returns:
+            ConfigModel: Validated configuration object.
+        """
+        # Start with defaults
+        config_dict = self._get_defaults()
+        
+        # Load YAML file if specified
+        if self.config_path:
+            try:
+                yaml_config = await self._load_yaml(self.config_path)
+                config_dict = self._merge_configs(config_dict, yaml_config)
+            except FileNotFoundError:
+                log.warning("config_file_not_found", path=self.config_path)
+            except yaml.YAMLError as e:
+                log.error("config_yaml_parse_error", path=self.config_path, error=str(e))
+                raise
+        
+        # Load environment variables (higher priority than YAML)
+        env_config = self._load_env_vars()
+        config_dict = self._merge_configs(config_dict, env_config)
+        
+        # Load CLI arguments (highest priority)
+        cli_config = self._load_cli_args()
+        config_dict = self._merge_configs(config_dict, cli_config)
+        
+        # Validate and create config model
+        try:
+            self._config = ConfigModel(**config_dict)
+        except Exception as e:
+            log.error("config_validation_error", error=str(e))
+            raise
+        
+        # Log the final config for debugging (using structlog, not print)
+        log.info("config_loaded", config=self._config.dict())
+        
+        return self._config
+    
+    def _get_defaults(self) -> Dict[str, Any]:
+        """Get default configuration values."""
+        return ConfigModel().dict()
+    
+    async def _load_yaml(self, path: str) -> Dict[str, Any]:
+        """
+        Load configuration from a YAML file.
+        
+        Args:
+            path: Path to the YAML file.
+            
+        Returns:
+            Dictionary containing the YAML configuration.
+        """
+        file_path = Path(path)
+        
+        if not file_path.exists():
+            raise FileNotFoundError(f"Configuration file not found: {path}")
+        
+        async with aiofiles.open(file_path, 'r') as f:
+            content = await f.read()
+            try:
+                config = yaml.safe_load(content) or {}
+                return config
+            except yaml.YAMLError as e:
+                log.error("yaml_parse_error", path=path, error=str(e))
+                raise
+    
+    def _load_env_vars(self) -> Dict[str, Any]:
+        """
+        Load configuration from environment variables.
+        
+        Environment variables should be prefixed with the application name
+        and use uppercase with underscores (e.g., APP_DATABASE_URL).
+        
+        Returns:
+            Dictionary containing environment variable configurations.
+        """
+        env_config = {}
+        
+        # Map model fields to environment variables
+        for field_name in ConfigModel.__fields__:
+            env_name = f"APP_{field_name.upper()}"
+            if env_name in os.environ:
+                value = os.environ[env_name]
+                # Try to parse common types
+                field_type = ConfigModel.__fields__[field_name].type_
+                try:
+                    if field_type == bool:
+                        env_config[field_name] = value.lower() in ('true', '1', 'yes')
+                    elif field_type == int:
+                        env_config[field_name] = int(value)
+                    elif field_type == float:
+                        env_config[field_name] = float(value)
+                    else:
+                        env_config[field_name] = value
+                except (ValueError, TypeError) as e:
+                    log.warning("env_var_parse_error", 
+                               variable=env_name, 
+                               value=value, 
+                               error=str(e))
+        
+        return env_config
+    
+    def _load_cli_args(self) -> Dict[str, Any]:
+        """
+        Load configuration from command-line arguments.
+        
+        Returns:
+            Dictionary containing CLI argument configurations.
+        """
+        parser = argparse.ArgumentParser(
+            description="Configuration loader with YAML, env, and CLI support"
+        )
+        
+        # Add arguments matching the config model
+        for field_name, field in ConfigModel.__fields__.items():
+            arg_name = f"--{field_name.replace('_', '-')}"
+            help_text = field.field_info.description or f"Configures {field_name}"
+            
+            # Handle different types
+            if field.type_ == bool:
+                parser.add_argument(arg_name, dest=field_name, action='store_true', 
+                                  default=None, help=help_text)
+            elif field.type_ in (int, float, str):
+                parser.add_argument(arg_name, dest=field_name, type=field.type_, 
+                                  default=None, help=help_text)
+            else:
+                parser.add_argument(arg_name, dest=field_name, type=str, 
+                                  default=None, help=help_text)
+        
+        # Parse arguments
+        args = parser.parse_args()
+        
+        # Convert to dictionary, excluding None values
+        cli_config = {k: v for k, v in vars(args).items() if v is not None}
+        
+        return cli_config
+    
+    def _merge_configs(self, base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Merge two configuration dictionaries, with override taking precedence.
+        
+        Args:
+            base: Base configuration dictionary.
+            override: Configuration dictionary to merge in (takes precedence).
+            
+        Returns:
+            Merged configuration dictionary.
+        """
+        result = base.copy()
+        
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                # Recursively merge dictionaries
+                result[key] = self._merge_configs(result[key], value)
+            else:
+                result[key] = value
+        
+        return result
+
+
+async def main():
+    """Main entry point for the config loader."""
+    parser = argparse.ArgumentParser(description="Configuration loader example")
+    parser.add_argument("--config", "-c", default="config.yaml", 
+                       help="Path to YAML configuration file")
+    
+    args = parser.parse_args()
+    
+    try:
+        loader = ConfigLoader(config_path=args.config)
+        config = await loader.load()
+        
+        # Use the config (in a real app, this would initialize services)
+        log.info("application_starting", 
+                app_name=config.app_name,
+                debug=config.debug,
+                log_level=config.log_level)
+        
+        return config
+    except Exception as e:
+        log.error("config_loading_failed", error=str(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    import asyncio
+    import logging
+    import aiofiles
+    
+    # Run the async main function
+    asyncio.run(main())
+```
+
+## Key Features
+
+1. **Priority Merging**: Configuration sources are merged with the following priority (lowest to highest):
+   - YAML file defaults
+   - Environment variables (prefixed with `APP_`)
+   - Command-line flags (e.g., `--database-url`)
+
+2. **Structured Logging**: Uses `structlog` for all logging instead of `print()` statements.
+
+3. **Pydantic Validation**: Uses Pydantic `BaseModel` for configuration validation and type safety.
+
+4. **Async I/O**: Uses `aiofiles` for async file reading as required by the async-io rule.
+
+5. **Error Handling**: Comprehensive error handling for file operations, YAML parsing, and validation.
+
+6. **Type Hints**: All functions have proper type hints.
+
+7. **Environment Variables**: Automatically maps environment variables (prefixed with `APP_`) to config fields.
+
+8. **CLI Arguments**: Supports command-line arguments using argparse with automatic type conversion.
+
+## Usage
+
+1. Create a `config.yaml` file:
+```yaml
+app_name: "myapp"
+debug: true
+log_level: "DEBUG"
+database_url: "postgresql://localhost/mydb"
+api_port: 8080
+```
+
+2. Run the script:
+```bash
+python config_loader.py --config config.yaml --debug
+```
+
+3. Or set environment variables:
+```bash
+export APP_DATABASE_URL="postgresql://localhost/mydb"
+export APP_DEBUG=true
+python config_loader.py
+```
+
+The final configuration is logged using structlog for debugging purposes, and the validated config model is returned for use in your application.

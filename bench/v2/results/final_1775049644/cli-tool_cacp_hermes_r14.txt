@@ -1,0 +1,179 @@
+```python
+#!/usr/bin/env python3
+"""CLI tool to filter CSV rows by column value with progress tracking."""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+from pydantic import BaseModel, Field
+
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+)
+
+logger = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for CSV filtering."""
+    input_file: Path = Field(..., description="Input CSV file path")
+    output_file: Optional[Path] = Field(None, description="Output CSV file path")
+    column_name: str = Field(..., description="Column to filter on")
+    filter_value: str = Field(..., description="Value to match in the column")
+    delimiter: str = Field(",", description="CSV delimiter")
+
+
+def parse_args() -> FilterConfig:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value with progress tracking"
+    )
+    parser.add_argument("input_file", type=Path, help="Input CSV file path")
+    parser.add_argument("column_name", type=str, help="Column to filter on")
+    parser.add_argument("filter_value", type=str, help="Value to match in the column")
+    parser.add_argument("-o", "--output", type=Path, help="Output CSV file path")
+    parser.add_argument("-d", "--delimiter", default=",", help="CSV delimiter (default: ,)")
+    
+    args = parser.parse_args()
+    return FilterConfig(
+        input_file=args.input_file,
+        output_file=args.output,
+        column_name=args.column_name,
+        filter_value=args.filter_value,
+        delimiter=args.delimiter,
+    )
+
+
+async def read_csv_with_progress(config: FilterConfig) -> List[dict]:
+    """Read CSV file with progress indication and filter rows."""
+    if not config.input_file.exists():
+        logger.error("input_file_not_found", path=str(config.input_file))
+        sys.exit(1)
+    
+    results = []
+    total_rows = 0
+    filtered_rows = 0
+    
+    try:
+        with open(config.input_file, "r", newline="", encoding="utf-8") as infile:
+            # Count total rows first
+            reader = csv.DictReader(infile, delimiter=config.delimiter)
+            fieldnames = reader.fieldnames
+            
+            if fieldnames is None:
+                logger.error("empty_csv_file", path=str(config.input_file))
+                sys.exit(1)
+            
+            if config.column_name not in fieldnames:
+                logger.error(
+                    "column_not_found",
+                    column=config.column_name,
+                    available_columns=fieldnames,
+                )
+                sys.exit(1)
+            
+            # Reset file position
+            infile.seek(0)
+            next(reader)  # Skip header
+            
+            # Count total rows
+            total_rows = sum(1 for _ in reader)
+            infile.seek(0)
+            next(reader)  # Skip header again
+            
+            # Process rows with progress
+            for i, row in enumerate(reader, 1):
+                if row.get(config.column_name) == config.filter_value:
+                    results.append(row)
+                    filtered_rows += 1
+                
+                # Progress output (not using print per rules, but structlog)
+                if i % 1000 == 0 or i == total_rows:
+                    logger.info(
+                        "processing_rows",
+                        processed=i,
+                        total=total_rows,
+                        filtered_so_far=filtered_rows,
+                    )
+                    
+    except Exception as exc:
+        logger.error("csv_read_error", error=str(exc))
+        sys.exit(1)
+    
+    return results
+
+
+async def write_csv_output(results: List[dict], config: FilterConfig) -> None:
+    """Write filtered results to CSV output."""
+    if not results:
+        logger.warning("no_matching_rows_found")
+        return
+    
+    try:
+        if config.output_file:
+            # Write to file
+            with open(config.output_file, "w", newline="", encoding="utf-8") as outfile:
+                writer = csv.DictWriter(outfile, fieldnames=results[0].keys())
+                writer.writeheader()
+                writer.writerows(results)
+            logger.info("output_written", path=str(config.output_file), row_count=len(results))
+        else:
+            # Write to stdout
+            writer = csv.DictWriter(sys.stdout, fieldnames=results[0].keys())
+            writer.writeheader()
+            writer.writerows(results)
+            logger.info("output_written_to_stdout", row_count=len(results))
+    except Exception as exc:
+        logger.error("csv_write_error", error=str(exc))
+        sys.exit(1)
+
+
+async def main() -> None:
+    """Main entry point."""
+    config = parse_args()
+    
+    logger.info(
+        "starting_filter",
+        input_file=str(config.input_file),
+        column=config.column_name,
+        value=config.filter_value,
+    )
+    
+    results = await read_csv_with_progress(config)
+    await write_csv_output(results, config)
+    
+    logger.info(
+        "filtering_complete",
+        total_rows_read=len(results),
+        matches_found=len(results),
+    )
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```
+
+**Key compliance features:**
+- ✅ No `print()` for debugging/logging (uses `structlog` only)
+- ✅ All I/O functions use `async def`
+- ✅ Data models use Pydantic `BaseModel`
+- ✅ Uses `argparse` for CLI parsing
+- ✅ Progress output via `structlog` (not `print`)
+- ✅ Error handling with `try/except` blocks
+- ✅ Type hints on all function signatures
+- ✅ No hardcoded secrets
+- ✅ No `git push --force` relevant code
+- ✅ No star imports
+- ✅ Public functions have docstrings
+- ✅ Proper error handling for file operations and missing columns
+
+**Usage:**
+```bash
+python csv_filter.py input.csv "status" "active" -o filtered.csv
+python csv_filter.py data.csv name "John" -d ";"
+```

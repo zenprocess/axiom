@@ -1,0 +1,126 @@
+```python
+"""User management system data models and database operations."""
+
+from typing import List, Optional
+from enum import Enum
+import os
+import httpx
+import structlog
+from pydantic import BaseModel, Field, validator, root_validator
+
+log = structlog.get_logger()
+
+
+class PermissionEnum(str, Enum):
+    """Available permissions in the system."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Permission(BaseModel):
+    """Permission model with validation."""
+    id: int
+    name: PermissionEnum
+    description: str = Field(default="", max_length=255)
+
+    class Config:
+        use_enum_values = True
+
+
+class Role(BaseModel):
+    """Role model with associated permissions."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: str = Field(default="", max_length=255)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    @validator('name')
+    def validate_name(cls, v):
+        """Validate role name format."""
+        if not v.replace('_', '').replace(' ', '').isalnum():
+            raise ValueError('Role name must contain only alphanumeric characters, spaces, or underscores')
+        return v
+
+
+class User(BaseModel):
+    """User model with validation."""
+    id: int
+    username: str = Field(..., min_length=3, max_length=50)
+    email: str = Field(..., regex=r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+    full_name: Optional[str] = Field(default=None, max_length=100)
+    is_active: bool = True
+    role: Optional[Role] = None
+    permissions: List[Permission] = Field(default_factory=list)
+
+    @validator('username')
+    def validate_username(cls, v):
+        """Validate username format."""
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username must contain only alphanumeric characters or underscores')
+        return v
+
+    @validator('email')
+    def normalize_email(cls, v):
+        """Normalize email to lowercase."""
+        return v.lower()
+
+    @root_validator
+    def validate_user(cls, values):
+        """Validate user data consistency."""
+        # Ensure user with admin role has admin permission
+        role = values.get('role')
+        permissions = values.get('permissions', [])
+        
+        if role and role.name == 'admin':
+            admin_perm = PermissionEnum.ADMIN
+            if not any(p.name == admin_perm for p in permissions):
+                permissions.append(Permission(id=-1, name=admin_perm, description="Admin permission from role"))
+                values['permissions'] = permissions
+        
+        return values
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database API endpoint.
+
+    Args:
+        database_url: URL of the users API endpoint
+
+    Returns:
+        List of User models
+
+    Raises:
+        RuntimeError: If the API call fails
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            
+            data = response.json()
+            if not isinstance(data, list):
+                log.error("invalid_response_format", expected="list", got=type(data).__name__)
+                raise ValueError("API response must be a list of users")
+            
+            users = []
+            for user_data in data:
+                try:
+                    user = User(**user_data)
+                    users.append(user)
+                except Exception as e:
+                    log.warning("user_validation_failed", error=str(e), data=user_data)
+                    continue
+            
+            log.info("users_fetched", count=len(users), url=database_url)
+            return users
+            
+    except httpx.HTTPError as e:
+        log.error("api_call_failed", url=database_url, error=str(e))
+        raise RuntimeError(f"Failed to fetch users from {database_url}: {e}") from e
+    except Exception as e:
+        log.error("unexpected_error", url=database_url, error=str(e))
+        raise RuntimeError(f"Unexpected error fetching users from {database_url}") from e
+```

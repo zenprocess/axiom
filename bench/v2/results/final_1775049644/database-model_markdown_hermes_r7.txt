@@ -1,0 +1,104 @@
+```python
+"""User management data models and database utilities."""
+
+import os
+from typing import List, Optional
+from datetime import datetime
+
+import httpx
+from pydantic import BaseModel, Field, validator, EmailStr
+
+
+class Permission(BaseModel):
+    """Represents a permission that can be granted to roles."""
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        extra = "forbid"
+
+
+class Role(BaseModel):
+    """Represents a role in the system with associated permissions."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    @validator('name')
+    def name_must_be_valid(cls, v):
+        if not v.replace('_', '').isalnum():
+            raise ValueError('name must contain only alphanumeric characters and underscores')
+        return v
+
+    class Config:
+        extra = "forbid"
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    email: EmailStr
+    username: str = Field(..., min_length=3, max_length=30)
+    full_name: Optional[str] = Field(None, max_length=100)
+    role_id: int
+    role: Optional[Role] = None
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    @validator('username')
+    def username_must_be_valid(cls, v):
+        if not v.replace('_', '').isalnum():
+            raise ValueError('username must contain only alphanumeric characters and underscores')
+        return v
+
+    class Config:
+        extra = "forbid"
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from the database endpoint.
+
+    Args:
+        database_url: URL to the database API endpoint that returns user data.
+
+    Returns:
+        List of User objects fetched from the database.
+
+    Raises:
+        HTTPError: If the HTTP request returns an unsuccessful status code.
+        RequestException: For network-related errors.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url, timeout=30.0)
+            response.raise_for_status()
+            users_data = response.json()
+            
+            # Validate and deserialize each user
+            return [User(**user_data) for user_data in users_data]
+            
+    except httpx.HTTPStatusError as e:
+        log.error('http_error_fetching_users', 
+                 database_url=database_url, 
+                 status_code=e.response.status_code,
+                 error=str(e))
+        raise
+    except httpx.RequestError as e:
+        log.error('network_error_fetching_users', 
+                 database_url=database_url,
+                 error=str(e))
+        raise
+    except Exception as e:
+        log.error('unexpected_error_fetching_users', 
+                 database_url=database_url,
+                 error=str(e))
+        raise
+
+
+# Initialize structlog logger
+import structlog
+log = structlog.get_logger()
+```

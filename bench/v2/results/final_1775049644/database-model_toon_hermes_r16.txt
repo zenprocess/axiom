@@ -1,0 +1,96 @@
+```python
+"""User management data models and database utilities."""
+
+from typing import List, Optional
+from enum import Enum
+from datetime import datetime
+
+import httpx
+from pydantic import BaseModel, EmailStr, field_validator, ConfigDict
+
+
+class PermissionEnum(str, Enum):
+    """Available permissions in the system."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    name: PermissionEnum
+    description: Optional[str] = None
+
+
+class Role(BaseModel):
+    """Represents a role with associated permissions."""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    name: str
+    description: Optional[str] = None
+    permissions: List[Permission] = []
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    email: EmailStr
+    username: str
+    full_name: Optional[str] = None
+    role: Role
+    is_active: bool = True
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    @field_validator('username')
+    @classmethod
+    def validate_username(cls, v: str) -> str:
+        """Ensure username meets length and character requirements."""
+        if len(v) < 3:
+            raise ValueError('Username must be at least 3 characters long')
+        if len(v) > 30:
+            raise ValueError('Username must be at most 30 characters long')
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username can only contain alphanumeric characters and underscores')
+        return v
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database endpoint.
+    
+    Args:
+        database_url: URL of the database API endpoint
+        
+    Returns:
+        List of User models
+        
+    Raises:
+        ValueError: If the response is invalid or data cannot be parsed
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Validate that we got a list of users
+            if not isinstance(data, list):
+                raise ValueError("Expected a list of users from the API")
+            
+            return [User.model_validate(user_data) for user_data in data]
+            
+    except httpx.HTTPStatusError as exc:
+        raise ValueError(f"HTTP error fetching users: {exc}") from exc
+    except httpx.RequestError as exc:
+        raise ValueError(f"Request error fetching users: {exc}") from exc
+    except Exception as exc:
+        raise ValueError(f"Unexpected error fetching users: {exc}") from exc
+```

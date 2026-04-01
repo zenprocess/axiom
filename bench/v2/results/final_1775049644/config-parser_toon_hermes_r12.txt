@@ -1,0 +1,180 @@
+```python
+import argparse
+import os
+from typing import Any, Dict, Optional, Union
+
+import yaml
+from pydantic import BaseModel, Field
+import structlog
+
+# Configure structlog for structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger(__name__)
+
+
+class Config(BaseModel):
+    """Configuration model using Pydantic for validation and type hints."""
+    
+    app_name: str = Field(default="my_app", description="Application name")
+    debug: bool = Field(default=False, description="Enable debug mode")
+    log_level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)")
+    database_url: str = Field(default="sqlite:///app.db", description="Database connection string")
+    api_key: Optional[str] = Field(default=None, description="API key for external services")
+    timeout: int = Field(default=30, description="Request timeout in seconds")
+
+
+def load_yaml_config(file_path: str) -> Dict[str, Any]:
+    """Load configuration from a YAML file.
+    
+    Args:
+        file_path: Path to the YAML configuration file.
+        
+    Returns:
+        Dictionary containing the configuration values.
+    """
+    try:
+        with open(file_path, 'r') as f:
+            config_data = yaml.safe_load(f)
+            logger.info("yaml_config_loaded", file_path=file_path, config=config_data)
+            return config_data or {}
+    except FileNotFoundError:
+        logger.warning("yaml_file_not_found", file_path=file_path)
+        return {}
+    except yaml.YAMLError as e:
+        logger.error("yaml_parse_error", file_path=file_path, error=str(e))
+        return {}
+
+
+def load_env_config() -> Dict[str, Any]:
+    """Load configuration from environment variables.
+    
+    Environment variables are expected to be prefixed with the app name (e.g., MY_APP_DEBUG).
+    
+    Returns:
+        Dictionary containing the environment variable configuration values.
+    """
+    env_config = {}
+    prefix = "MY_APP_"
+    
+    for key, value in os.environ.items():
+        if key.startswith(prefix):
+            # Convert MY_APP_DEBUG -> debug
+            config_key = key[len(prefix):].lower()
+            env_config[config_key] = value
+            logger.debug("env_config_found", key=key, value=value)
+    
+    return env_config
+
+
+def load_cli_args() -> Dict[str, Any]:
+    """Parse command-line arguments for configuration.
+    
+    Returns:
+        Dictionary containing the command-line argument configuration values.
+    """
+    parser = argparse.ArgumentParser(description="Application configuration")
+    parser.add_argument("--app-name", type=str, help="Application name")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--log-level", type=str, choices=["DEBUG", "INFO", "WARNING", "ERROR"], 
+                        help="Logging level")
+    parser.add_argument("--database-url", type=str, help="Database connection string")
+    parser.add_argument("--api-key", type=str, help="API key for external services")
+    parser.add_argument("--timeout", type=int, help="Request timeout in seconds")
+    
+    args = parser.parse_args()
+    cli_config = {k.replace("-", "_"): v for k, v in vars(args).items() if v is not None}
+    
+    logger.info("cli_args_parsed", config=cli_config)
+    return cli_config
+
+
+def merge_configs(*configs: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge multiple configuration dictionaries with priority (later configs override earlier ones).
+    
+    Args:
+        *configs: Variable number of configuration dictionaries to merge.
+        
+    Returns:
+        Merged configuration dictionary.
+    """
+    merged = {}
+    
+    for config in configs:
+        for key, value in config.items():
+            if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+                merged[key] = merge_configs(merged[key], value)
+            else:
+                merged[key] = value
+    
+    return merged
+
+
+def create_config() -> Config:
+    """Create and return the final configuration by merging sources in priority order.
+    
+    Priority order (lowest to highest):
+    1. Default values
+    2. YAML config file
+    3. Environment variables
+    4. Command-line arguments
+    
+    Returns:
+        Config instance with the merged configuration values.
+    """
+    # Load configurations from each source
+    yaml_config = load_yaml_config("config.yaml")
+    env_config = load_env_config()
+    cli_config = load_cli_args()
+    
+    # Merge configurations with priority (later overrides earlier)
+    merged_config = merge_configs(
+        {},  # defaults (handled by Pydantic model)
+        yaml_config,
+        env_config,
+        cli_config
+    )
+    
+    logger.info("merged_config", config=merged_config)
+    
+    # Create Config model instance with validation
+    try:
+        config = Config(**merged_config)
+        logger.info("config_validated", config=config.dict())
+        return config
+    except Exception as e:
+        logger.error("config_validation_error", error=str(e))
+        raise
+
+
+def print_config(config: Config) -> None:
+    """Print the final configuration for debugging purposes.
+    
+    Args:
+        config: The Config instance to print.
+    """
+    logger.info("final_config", config=config.dict())
+    print("\n=== Final Configuration ===")
+    for key, value in config.dict().items():
+        print(f"{key}: {value}")
+    print("===========================\n")
+
+
+# Main execution
+if __name__ == "__main__":
+    config = create_config()
+    print_config(config)
+```

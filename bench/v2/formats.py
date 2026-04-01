@@ -210,6 +210,66 @@ def generate_cacp_rules(rules: list[Rule]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# TOON + self-commitment priming (pre-dispatch technique)
+# ---------------------------------------------------------------------------
+
+
+def generate_toon_primed_rules(rules: list[Rule]) -> str:
+    """TOON format with self-commitment priming prefix.
+
+    Research hypothesis: explicit self-commitment ("I will NOT...")
+    before rules improves compliance via constitutional AI principles.
+    """
+    toon = generate_toon_rules(rules)
+    commitments = []
+    for r in rules:
+        if r.id == "no-print-debug":
+            commitments.append("I will use structlog for ALL output, NEVER print()")
+        elif r.id == "async-io":
+            commitments.append("I will use async def for ALL I/O functions")
+        elif r.id == "no-force-push":
+            commitments.append("I will NEVER use git push --force")
+        elif r.id == "no-secrets":
+            commitments.append("I will NEVER hardcode secrets, keys, or passwords")
+        elif r.id == "structlog-only":
+            commitments.append("I will import structlog, NEVER import logging")
+    primer = "Before writing code, I commit to these constraints:\n"
+    primer += "\n".join(f"- {c}" for c in commitments)
+    primer += "\n\n"
+    return primer + toon
+
+
+# ---------------------------------------------------------------------------
+# TOON + few-shot violation examples
+# ---------------------------------------------------------------------------
+
+
+_VIOLATION_EXAMPLES: dict[str, str] = {
+    "no-print-debug": "BAD: print(result)  GOOD: log.info('result', data=result)",
+    "async-io": "BAD: def fetch(url):  GOOD: async def fetch(url):",
+    "no-force-push": "BAD: git push --force  GOOD: git push --force-with-lease",
+    "structlog-only": "BAD: import logging  GOOD: import structlog",
+    "no-secrets": 'BAD: api_key="sk-abc123"  GOOD: api_key=os.environ["API_KEY"]',
+    "error-handling": "BAD: requests.get(url)  GOOD: try: requests.get(url) except: ...",
+}
+
+
+def generate_toon_examples_rules(rules: list[Rule]) -> str:
+    """TOON format with violation examples appended.
+
+    Shows the model exact patterns to avoid alongside the rules.
+    Costs ~80 extra tokens but may close compliance gap.
+    """
+    toon = generate_toon_rules(rules)
+    examples = "\n\nVIOLATION EXAMPLES:\n"
+    for r in rules:
+        ex = _VIOLATION_EXAMPLES.get(r.id)
+        if ex:
+            examples += f"  {r.id}: {ex}\n"
+    return toon + examples
+
+
+# ---------------------------------------------------------------------------
 # Format dispatcher
 # ---------------------------------------------------------------------------
 
@@ -217,6 +277,8 @@ FORMAT_GENERATORS: dict[str, callable] = {
     "markdown": generate_markdown_rules,
     "toon": generate_toon_rules,
     "cacp": generate_cacp_rules,
+    "toon_primed": generate_toon_primed_rules,
+    "toon_examples": generate_toon_examples_rules,
 }
 
 

@@ -1,0 +1,132 @@
+```python
+"""User management system data models and database interaction."""
+
+from typing import List, Optional
+from datetime import datetime
+import os
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, validator, Field
+
+log = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission that can be assigned to roles."""
+    name: str = Field(..., description="Unique permission name")
+    description: Optional[str] = Field(None, description="Description of the permission")
+    
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role that can be assigned to users."""
+    id: int
+    name: str = Field(..., description="Unique role name")
+    description: Optional[str] = Field(None, description="Description of the role")
+    permissions: List[Permission] = Field(default_factory=list, description="Permissions assigned to this role")
+    
+    @validator('name')
+    def name_must_be_valid(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Role name cannot be empty')
+        if len(v) < 2:
+            raise ValueError('Role name must be at least 2 characters')
+        return v.strip()
+    
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    email: EmailStr
+    username: str = Field(..., min_length=3, max_length=30)
+    full_name: Optional[str] = Field(None, max_length=100)
+    role_id: Optional[int] = None
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime
+    
+    # Relationships
+    role: Optional[Role] = None
+    
+    @validator('username')
+    def username_must_be_valid(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Username cannot be empty')
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username must contain only alphanumeric characters and underscores')
+        return v.strip()
+    
+    @validator('full_name')
+    def full_name_must_be_valid(cls, v):
+        if v is not None and len(v.strip()) > 100:
+            raise ValueError('Full name must be 100 characters or less')
+        return v.strip() if v else None
+    
+    def to_dict(self) -> dict:
+        """Serialize user model to dictionary."""
+        return self.dict(exclude={'role'} if self.role else {})
+    
+    class Config:
+        orm_mode = True
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database API endpoint.
+    
+    Args:
+        database_url: URL of the users API endpoint
+        
+    Returns:
+        List of User objects
+        
+    Raises:
+        ValueError: If database_url is invalid or empty
+        RuntimeError: If API call fails or returns unexpected data
+    """
+    if not database_url or not database_url.strip():
+        raise ValueError("Database URL cannot be empty")
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            users_data = response.json()
+            
+            if not isinstance(users_data, list):
+                raise ValueError("Expected list of users from API")
+            
+            users = []
+            for user_data in users_data:
+                try:
+                    user = User(**user_data)
+                    users.append(user)
+                except Exception as e:
+                    log.warning('invalid_user_data', error=str(e), data=user_data)
+                    continue
+            
+            log.info('users_fetched', count=len(users), url=database_url)
+            return users
+            
+    except httpx.TimeoutException as e:
+        log.error('api_timeout', url=database_url, error=str(e))
+        raise RuntimeError(f"Database request timed out: {e}") from e
+    except httpx.HTTPStatusError as e:
+        log.error('api_error', url=database_url, status=e.response.status_code, error=str(e))
+        raise RuntimeError(f"Database API returned status {e.response.status_code}: {e}") from e
+    except httpx.RequestError as e:
+        log.error('api_connection_error', url=database_url, error=str(e))
+        raise RuntimeError(f"Database connection error: {e}") from e
+    except Exception as e:
+        log.error('unexpected_error', url=database_url, error=str(e))
+        raise RuntimeError(f"Unexpected error fetching users: {e}") from e
+
+
+# Default database URL for local development (should be overridden in production)
+DEFAULT_DATABASE_URL = os.environ.get("DEFAULT_DATABASE_URL", "http://localhost:8000/api/v1/users")
+```

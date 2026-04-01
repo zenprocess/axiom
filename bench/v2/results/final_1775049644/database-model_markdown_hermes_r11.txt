@@ -1,0 +1,134 @@
+```python
+import os
+from typing import List, Optional
+from datetime import datetime
+from enum import Enum
+
+import structlog
+from pydantic import BaseModel, Field, validator, root_validator
+import httpx
+
+log = structlog.get_logger()
+
+
+class PermissionEnum(str, Enum):
+    """Available permission types."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    name: PermissionEnum
+    description: str = Field(..., min_length=1, max_length=255)
+    
+    class Config:
+        use_enum_values = True
+
+
+class Role(BaseModel):
+    """Represents a role with associated permissions."""
+    id: int = Field(..., gt=0)
+    name: str = Field(..., min_length=1, max_length=50)
+    permissions: List[Permission]
+    description: Optional[str] = Field(None, max_length=500)
+    
+    @validator('name')
+    def name_must_not_be_reserved(cls, v):
+        reserved_names = ['admin', 'superuser', 'root']
+        if v.lower() in reserved_names:
+            raise ValueError(f'Role name "{v}" is reserved')
+        return v
+    
+    @root_validator
+    def validate_permissions(cls, values):
+        permissions = values.get('permissions', [])
+        if not permissions:
+            raise ValueError('Role must have at least one permission')
+        return values
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int = Field(..., gt=0)
+    username: str = Field(..., min_length=3, max_length=30)
+    email: str = Field(..., regex=r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$')
+    role_id: int = Field(..., gt=0)
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    
+    @validator('username')
+    def username_must_be_alphanumeric(cls, v):
+        if not v.isalnum():
+            raise ValueError('Username must contain only alphanumeric characters')
+        return v
+    
+    @validator('email')
+    def email_domain_must_be_allowed(cls, v):
+        allowed_domains = ['example.com', 'company.org', 'domain.net']
+        domain = v.split('@')[1]
+        if domain not in allowed_domains:
+            raise ValueError(f'Domain {domain} is not allowed')
+        return v
+
+
+class UserResponse(BaseModel):
+    """Response model for user operations."""
+    success: bool
+    message: str
+    user: Optional[User] = None
+    users: Optional[List[User]] = None
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database URL.
+    
+    Args:
+        database_url: URL of the database API endpoint
+        
+    Returns:
+        List[User]: List of users retrieved from the database
+        
+    Raises:
+        ValueError: If the URL is invalid or empty
+        ConnectionError: If unable to connect to the database
+        RuntimeError: If the response is invalid or contains errors
+    """
+    if not database_url:
+        raise ValueError("Database URL cannot be empty")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url, timeout=30.0)
+            response.raise_for_status()
+            
+            data = response.json()
+            if not isinstance(data, list):
+                raise RuntimeError(f"Expected list of users, got {type(data).__name__}")
+            
+            users = []
+            for user_data in data:
+                # Ensure required fields are present
+                if 'id' not in user_data or 'username' not in user_data:
+                    log.warning("user_data_missing_required_fields", user_data=user_data)
+                    continue
+                
+                users.append(User(**user_data))
+            
+            log.info("users_fetched_successfully", count=len(users))
+            return users
+            
+    except httpx.TimeoutException as e:
+        log.error("database_timeout", url=database_url, error=str(e))
+        raise ConnectionError(f"Database connection timed out: {e}") from e
+    except httpx.RequestError as e:
+        log.error("database_connection_error", url=database_url, error=str(e))
+        raise ConnectionError(f"Failed to connect to database: {e}") from e
+    except Exception as e:
+        log.error("unexpected_error_fetching_users", url=database_url, error=str(e))
+        raise RuntimeError(f"Unexpected error fetching users: {e}") from e
+```

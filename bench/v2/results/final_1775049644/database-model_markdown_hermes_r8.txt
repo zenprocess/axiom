@@ -1,0 +1,104 @@
+```python
+"""User management data models and database interaction functions."""
+
+from typing import List, Optional
+from enum import Enum
+from datetime import datetime
+import os
+
+import structlog
+from pydantic import BaseModel, EmailStr, validator, ValidationError
+import httpx
+
+log = structlog.get_logger()
+
+
+class RoleName(Enum):
+    """Available role names for users."""
+    ADMIN = "admin"
+    MANAGER = "manager"
+    USER = "user"
+
+
+class Permission(BaseModel):
+    """Represents a permission that can be assigned to roles."""
+    id: int
+    name: str
+    description: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role with its associated permissions."""
+    id: int
+    name: RoleName
+    description: Optional[str] = None
+    permissions: List[Permission] = []
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    email: EmailStr
+    username: str
+    full_name: Optional[str] = None
+    role_id: int
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    # Validation
+    @validator("username")
+    def username_must_not_be_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Username cannot be empty")
+        return v.strip()
+
+    @validator("full_name")
+    def full_name_cannot_be_blank(cls, v):
+        if v is not None and not v.strip():
+            return None
+        return v.strip() if v else None
+
+    class Config:
+        orm_mode = True
+
+
+async def fetch_users(database_url: Optional[str] = None) -> List[User]:
+    """
+    Fetch users from the database endpoint.
+
+    Args:
+        database_url: URL to the database API endpoint. If not provided,
+                     uses DATABASE_URL environment variable.
+
+    Returns:
+        List of User objects fetched from the database.
+
+    Raises:
+        httpx.RequestError: If network request fails.
+        httpx.HTTPStatusError: If server returns an error status code.
+        ValidationError: If response data fails validation.
+    """
+    url = database_url or os.environ.get("DATABASE_URL")
+    if not url:
+        raise ValueError("No database URL provided and DATABASE_URL not set")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=30.0)
+            response.raise_for_status()
+            data = response.json()
+            return [User(**user_data) for user_data in data]
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        log.error("database_fetch_failed", url=url, error=str(e))
+        raise
+    except ValidationError as e:
+        log.error("user_validation_failed", url=url, errors=e.errors())
+        raise
+```

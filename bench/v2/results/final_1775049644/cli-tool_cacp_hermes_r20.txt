@@ -1,0 +1,272 @@
+```python
+#!/usr/bin/env python3
+"""CLI tool to filter CSV rows by a column value with progress output."""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger(__name__)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value with progress output."
+    )
+    parser.add_argument("input_file", type=Path, help="Input CSV file path")
+    parser.add_argument(
+        "column_name", type=str, help="Column name to filter on"
+    )
+    parser.add_argument(
+        "filter_value", type=str, help="Value to filter for in the specified column"
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=Path("-"),
+        help="Output file path (default: stdout)",
+    )
+    parser.add_argument(
+        "-d",
+        "--delimiter",
+        type=str,
+        default=",",
+        help="CSV delimiter (default: ,)",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output",
+    )
+    return parser.parse_args()
+
+
+async def read_csv_with_progress(
+    file_path: Path, delimiter: str, quiet: bool
+) -> tuple[List[dict], int]:
+    """
+    Read CSV file with progress reporting.
+
+    Args:
+        file_path: Path to the input CSV file.
+        delimiter: CSV delimiter character.
+        quiet: Whether to suppress progress output.
+
+    Returns:
+        Tuple of (rows as list of dicts, total number of rows).
+    """
+    rows: List[dict] = []
+    total_rows = 0
+    
+    try:
+        with file_path.open(newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile, delimiter=delimiter)
+            fieldnames = reader.fieldnames
+            
+            if fieldnames is None:
+                raise ValueError("Empty CSV file or missing headers")
+            
+            total_rows = sum(1 for _ in reader)  # Count total rows
+            csvfile.seek(0)  # Reset to beginning
+            
+            # Reinitialize reader after seek
+            reader = csv.DictReader(csvfile, delimiter=delimiter)
+            
+            for i, row in enumerate(reader):
+                if not quiet:
+                    logger.info(
+                        "Reading row",
+                        row_number=i + 1,
+                        total_rows=total_rows,
+                        progress_percent=(i + 1) / total_rows * 100,
+                    )
+                rows.append(row)
+                
+    except FileNotFoundError as exc:
+        logger.error("File not found", file_path=str(file_path), exc_info=exc)
+        raise
+    except PermissionError as exc:
+        logger.error(
+            "Permission denied when reading file", file_path=str(file_path), exc_info=exc
+        )
+        raise
+    except csv.Error as exc:
+        logger.error(
+            "CSV parsing error", file_path=str(file_path), exc_info=exc
+        )
+        raise
+    
+    return rows, total_rows
+
+
+def filter_rows(rows: List[dict], column_name: str, filter_value: str) -> List[dict]:
+    """
+    Filter rows by column value.
+
+    Args:
+        rows: List of row dictionaries.
+        column_name: Name of the column to filter on.
+        filter_value: Value to match in the column.
+
+    Returns:
+        List of rows matching the filter criteria.
+    """
+    filtered = []
+    
+    for i, row in enumerate(rows):
+        if column_name not in row:
+            logger.warning(
+                "Column not found in row",
+                row_number=i,
+                column_name=column_name,
+                available_columns=list(row.keys()),
+            )
+            continue
+        
+        if row[column_name] == filter_value:
+            filtered.append(row)
+    
+    return filtered
+
+
+async def write_csv_output(
+    rows: List[dict], output_path: Path, quiet: bool
+) -> None:
+    """
+    Write filtered rows to output.
+
+    Args:
+        rows: List of filtered row dictionaries.
+        output_path: Output file path.
+        quiet: Whether to suppress progress output.
+    """
+    if not rows:
+        logger.info("No matching rows found")
+        return
+    
+    try:
+        fieldnames = list(rows[0].keys())
+        
+        if output_path == Path("-"):
+            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for i, row in enumerate(rows):
+                writer.writerow(row)
+                if not quiet:
+                    logger.info(
+                        "Writing row",
+                        row_number=i + 1,
+                        total_rows=len(rows),
+                        progress_percent=(i + 1) / len(rows) * 100,
+                    )
+        else:
+            with output_path.open("w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                for i, row in enumerate(rows):
+                    writer.writerow(row)
+                    if not quiet:
+                        logger.info(
+                            "Writing row",
+                            row_number=i + 1,
+                            total_rows=len(rows),
+                            progress_percent=(i + 1) / len(rows) * 100,
+                        )
+        
+        logger.info(
+            "Successfully wrote filtered rows",
+            total_rows=len(rows),
+            output_file=str(output_path),
+        )
+        
+    except PermissionError as exc:
+        logger.error(
+            "Permission denied when writing file", 
+            output_path=str(output_path), 
+            exc_info=exc
+        )
+        raise
+    except Exception as exc:
+        logger.error(
+            "Error writing output file", 
+            output_path=str(output_path), 
+            exc_info=exc
+        )
+        raise
+
+
+async def main() -> int:
+    """Main entry point."""
+    try:
+        args = parse_args()
+        
+        # Read CSV file with progress
+        rows, total_rows = await read_csv_with_progress(
+            args.input_file, args.delimiter, args.quiet
+        )
+        
+        logger.info(
+            "Completed reading CSV", 
+            total_rows=total_rows, 
+            file_path=str(args.input_file)
+        )
+        
+        # Filter rows
+        filtered_rows = filter_rows(rows, args.column_name, args.filter_value)
+        
+        logger.info(
+            "Filtering completed",
+            total_rows=total_rows,
+            matching_rows=len(filtered_rows),
+            column=args.column_name,
+            value=args.filter_value,
+        )
+        
+        # Write output
+        await write_csv_output(filtered_rows, args.output, args.quiet)
+        
+        return 0
+        
+    except FileNotFoundError as exc:
+        logger.error("Operation failed", error="Input file not found")
+        return 1
+    except PermissionError as exc:
+        logger.error("Operation failed", error="Permission denied")
+        return 2
+    except ValueError as exc:
+        logger.error("Operation failed", error="Invalid CSV format")
+        return 3
+    except Exception as exc:
+        logger.error("Operation failed", error="Unexpected error", exc_info=exc)
+        return 1
+
+
+if __name__ == "__main__":
+    import asyncio
+    
+    raise SystemExit(asyncio.run(main()))
+```

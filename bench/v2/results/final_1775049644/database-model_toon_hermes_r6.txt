@@ -1,0 +1,124 @@
+Here's a Python module implementing data models for a user management system, adhering to the provided rules:
+
+```python
+# users/models.py
+"""User management data models and utilities."""
+
+from __future__ import annotations
+
+from typing import List, Optional
+from datetime import datetime
+from urllib.parse import urlparse
+
+import httpx
+from pydantic import BaseModel, EmailStr, validator, Field
+
+
+class Permission(BaseModel):
+    """Represents a permission granted to roles or users."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role with associated permissions."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    username: str = Field(..., min_length=3, max_length=30)
+    email: EmailStr
+    full_name: Optional[str] = Field(None, max_length=100)
+    is_active: bool = True
+    role: Role
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    @validator("username")
+    def username_alphanumeric(cls, v: str) -> str:
+        """Ensure username contains only alphanumeric characters and underscores."""
+        if not v.replace("_", "").isalnum():
+            raise ValueError("Username must contain only alphanumeric characters and underscores")
+        return v
+
+    @validator("full_name")
+    def full_name_not_empty(cls, v: Optional[str]) -> Optional[str]:
+        """Strip and validate full_name is not blank if provided."""
+        if v is not None:
+            v = v.strip()
+            if not v:
+                return None
+        return v
+
+    class Config:
+        orm_mode = True
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database API endpoint.
+
+    Args:
+        database_url: The URL to the users API endpoint.
+
+    Returns:
+        List[User]: A list of User objects.
+
+    Raises:
+        ValueError: If the URL is invalid or not an HTTP(S) scheme.
+        httpx.HTTPError: If the request fails.
+    """
+    # Validate URL scheme
+    parsed = urlparse(database_url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("database_url must use http or https scheme")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as exc:
+        raise exc
+
+    # Validate and deserialize response
+    try:
+        return [User.parse_obj(item) for item in data]
+    except Exception as exc:
+        raise ValueError(f"Failed to parse user data: {exc}") from exc
+```
+
+### Compliance with Rules
+
+- **`pydantic-models`**: All models (`User`, `Role`, `Permission`) use `BaseModel`.
+- **`type-hints`**: All function signatures have type hints.
+- **`error-handling`**: `fetch_users` includes `try/except` for `httpx` calls.
+- **`async-io`**: `fetch_users` is `async def` and uses `httpx.AsyncClient`.
+- **`structlog-only`**: No `logging` or `print()` used.
+- **`no-secrets`**: No hardcoded credentials.
+- **`no-force-push`**: Not applicable (this is code, not a Git operation).
+- **`docstrings`**: Public functions (`fetch_users`) and modules have docstrings.
+- **`no-star-import`**: Explicit imports used.
+
+### Notes
+
+- Uses `EmailStr` for email validation.
+- Validates `username` and `full_name`.
+- Uses `httpx.AsyncClient` for async I/O.
+- Includes `validator` methods for custom validation logic.
+- Uses `Field(...)` for required fields and `default_factory=list` for mutable defaults.
+- Handles deserialization errors gracefully.
+
+Let me know if you'd like to extend this with database integration (e.g., SQLAlchemy), pagination, or auth-related features!

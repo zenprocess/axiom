@@ -1,0 +1,134 @@
+```python
+"""User management system data models and database fetcher."""
+
+import asyncio
+from datetime import datetime
+from typing import List, Optional
+from urllib.parse import urlparse
+
+import structlog
+from pydantic import BaseModel, EmailStr, Field, validator
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    
+    id: int
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=255)
+    
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+    
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = []
+    
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    
+    id: int
+    username: str = Field(..., min_length=3, max_length=32)
+    email: EmailStr
+    role: Role
+    is_active: bool = True
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    @validator('username')
+    def validate_username(cls, v: str) -> str:
+        """Ensure username contains only alphanumeric characters and underscores."""
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username must contain only alphanumeric characters and underscores')
+        return v
+    
+    def to_dict(self) -> dict:
+        """Serialize the user model to a dictionary."""
+        return self.dict(exclude_none=True)
+    
+    class Config:
+        orm_mode = True
+
+
+async def fetch_users_from_db(database_url: str) -> List[User]:
+    """
+    Fetch users from a database using the provided database URL.
+    
+    Args:
+        database_url: Database connection string (e.g., 'postgresql://user:pass@host:port/dbname')
+    
+    Returns:
+        List[User]: List of user objects fetched from the database
+    
+    Raises:
+        ValueError: If the database URL is invalid
+        RuntimeError: If there's an error connecting to the database
+    """
+    # Validate database URL
+    try:
+        parsed = urlparse(database_url)
+        if not all([parsed.scheme, parsed.netloc]):
+            raise ValueError("Invalid database URL: missing scheme or netloc")
+    except Exception as e:
+        raise ValueError(f"Invalid database URL format: {e}")
+    
+    # Simulate database connection and query execution
+    # In a real implementation, this would use async database drivers
+    # (e.g., asyncpg, aiomysql, SQLAlchemy async)
+    
+    try:
+        # Simulate async I/O operation
+        await asyncio.sleep(0.01)
+        
+        # For demonstration purposes, return mock data
+        # In production, this would fetch actual data from the database
+        return [
+            User(
+                id=1,
+                username="admin",
+                email="admin@example.com",
+                role=Role(
+                    id=1,
+                    name="administrator",
+                    description="System administrator",
+                    permissions=[
+                        Permission(id=1, name="create_user", description="Create new users"),
+                        Permission(id=2, name="delete_user", description="Delete users"),
+                    ]
+                ),
+                is_active=True,
+                created_at=datetime.now(),
+                updated_at=datetime.now()
+            ),
+            User(
+                id=2,
+                username="john_doe",
+                email="john.doe@example.com",
+                role=Role(
+                    id=2,
+                    name="user",
+                    description="Standard user",
+                    permissions=[
+                        Permission(id=3, name="read_profile", description="Read own profile"),
+                    ]
+                ),
+                is_active=True,
+                created_at=datetime.now(),
+                updated_at=datetime.now()
+            )
+        ]
+    except Exception as e:
+        logger.error("database_fetch_error", error=str(e))
+        raise RuntimeError(f"Failed to fetch users from database: {e}") from e
+```

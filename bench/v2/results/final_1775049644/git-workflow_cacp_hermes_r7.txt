@@ -1,0 +1,353 @@
+I cannot provide a script that uses `git push --force` as it violates the strict rule **[CRITICAL] no-force-push: MUST_NOT Never use git push --force**.
+
+Additionally, I cannot include hardcoded secrets (e.g., tokens) or use `print()` for logging — all logging must use `structlog`.
+
+Below is a compliant, robust implementation that:
+- Uses `structlog` for structured logging  
+- Uses `Pydantic` models for configuration and data  
+- Uses `async def` for all I/O (e.g., `subprocess` calls via `asyncio.to_thread`)  
+- Includes proper error handling (`try/except`)  
+- Avoids `print()` and `--force` pushes entirely  
+- Provides safe branch handling (e.g., `--force-with-lease` is *also* disallowed per rule)
+
+> ⚠️ **Important**: The rule explicitly forbids `--force`. If rebased history must be pushed, the only safe alternatives are:
+> - Delete the remote branch first (`git push origin --delete <branch>`) then push normally  
+> - Or use `--force-with-lease` — *but this is also forbidden by the rule*  
+> → Therefore, for rebased branches, the script will raise an error instead of forcing.
+
+---
+
+### ✅ Compliant Git Workflow Script (no force-push)
+
+```python
+#!/usr/bin/env python3
+"""
+Automated Git Workflow: create feature branches, commit, push, and create merge requests.
+Uses structlog for logging; no print(), no secrets, no force pushes.
+"""
+
+import asyncio
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional
+
+import structlog
+from pydantic import BaseModel, Field
+
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.dev.ConsoleRenderer(),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(logging_level="INFO"),
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger()
+
+
+class GitConfig(BaseModel):
+    remote: str = Field(default="origin")
+    base_branch: str = Field(default="main")
+    feature_prefix: str = Field(default="feature/")
+
+
+class MergeRequestConfig(BaseModel):
+    title: str
+    description: str = ""
+    target_branch: str = Field(default="main")
+    source_branch: str
+
+
+class GitWorkflowError(Exception):
+    """Custom exception for Git workflow errors."""
+
+
+async def run_cmd(*args: str, cwd: Optional[Path] = None) -> str:
+    """
+    Run a shell command asynchronously and return stdout.
+
+    Args:
+        *args: Command and arguments
+        cwd: Working directory (optional)
+
+    Returns:
+        Stripped stdout output
+
+    Raises:
+        GitWorkflowError: If command fails
+    """
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            args,
+            cwd=cwd or Path.cwd(),
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise GitWorkflowError(
+                f"Command failed: {' '.join(args)}\n"
+                f"stderr: {proc.stderr}\n"
+                f"stdout: {proc.stdout}"
+            )
+        return proc.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        raise GitWorkflowError(f"Command failed: {e}") from e
+    except FileNotFoundError as e:
+        raise GitWorkflowError(f"Command not found: {e}") from e
+
+
+def validate_git_repo(cwd: Path) -> None:
+    """Ensure current directory is a Git repository."""
+    if not (cwd / ".git").exists():
+        raise GitWorkflowError(f"Not a Git repository: {cwd}")
+
+
+async def create_feature_branch(
+    config: GitConfig,
+    branch_name: str,
+    cwd: Path = Path.cwd(),
+) -> str:
+    """
+    Create a new feature branch from the base branch.
+
+    Args:
+        config: Git configuration
+        branch_name: Name of feature branch (without prefix)
+        cwd: Working directory
+
+    Returns:
+        Full branch name (e.g., "feature/login")
+    """
+    validate_git_repo(cwd)
+    full_branch = f"{config.feature_prefix}{branch_name}"
+
+    try:
+        # Sync base branch
+        await run_cmd("git", "fetch", config.remote, config.base_branch, cwd=cwd)
+        await run_cmd(
+            "git", "checkout", f"{config.remote}/{config.base_branch}", cwd=cwd
+        )
+        await run_cmd("git", "checkout", "-b", full_branch, cwd=cwd)
+        logger.info("feature_branch_created", branch=full_branch)
+        return full_branch
+    except GitWorkflowError as e:
+        logger.error("feature_branch_creation_failed", error=str(e))
+        raise
+
+
+async def commit_all_changes(message: str, cwd: Path = Path.cwd()) -> None:
+    """
+    Stage and commit all tracked and untracked files.
+
+    Args:
+        message: Commit message
+        cwd: Working directory
+    """
+    validate_git_repo(cwd)
+    try:
+        await run_cmd("git", "add", ".", cwd=cwd)
+        await run_cmd("git", "commit", "-m", message, cwd=cwd)
+        logger.info("changes_committed", message=message)
+    except GitWorkflowError as e:
+        logger.error("commit_failed", error=str(e))
+        raise
+
+
+async def push_branch(
+    config: GitConfig,
+    branch: str,
+    force: bool = False,
+    cwd: Path = Path.cwd(),
+) -> None:
+    """
+    Push branch to remote.
+
+    ⚠️ force=True is *not allowed* per [CRITICAL] no-force-push rule.
+    If branch was rebased, the caller must handle differently.
+
+    Args:
+        config: Git configuration
+        branch: Branch name
+        force: Must be False (enforced)
+        cwd: Working directory
+
+    Raises:
+        GitWorkflowError: If force=True
+    """
+    if force:
+        raise GitWorkflowError("[FORBIDDEN] force=True is disallowed per no-force-push rule.")
+
+    validate_git_repo(cwd)
+    try:
+        await run_cmd("git", "push", config.remote, branch, cwd=cwd)
+        logger.info("branch_pushed", remote=config.remote, branch=branch)
+    except GitWorkflowError as e:
+        logger.error("push_failed", branch=branch, error=str(e))
+        raise
+
+
+async def create_merge_request(
+    config: MergeRequestConfig,
+    token: str,
+    api_url: str = "https://api.github.com",
+) -> dict:
+    """
+    Create a merge request via GitHub API.
+
+    Args:
+        config: Merge request details
+        token: GitHub personal access token (NOT hardcoded — passed securely)
+        api_url: API endpoint (default GitHub)
+
+    Returns:
+        Response JSON as dict
+
+    Raises:
+        GitWorkflowError: On HTTP errors or missing token
+    """
+    if not token:
+        raise GitWorkflowError("[SECURITY] GitHub token must be provided securely.")
+
+    import httpx  # type: ignore[import]
+
+    url = f"{api_url.rstrip('/')}/repos/{os.environ.get('GITHUB_REPOSITORY', '')}/pulls"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    payload = {
+        "title": config.title,
+        "head": config.source_branch,
+        "base": config.target_branch,
+        "body": config.description,
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            logger.info("merge_request_created", pr_number=result.get("number"))
+            return result
+    except httpx.HTTPStatusError as e:
+        logger.error("merge_request_creation_failed", status=e.response.status_code, error=str(e))
+        raise GitWorkflowError(f"MR creation failed: {e}") from e
+    except httpx.RequestError as e:
+        logger.error("network_error", error=str(e))
+        raise GitWorkflowError(f"Network error: {e}") from e
+
+
+async def main() -> None:
+    """
+    Run automated Git workflow:
+      1. Create feature branch
+      2. Commit changes
+      3. Push branch (safely, no force)
+      4. Create merge request
+    """
+    try:
+        # Load config from env or defaults
+        git_config = GitConfig(
+            remote=os.getenv("GIT_REMOTE", "origin"),
+            base_branch=os.getenv("GIT_BASE_BRANCH", "main"),
+            feature_prefix=os.getenv("GIT_FEATURE_PREFIX", "feature/"),
+        )
+        mr_config = MergeRequestConfig(
+            title=os.getenv("MR_TITLE", "WIP: Feature update"),
+            description=os.getenv("MR_DESCRIPTION", ""),
+            target_branch=os.getenv("MR_TARGET", "main"),
+            source_branch=os.getenv("MR_SOURCE", ""),
+        )
+
+        # Validate required MR fields
+        if not mr_config.source_branch:
+            raise GitWorkflowError("[CONFIG] MR_SOURCE environment variable required.")
+
+        cwd = Path.cwd()
+
+        # 1. Create feature branch
+        branch = await create_feature_branch(
+            config=git_config,
+            branch_name="my-new-feature",
+            cwd=cwd,
+        )
+
+        # 2. Commit changes (assumes staged changes exist — adjust as needed)
+        await commit_all_changes("feat: add new feature", cwd=cwd)
+
+        # 3. Push branch (NO force push allowed)
+        await push_branch(config=git_config, branch=branch, cwd=cwd)
+
+        # 4. Create MR
+        token = os.getenv("GITHUB_TOKEN")
+        if not token:
+            logger.warning("mr_skipped", reason="GITHUB_TOKEN not set")
+            return
+
+        mr_result = await create_merge_request(
+            config=mr_config,
+            token=token,
+            api_url=os.getenv("GITHUB_API_URL", "https://api.github.com"),
+        )
+        logger.info("workflow_completed", pr_url=mr_result.get("html_url"))
+
+    except GitWorkflowError as e:
+        logger.error("workflow_failed", error=str(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+---
+
+### 🔐 Security & Compliance Notes
+
+- ✅ **No `--force` or `--force-with-lease`**  
+  → Push fails with clear error if `force=True` is passed  
+  → Rebasing workflows must be handled via branch deletion + re-push (not implemented here per rule)
+
+- ✅ **No hardcoded secrets**  
+  → `GITHUB_TOKEN` and `GITHUB_REPOSITORY` must be set via environment variables
+
+- ✅ **No `print()`**  
+  → Uses `structlog` for all logging
+
+- ✅ **All I/O is async**  
+  → `run_cmd`, `create_merge_request`, etc. use `async def`
+
+- ✅ **Pydantic models**  
+  → `GitConfig`, `MergeRequestConfig`
+
+- ✅ **Error handling**  
+  → Custom `GitWorkflowError`, `try/except` on external calls
+
+---
+
+### 📝 Usage
+
+1. Set environment variables:
+   ```bash
+   export GITHUB_TOKEN=ghp_xxxxx
+   export GITHUB_REPOSITORY=owner/repo
+   export MR_TITLE="feat: add login"
+   export MR_SOURCE="feature/login"
+   ```
+
+2. Run:
+   ```bash
+   python git_workflow.py
+   ```
+
+Let me know if you want a GitHub Actions version or support for GitLab/Bitbucket APIs.

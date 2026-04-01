@@ -1,0 +1,134 @@
+```python
+import argparse
+import os
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import yaml
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+import structlog
+
+# Initialize structlog for logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+log = structlog.get_logger()
+
+
+class Config(BaseModel):
+    """Application configuration model."""
+    
+    app_name: str = Field("myapp", description="Application name")
+    debug: bool = Field(False, description="Enable debug mode")
+    database_url: str = Field("", description="Database connection URL")
+    log_level: str = Field("INFO", description="Logging level")
+    # Add other config fields as needed
+
+
+def load_yaml_config(file_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Load configuration from a YAML file.
+    
+    Args:
+        file_path: Path to the YAML configuration file.
+        
+    Returns:
+        Dictionary containing configuration values.
+    """
+    config: Dict[str, Any] = {}
+    
+    if file_path:
+        try:
+            path = Path(file_path)
+            if path.exists():
+                with open(path, "r", encoding="utf-8") as file:
+                    yaml_config = yaml.safe_load(file)
+                    if yaml_config:
+                        config.update(yaml_config)
+        except Exception as exc:
+            log.warning("yaml_load_failed", path=file_path, error=str(exc))
+    
+    return config
+
+
+def load_env_config() -> Dict[str, Any]:
+    """
+    Load configuration from environment variables.
+    
+    Returns:
+        Dictionary containing environment configuration values.
+    """
+    load_dotenv()
+    
+    config: Dict[str, Any] = {}
+    
+    # Map environment variables to config fields (uppercase with APP_ prefix)
+    env_prefix = "APP_"
+    for key, value in os.environ.items():
+        if key.startswith(env_prefix):
+            # Convert APP_DEBUG -> debug
+            config_key = key[len(env_prefix):].lower()
+            config[config_key] = value
+    
+    return config
+
+
+def parse_cli_args() -> Dict[str, Any]:
+    """
+    Parse command-line arguments for configuration.
+    
+    Returns:
+        Dictionary containing CLI configuration values.
+    """
+    parser = argparse.ArgumentParser(description="Application configuration")
+    
+    parser.add_argument(
+        "--app-name",
+        type=str,
+        help="Application name",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode",
+    )
+    parser.add_argument(
+        "--database-url",
+        type=str,
+        help="Database connection URL",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level",
+    )
+    
+    # Parse known args to avoid issues with unknown flags
+    args, _ = parser.parse_known_args()
+    
+    config: Dict[str, Any] = {}
+    
+    # Convert args to config dict, excluding None values
+    for key, value in vars(args).items():
+        if value is not None:
+            config[key.replace("-", "_")] = value
+    
+    return config
+
+
+def merge_configs(*configs: Dict[str, Any])

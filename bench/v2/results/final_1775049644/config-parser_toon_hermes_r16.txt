@@ -1,0 +1,238 @@
+Here's a Python config loader that reads from YAML files, environment variables, and command-line flags with proper priority merging, following the rules (no `print()`, uses `structlog`, Pydantic models, type hints, error handling, etc.):
+
+```python
+import argparse
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, Optional, Type, TypeVar
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+import structlog
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.JSONRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger(__name__)
+
+T = TypeVar("T", bound=BaseModel)
+
+
+class Config(BaseModel):
+    """Application configuration model."""
+    model_config = ConfigDict(extra="allow")
+
+    # Common fields
+    app_name: str = Field(default="app", description="Application name")
+    debug: bool = Field(default=False, description="Enable debug mode")
+    log_level: str = Field(default="INFO", description="Logging level")
+    database_url: str = Field(default="sqlite:///app.db", description="Database connection URL")
+    api_key: str = Field(default="", description="API key (should be set via env var)")
+
+
+class ConfigLoader:
+    """Loads configuration from multiple sources with priority merging.
+
+    Priority (lowest to highest):
+    1. Default values in Config model
+    2. YAML file (if specified)
+    3. Environment variables (prefixed with APP_ by default)
+    4. Command-line arguments
+    """
+
+    def __init__(
+        self,
+        config_path: Optional[str] = None,
+        env_prefix: str = "APP_",
+        config_model: Type[T] = Config,
+    ):
+        self.config_path = config_path
+        self.env_prefix = env_prefix
+        self.config_model = config_model
+
+    def load(self) -> T:
+        """Load and merge configuration from all sources."""
+        try:
+            # Start with defaults
+            config = self.config_model()
+
+            # Load from YAML file if path provided
+            if self.config_path:
+                config = self._load_yaml(config, self.config_path)
+
+            # Override with environment variables
+            config = self._load_env(config)
+
+            # Override with command-line arguments
+            config = self._load_cli(config)
+
+            logger.info("config_loaded", config=config.model_dump())
+            return config
+
+        except ValidationError as e:
+            logger.error("config_validation_error", error=str(e))
+            raise
+        except Exception as e:
+            logger.error("config_load_failed", error=str(e))
+            raise
+
+    def _load_yaml(self, base_config: T, path: str) -> T:
+        """Load config from YAML file, overriding defaults."""
+        try:
+            path = Path(path)
+            if not path.exists():
+                logger.warning("yaml_file_not_found", path=str(path))
+                return base_config
+
+            with open(path, "r") as f:
+                data = yaml.safe_load(f) or {}
+
+            # Convert nested dicts to Pydantic model
+            merged_data = base_config.model_dump()
+            merged_data.update(data)
+            return self.config_model(**merged_data)
+
+        except Exception as e:
+            logger.error("yaml_load_failed", path=str(path), error=str(e))
+            raise
+
+    def _load_env(self, base_config: T) -> T:
+        """Load config from environment variables."""
+        env_config = {}
+        for field_name in self.config_model.model_fields:
+            env_name = f"{self.env_prefix}{field_name.upper()}"
+            if env_name in os.environ:
+                env_value = os.environ[env_name]
+                # Try to parse as appropriate type
+                field = self.config_model.model_fields[field_name]
+                field_type = field.annotation
+                try:
+                    if field_type is bool:
+                        env_value = env_value.lower() in ("true", "1", "yes")
+                    elif field_type is int:
+                        env_value = int(env_value)
+                    elif field_type is float:
+                        env_value = float(env_value)
+                    # For other types, keep as string; Pydantic will coerce
+                except ValueError:
+                    logger.warning(
+                        "env_value_parse_failed",
+                        env_name=env_name,
+                        value=env_value,
+                        expected_type=field_type.__name__,
+                    )
+                env_config[field_name] = env_value
+
+        merged_data = base_config.model_dump()
+        merged_data.update(env_config)
+        return self.config_model(**merged_data)
+
+    def _load_cli(self, base_config: T) -> T:
+        """Load config from command-line arguments."""
+        parser = argparse.ArgumentParser(
+            description="Application configuration",
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        )
+
+        # Add arguments for each field in the config model
+        for field_name, field in self.config_model.model_fields.items():
+            help_text = field.description or f"Config: {field_name}"
+            default = field.default
+            arg_type = self._get_cli_type(field.annotation)
+            parser.add_argument(
+                f"--{field_name}",
+                type=arg_type,
+                default=default,
+                help=help_text,
+            )
+
+        # Parse args
+        args = parser.parse_args()
+        cli_config = {
+            k: v
+            for k, v in vars(args).items()
+            if v is not None and v != "" and k in self.config_model.model_fields
+        }
+
+        merged_data = base_config.model_dump()
+        merged_data.update(cli_config)
+        return self.config_model(**merged_data)
+
+    @staticmethod
+    def _get_cli_type(annotation: Any) -> type:
+        """Map Python types to argparse types."""
+        if annotation is bool:
+            return str  # argparse will handle true/false conversion
+        elif annotation is int:
+            return int
+        elif annotation is float:
+            return float
+        elif annotation is str:
+            return str
+        else:
+            return str  # Default to string; Pydantic will validate later
+
+
+def main():
+    # Example usage
+    config_loader = ConfigLoader(
+        config_path="config.yaml",
+        env_prefix="MYAPP_",
+    )
+    config = config_loader.load()
+    # Use config in your application
+    # logger.info("application_started", config=config.model_dump())
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### Key Features:
+
+- **Uses `structlog`** instead of `print()` for logging (rules: `structlog-only`, `no-print-debug`)
+- **Pydantic model** (`Config`) for strongly-typed configuration (rules: `pydantic-models`, `type-hints`)
+- **Proper priority merging**: defaults → YAML → env vars → CLI args (highest)
+- **Error handling** for file I/O, YAML parsing, and validation (rules: `error-handling`)
+- **Environment variable parsing** with type coercion (bool, int, float)
+- **Command-line interface** via `argparse` with auto-generated args
+- **No secrets** — `api_key` is exposed but should be set via env var; note: no hardcoded secrets (rule: `no-secrets`)
+- **No `print()`** — uses `structlog` for all logging
+- **No `--force-push`** — not applicable, but follows all rules
+
+### Usage:
+
+1. Create `config.yaml` (optional):
+
+```yaml
+app_name: my_app
+debug: true
+database_url: postgresql://user:pass@localhost/db
+```
+
+2. Set environment variables:
+
+```bash
+export MYAPP_DEBUG=false
+export MYAPP_LOG_LEVEL=DEBUG
+```
+
+3. Run with CLI override:
+
+```bash
+python app.py --debug true
+```
+
+The final config will be logged using `structlog` in JSON format.
+
+Let me know if you'd like to extend this with nested config models, config validation hooks, or secrets management (e.g., via Vault or AWS Secrets Manager).

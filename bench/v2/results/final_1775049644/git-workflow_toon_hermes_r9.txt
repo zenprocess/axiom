@@ -1,0 +1,352 @@
+I need to write a Python script that automates git workflows. However, according to rule `no-force-push` (critical), I **MUST NOT** use `git push --force`. So I need to avoid including force-push functionality.
+
+Also, I need to follow several other rules:
+- Use `structlog` for logging (not `print` or `logging`)
+- Use async I/O with `async def` for external calls
+- Use Pydantic models for data structures
+- Include type hints
+- Handle errors with try/except for external API calls
+- Include docstrings for public functions
+
+Let me create a robust script that follows these best practices.
+
+```python
+#!/usr/bin/env python3
+"""
+Git workflow automation script.
+
+This script automates common Git workflows including:
+- Creating feature branches from main
+- Committing staged changes
+- Pushing branches to remote
+- Creating merge requests via GitLab API
+
+NOTE: Force push is intentionally not implemented to prevent data loss and
+history rewriting issues as per security best practices.
+"""
+
+import asyncio
+import os
+import subprocess
+from typing import Optional
+
+import httpx
+from pydantic import BaseModel
+import structlog
+
+# Configure structlog
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+)
+logger = structlog.get_logger()
+
+
+class GitConfig(BaseModel):
+    """Configuration for Git operations."""
+    remote: str = "origin"
+    base_branch: str = "main"
+    branch_prefix: str = "feature/"
+
+
+class MergeRequestConfig(BaseModel):
+    """Configuration for merge request creation."""
+    api_url: str
+    project_id: str
+    token: str
+
+
+class GitWorkflowError(Exception):
+    """Custom exception for Git workflow errors."""
+    pass
+
+
+async def run_git_command(*args: str, cwd: Optional[str] = None) -> str:
+    """
+    Execute a Git command and return its output.
+
+    Args:
+        *args: Git command arguments
+        cwd: Working directory for the command
+
+    Returns:
+        Command output as a string
+
+    Raises:
+        GitWorkflowError: If command fails
+    """
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git"] + list(args),
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            check=True,
+        )
+        logger.info("git_command_executed", command=args, output=result.stdout.strip())
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        logger.error("git_command_failed", command=args, error=e.stderr.strip())
+        raise GitWorkflowError(f"Git command failed: {e.stderr.strip()}")
+
+
+async def get_current_branch() -> str:
+    """
+    Get the current Git branch name.
+
+    Returns:
+        Current branch name
+    """
+    return await run_git_command("rev-parse", "--abbrev-ref", "HEAD")
+
+
+async def create_feature_branch(feature_name: str, config: GitConfig) -> str:
+    """
+    Create a new feature branch from the base branch.
+
+    Args:
+        feature_name: Name for the feature branch (without prefix)
+        config: Git configuration
+
+    Returns:
+        Full branch name (with prefix)
+    """
+    current_branch = await get_current_branch()
+    if current_branch != config.base_branch:
+        logger.warning("not_on_base_branch", current=current_branch, expected=config.base_branch)
+        await run_git_command("checkout", config.base_branch)
+
+    # Update base branch first
+    logger.info("updating_base_branch", branch=config.base_branch)
+    await run_git_command("pull", config.remote, config.base_branch)
+
+    # Create feature branch
+    full_branch_name = f"{config.branch_prefix}{feature_name}"
+    logger.info("creating_feature_branch", branch=full_branch_name)
+    await run_git_command("checkout", "-b", full_branch_name)
+    
+    return full_branch_name
+
+
+async def commit_changes(message: str) -> None:
+    """
+    Commit staged changes with the provided message.
+
+    Args:
+        message: Commit message
+    """
+    logger.info("committing_changes", message=message)
+    await run_git_command("commit", "-m", message)
+
+
+async def push_branch(branch_name: str, config: GitConfig) -> None:
+    """
+    Push the branch to the remote repository.
+
+    Args:
+        branch_name: Name of the branch to push
+        config: Git configuration
+    """
+    logger.info("pushing_branch", branch=branch_name, remote=config.remote)
+    try:
+        await run_git_command("push", config.remote, branch_name)
+    except GitWorkflowError as e:
+        # Handle case where branch doesn't exist on remote yet
+        if "non-fast-forward updates were rejected" in str(e):
+            logger.warning("non_fast_forward_push_rejected", branch=branch_name)
+            raise GitWorkflowError(
+                "Remote branch exists with divergent history. "
+                "Please rebase locally and try again. Force push is not allowed."
+            ) from e
+        raise
+
+
+async def create_merge_request(
+    title: str,
+    description: str,
+    branch_name: str,
+    config: MergeRequestConfig,
+    target_branch: str = "main",
+) -> dict:
+    """
+    Create a merge request via GitLab API.
+
+    Args:
+        title: Title of the merge request
+        description: Description of the merge request
+        branch_name: Source branch name
+        config: Merge request configuration
+        target_branch: Target branch for the merge request
+
+    Returns:
+        Merge request data from API
+    """
+    url = f"{config.api_url}/projects/{config.project_id}/merge_requests"
+    headers = {"PRIVATE-TOKEN": config.token}
+    data = {
+        "title": title,
+        "description": description,
+        "source_branch": branch_name,
+        "target_branch": target_branch,
+        "remove_source_branch": True,
+    }
+
+    logger.info("creating_merge_request", url=url, branch=branch_name)
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, headers=headers, json=data)
+            response.raise_for_status()
+            mr_data = response.json()
+            logger.info("merge_request_created", mr_id=mr_data.get("iid"), url=mr_data.get("web_url"))
+            return mr_data
+    except httpx.HTTPStatusError as e:
+        logger.error("merge_request_creation_failed", status_code=e.response.status_code, error=e.response.text)
+        raise GitWorkflowError(f"Failed to create merge request: {e.response.text}") from e
+    except httpx.RequestError as e:
+        logger.error("merge_request_request_failed", error=str(e))
+        raise GitWorkflowError(f"Network error while creating merge request: {e}") from e
+
+
+async def main(
+    feature_name: str,
+    commit_message: str,
+    mr_title: str,
+    mr_description: str,
+    git_config: GitConfig,
+    mr_config: MergeRequestConfig,
+) -> dict:
+    """
+    Execute the complete Git workflow.
+
+    Args:
+        feature_name: Name for the feature branch
+        commit_message: Message for the commit
+        mr_title: Title for the merge request
+        mr_description: Description for the merge request
+        git_config: Git configuration
+        mr_config: Merge request configuration
+
+    Returns:
+        Merge request data
+    """
+    logger.info("starting_git_workflow", feature=feature_name)
+
+    try:
+        # Create feature branch
+        branch_name = await create_feature_branch(feature_name, git_config)
+        
+        # Commit changes (assuming changes are already staged)
+        await commit_changes(commit_message)
+        
+        # Push branch
+        await push_branch(branch_name, git_config)
+        
+        # Create merge request
+        mr_data = await create_merge_request(
+            title=mr_title,
+            description=mr_description,
+            branch_name=branch_name,
+            config=mr_config,
+            target_branch=git_config.base_branch,
+        )
+        
+        logger.info("git_workflow_completed", branch=branch_name, mr_id=mr_data.get("iid"))
+        return mr_data
+        
+    except GitWorkflowError as e:
+        logger.error("git_workflow_failed", error=str(e))
+        raise
+    except Exception as e:
+        logger.error("unexpected_error", error=str(e))
+        raise
+
+
+if __name__ == "__main__":
+    import sys
+    
+    # Example usage with configuration
+    git_config = GitConfig(
+        remote="origin",
+        base_branch="main",
+        branch_prefix="feature/"
+    )
+    
+    mr_config = MergeRequestConfig(
+        api_url=os.getenv("GITLAB_API_URL", "https://gitlab.com/api/v4"),
+        project_id=os.getenv("GITLAB_PROJECT_ID", "your-project-id"),
+        token=os.getenv("GITLAB_TOKEN", "")
+    )
+    
+    # Check for required environment variables
+    if not mr_config.token:
+        logger.error("missing_gitlab_token")
+        sys.exit(1)
+    
+    # Parse command line arguments
+    if len(sys.argv) < 5:
+        logger.error(
+            "missing_arguments",
+            usage="python git_workflow.py <feature_name> <commit_message> <mr_title> <mr_description>"
+        )
+        sys.exit(1)
+    
+    feature_name = sys.argv[1]
+    commit_message = sys.argv[2]
+    mr_title = sys.argv[3]
+    mr_description = sys.argv[4]
+    
+    try:
+        asyncio.run(
+            main(
+                feature_name=feature_name,
+                commit_message=commit_message,
+                mr_title=mr_title,
+                mr_description=mr_description,
+                git_config=git_config,
+                mr_config=mr_config,
+            )
+        )
+    except GitWorkflowError as e:
+        logger.error("workflow_failed", error=str(e))
+        sys.exit(1)
+```
+
+Key features of this implementation:
+
+1. **Security Compliant**:
+   - Does not use `git push --force` (critical rule)
+   - No hardcoded API keys or tokens
+   - Uses environment variables for sensitive data
+
+2. **Architecture Best Practices**:
+   - Uses `structlog` for logging (no `print` or `logging`)
+   - All I/O operations use `async def` with proper async handling
+   - Uses Pydantic models for configuration and data structures
+   - Includes comprehensive type hints
+   - Implements proper error handling with try/except blocks
+
+3. **Documentation**:
+   - Includes docstrings for all public functions
+   - Clear function descriptions and parameter documentation
+
+4. **Robustness**:
+   - Handles common Git workflow issues (like divergent branches)
+   - Provides clear error messages and logging
+   - Validates required environment variables
+
+To use this script:
+
+1. Set environment variables:
+   ```bash
+   export GITLAB_API_URL="https://gitlab.com/api/v4"
+   export GITLAB_PROJECT_ID="your-project-id"
+   export GITLAB_TOKEN="your-personal-access-token"
+   ```
+
+2. Run the script:
+   ```bash
+   python git_workflow.py "my-feature" "Add new feature" "Feature: My Feature" "Description of the feature"
+   ```
+
+The script follows Git best practices by avoiding force pushes, which helps maintain a clean, traceable Git history.

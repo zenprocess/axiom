@@ -1,0 +1,166 @@
+```python
+import argparse
+import os
+from pathlib import Path
+from typing import Any
+
+import structlog
+import yaml
+from pydantic import BaseModel, BaseSettings, Field
+
+log = structlog.get_logger()
+
+
+class DatabaseConfig(BaseModel):
+    host: str = Field(default="localhost")
+    port: int = Field(default=5432)
+    name: str = Field(default="app_db")
+    user: str = Field(default="postgres")
+    password: str = Field(default="")
+
+
+class AppConfig(BaseModel):
+    debug: bool = Field(default=False)
+    log_level: str = Field(default="INFO")
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+
+
+def load_yaml_config(file_path: Path) -> dict[str, Any]:
+    """Load configuration from a YAML file."""
+    if not file_path.exists():
+        return {}
+    
+    with open(file_path, "r") as f:
+        try:
+            return yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            log.warning("yaml_load_failed", path=str(file_path), error=str(e))
+            return {}
+
+
+def load_env_config() -> dict[str, Any]:
+    """Load configuration from environment variables."""
+    config = {}
+    
+    # Simple environment variable mapping
+    if os.getenv("APP_DEBUG"):
+        config["debug"] = os.getenv("APP_DEBUG").lower() == "true"
+    if os.getenv("APP_LOG_LEVEL"):
+        config["log_level"] = os.getenv("APP_LOG_LEVEL")
+    
+    # Nested database config from environment variables
+    db_config = {}
+    if os.getenv("DB_HOST"):
+        db_config["host"] = os.getenv("DB_HOST")
+    if os.getenv("DB_PORT"):
+        try:
+            db_config["port"] = int(os.getenv("DB_PORT"))
+        except ValueError:
+            pass
+    if os.getenv("DB_NAME"):
+        db_config["name"] = os.getenv("DB_NAME")
+    if os.getenv("DB_USER"):
+        db_config["user"] = os.getenv("DB_USER")
+    if os.getenv("DB_PASSWORD"):
+        db_config["password"] = os.getenv("DB_PASSWORD")
+    
+    if db_config:
+        config["database"] = db_config
+    
+    return config
+
+
+def parse_cli_args() -> dict[str, Any]:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description="Application configuration")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--log-level", type=str, help="Logging level (DEBUG, INFO, WARNING, ERROR)")
+    parser.add_argument("--db-host", type=str, help="Database host")
+    parser.add_argument("--db-port", type=int, help="Database port")
+    parser.add_argument("--db-name", type=str, help="Database name")
+    parser.add_argument("--db-user", type=str, help="Database user")
+    parser.add_argument("--db-password", type=str, help="Database password")
+    
+    args = parser.parse_args()
+    
+    config = {}
+    if args.debug:
+        config["debug"] = True
+    if args.log_level:
+        config["log_level"] = args.log_level
+    
+    db_config = {}
+    if args.db_host:
+        db_config["host"] = args.db_host
+    if args.db_port:
+        db_config["port"] = args.db_port
+    if args.db_name:
+        db_config["name"] = args.db_name
+    if args.db_user:
+        db_config["user"] = args.db_user
+    if args.db_password:
+        db_config["password"] = args.db_password
+    
+    if db_config:
+        config["database"] = db_config
+    
+    return config
+
+
+def deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge two dictionaries, with override taking precedence."""
+    result = base.copy()
+    
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    
+    return result
+
+
+def load_config(yaml_path: Path = Path("config.yaml")) -> AppConfig:
+    """Load configuration from multiple sources with priority merging."""
+    # Priority order (lowest to highest): YAML file → Environment variables → CLI args
+    yaml_config = load_yaml_config(yaml_path)
+    env_config = load_env_config()
+    cli_config = parse_cli_args()
+    
+    # Merge configurations
+    merged_config = deep_merge(yaml_config, env_config)
+    merged_config = deep_merge(merged_config, cli_config)
+    
+    # Validate and create Pydantic model
+    try:
+        config = AppConfig(**merged_config)
+    except Exception as e:
+        log.error("config_validation_failed", error=str(e))
+        raise
+    
+    # Log the final configuration (without sensitive data)
+    safe_config = config.dict()
+    if safe_config.get("database", {}).get("password"):
+        safe_config["database"]["password"] = "***"
+    
+    log.info("config_loaded", config=safe_config)
+    
+    return config
+```
+
+This implementation follows your rules:
+
+1. Uses `structlog` for all logging (no print statements)
+2. Uses Pydantic models for all data structures
+3. All functions that might interact with external sources (file I/O, environment, CLI) are properly structured
+4. Includes type hints for all functions
+5. Proper error handling for file loading and validation
+6. Uses a safe, recursive merge strategy for configuration layers
+7. Avoids printing sensitive information in logs
+
+The configuration sources are merged with the following priority (highest to lowest):
+1. Command-line arguments
+2. Environment variables
+3. YAML configuration file
+
+The final config is logged safely (with passwords masked) for debugging purposes.

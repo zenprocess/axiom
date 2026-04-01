@@ -1,0 +1,127 @@
+```python
+"""
+User management system data models and utilities.
+
+This module provides Pydantic models for User, Role, and Permission entities,
+along with a function to fetch users from a database URL.
+"""
+
+import httpx
+from typing import List, Optional
+from datetime import datetime
+from pydantic import BaseModel, EmailStr, validator, Field
+import structlog
+
+# Configure structlog
+logger = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """
+    Represents a permission in the system.
+    
+    Attributes:
+        id: Unique identifier for the permission
+        name: Name of the permission (e.g., "read_users", "create_post")
+        description: Human-readable description of the permission
+        created_at: When the permission was created
+    """
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(default=None, max_length=200)
+    created_at: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """
+    Represents a role in the system.
+    
+    Attributes:
+        id: Unique identifier for the role
+        name: Name of the role (e.g., "admin", "editor")
+        description: Human-readable description of the role
+        permissions: List of permissions assigned to this role
+        created_at: When the role was created
+    """
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(default=None, max_length=200)
+    permissions: List[Permission] = []
+    created_at: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """
+    Represents a user in the system.
+    
+    Attributes:
+        id: Unique identifier for the user
+        email: User's email address (validated as proper email format)
+        username: User's username
+        full_name: User's full name
+        role: Role assigned to the user
+        is_active: Whether the user account is active
+        created_at: When the user was created
+        updated_at: When the user was last updated
+    """
+    id: int
+    email: EmailStr
+    username: str = Field(..., min_length=3, max_length=50)
+    full_name: Optional[str] = Field(default=None, max_length=100)
+    role: Optional[Role] = None
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True
+
+    @validator('username')
+    def username_alphanumeric(cls, v):
+        """Validate that username contains only alphanumeric characters and underscores."""
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username must contain only alphanumeric characters and underscores')
+        return v
+
+
+async def fetch_users(database_url: str, timeout: float = 30.0) -> List[User]:
+    """
+    Fetch users from a database API endpoint.
+    
+    Args:
+        database_url: URL of the database API endpoint that returns users
+        timeout: Request timeout in seconds
+        
+    Returns:
+        List of User objects
+        
+    Raises:
+        httpx.HTTPError: If the HTTP request fails
+        ValueError: If the response data fails validation
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url, timeout=timeout)
+            response.raise_for_status()
+            
+            users_data = response.json()
+            
+            # Validate and convert to User models
+            users = [User.parse_obj(user_data) for user_data in users_data]
+            
+            logger.info("users_fetched", count=len(users), url=database_url)
+            return users
+            
+    except httpx.HTTPError as exc:
+        logger.error("http_error", url=database_url, error=str(exc))
+        raise
+    except Exception as exc:
+        logger.error("validation_error", url=database_url, error=str(exc))
+        raise ValueError(f"Failed to validate user data: {exc}")
+```

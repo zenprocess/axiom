@@ -1,0 +1,450 @@
+I'll create a Python script for automating git workflows that follows all the specified development rules.
+
+```python
+#!/usr/bin/env python3
+"""
+Git Workflow Automation Script
+
+This script automates common git workflows including:
+- Creating feature branches
+- Committing changes
+- Pushing to remote
+- Creating merge requests
+- Handling rebased branches (with safe alternatives to force-push)
+
+IMPORTANT: This script uses safe alternatives to force-push as per development rules.
+Force-pushing (git push --force) is prohibited as it can destroy other developers' work.
+Instead, this script uses git push --force-with-lease for rebased branches, which is safer.
+"""
+
+import asyncio
+import os
+import shlex
+import sys
+from pathlib import Path
+from typing import Optional
+
+import structlog
+from pydantic import BaseModel, Field, field_validator
+
+# Configure structlog for structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.dev.ConsoleRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+log = structlog.get_logger()
+
+
+class GitConfig(BaseModel):
+    """Configuration for git operations."""
+    remote: str = "origin"
+    base_branch: str = "main"
+    branch_prefix: str = "feature/"
+    commit_message: str = "Automated commit"
+    mr_title: str = "Automated merge request"
+    mr_description: str = "This merge request was automatically created"
+    
+    @field_validator("branch_prefix")
+    @classmethod
+    def validate_branch_prefix(cls, v: str) -> str:
+        """Ensure branch prefix ends with slash."""
+        if not v.endswith("/"):
+            return v + "/"
+        return v
+
+
+class GitWorkflow:
+    """Handles git workflow automation with safe practices."""
+    
+    def __init__(self, config: Optional[GitConfig] = None):
+        """Initialize the GitWorkflow with configuration."""
+        self.config = config or GitConfig()
+        self.base_path = Path.cwd()
+    
+    async def run_command(self, command: list[str], cwd: Optional[Path] = None) -> tuple[int, str, str]:
+        """
+        Execute a shell command asynchronously.
+        
+        Args:
+            command: List of command arguments
+            cwd: Working directory (defaults to base_path)
+            
+        Returns:
+            Tuple of (return_code, stdout, stderr)
+        """
+        import subprocess
+        
+        cwd = cwd or self.base_path
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            
+            stdout, stderr = await process.communicate()
+            return (
+                process.returncode or 0,
+                stdout.decode("utf-8").strip(),
+                stderr.decode("utf-8").strip(),
+            )
+        except FileNotFoundError:
+            log.error("command_not_found", command=command[0])
+            raise
+        except Exception as e:
+            log.error("command_execution_failed", command=command, error=str(e))
+            raise
+    
+    async def get_current_branch(self) -> str:
+        """Get the current git branch name."""
+        return_code, stdout, stderr = await self.run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        
+        if return_code != 0:
+            log.error("git_failed_to_get_branch", error=stderr)
+            raise RuntimeError(f"Failed to get current branch: {stderr}")
+        
+        return stdout
+    
+    async def is_git_repo(self) -> bool:
+        """Check if current directory is a git repository."""
+        return_code, _, _ = await self.run_command(["git", "rev-parse", "--is-inside-work-tree"])
+        return return_code == 0
+    
+    async def create_branch(self, branch_name: str, base_branch: Optional[str] = None) -> None:
+        """
+        Create a new feature branch from the specified base branch.
+        
+        Args:
+            branch_name: Name of the new branch (without prefix)
+            base_branch: Base branch to create from (defaults to config base_branch)
+        """
+        if not await self.is_git_repo():
+            log.error("not_a_git_repository")
+            raise RuntimeError("Current directory is not a git repository")
+        
+        base = base_branch or self.config.base_branch
+        full_branch_name = f"{self.config.branch_prefix}{branch_name}"
+        
+        log.info("creating_branch", branch=full_branch_name, base=base)
+        
+        # Checkout base branch first
+        return_code, _, stderr = await self.run_command(["git", "checkout", base])
+        if return_code != 0:
+            log.error("git_checkout_failed", branch=base, error=stderr)
+            raise RuntimeError(f"Failed to checkout base branch {base}: {stderr}")
+        
+        # Create and checkout new branch
+        return_code, _, stderr = await self.run_command(["git", "checkout", "-b", full_branch_name])
+        if return_code != 0:
+            log.error("git_create_branch_failed", branch=full_branch_name, error=stderr)
+            raise RuntimeError(f"Failed to create branch {full_branch_name}: {stderr}")
+        
+        log.info("branch_created", branch=full_branch_name)
+    
+    async def stage_all_changes(self) -> None:
+        """Stage all changes in the working directory."""
+        log.info("staging_all_changes")
+        return_code, _, stderr = await self.run_command(["git", "add", "."])
+        
+        if return_code != 0:
+            log.error("git_add_failed", error=stderr)
+            raise RuntimeError(f"Failed to stage changes: {stderr}")
+        
+        log.info("changes_staged")
+    
+    async def commit_changes(self, message: Optional[str] = None) -> None:
+        """
+        Commit staged changes.
+        
+        Args:
+            message: Commit message (defaults to config commit_message)
+        """
+        commit_msg = message or self.config.commit_message
+        
+        log.info("committing_changes", message=commit_msg)
+        
+        # Check if there are any changes to commit
+        return_code, status_output, _ = await self.run_command(["git", "status", "--porcelain"])
+        if return_code != 0 or not status_output.strip():
+            log.info("no_changes_to_commit")
+            return
+        
+        return_code, _, stderr = await self.run_command(["git", "commit", "-m", commit_msg])
+        
+        if return_code != 0:
+            log.error("git_commit_failed", error=stderr)
+            raise RuntimeError(f"Failed to commit changes: {stderr}")
+        
+        log.info("changes_committed")
+    
+    async def push_branch(self, branch_name: Optional[str] = None, force: bool = False) -> None:
+        """
+        Push branch to remote repository.
+        
+        Args:
+            branch_name: Branch to push (defaults to current branch)
+            force: Use safe force-with-lease instead of force-push
+        """
+        branch = branch_name or await self.get_current_branch()
+        
+        log.info("pushing_branch", branch=branch, remote=self.config.remote)
+        
+        if force:
+            log.warning("using_safe_force_push", branch=branch)
+            # Use --force-with-lease as per development rules instead of --force
+            command = ["git", "push", "--force-with-lease", self.config.remote, branch]
+        else:
+            command = ["git", "push", self.config.remote, branch]
+        
+        return_code, stdout, stderr = await self.run_command(command)
+        
+        if return_code != 0:
+            log.error("git_push_failed", branch=branch, error=stderr)
+            raise RuntimeError(f"Failed to push branch {branch}: {stderr}")
+        
+        log.info("branch_pushed", branch=branch, output=stdout)
+    
+    async def get_last_commit_hash(self) -> str:
+        """Get the hash of the last commit."""
+        return_code, stdout, stderr = await self.run_command(["git", "rev-parse", "HEAD"])
+        
+        if return_code != 0:
+            log.error("git_failed_to_get_commit_hash", error=stderr)
+            raise RuntimeError(f"Failed to get last commit hash: {stderr}")
+        
+        return stdout
+    
+    async def rebase_on_base(self, base_branch: Optional[str] = None) -> None:
+        """
+        Rebase current branch onto the base branch.
+        
+        Args:
+            base_branch: Base branch to rebase onto (defaults to config base_branch)
+        """
+        base = base_branch or self.config.base_branch
+        current_branch = await self.get_current_branch()
+        
+        log.info("rebasing_branch", branch=current_branch, onto=base)
+        
+        # Fetch latest changes from remote
+        return_code, _, stderr = await self.run_command(["git", "fetch", self.config.remote])
+        if return_code != 0:
+            log.error("git_fetch_failed", error=stderr)
+            raise RuntimeError(f"Failed to fetch latest changes: {stderr}")
+        
+        # Rebase onto base branch
+        return_code, _, stderr = await self.run_command(["git", "rebase", f"{self.config.remote}/{base}"])
+        
+        if return_code != 0:
+            log.error("git_rebase_failed", error=stderr)
+            raise RuntimeError(f"Rebase failed: {stderr}")
+        
+        log.info("rebase_completed", branch=current_branch, onto=base)
+    
+    async def create_merge_request(
+        self,
+        branch_name: Optional[str] = None,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> str:
+        """
+        Create a merge request (GitHub/GitLab).
+        
+        Note: This is a placeholder implementation. In production, you would
+        integrate with GitHub API, GitLab API, or similar service.
+        
+        Args:
+            branch_name: Source branch (defaults to current branch)
+            title: MR title (defaults to config mr_title)
+            description: MR description (defaults to config mr_description)
+            
+        Returns:
+            MR URL or identifier (placeholder for now)
+        """
+        branch = branch_name or await self.get_current_branch()
+        mr_title = title or self.config.mr_title
+        mr_description = description or self.config.mr_description
+        
+        log.info("creating_merge_request", branch=branch, title=mr_title)
+        
+        # Placeholder implementation - in production, integrate with:
+        # - GitHub API: https://docs.github.com/en/rest/pulls/pulls
+        # - GitLab API: https://docs.gitlab.com/ee/api/merge_requests.html
+        # - Bitbucket API: https://developer.atlassian.com/cloud/bitbucket/rest/
+        
+        # For demonstration, we'll simulate the creation
+        mr_url = f"https://example.com/merge-request/{branch.replace('/', '-')}"
+        
+        log.info("merge_request_created", url=mr_url, branch=branch, title=mr_title)
+        
+        return mr_url
+
+
+async def main():
+    """Main entry point for the git workflow automation."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Automate git workflows: create branches, commit, push, and create merge requests"
+    )
+    parser.add_argument(
+        "action",
+        choices=["branch", "commit", "push", "rebase", "mr", "full"],
+        help="Action to perform: branch (create), commit, push, rebase, mr (merge request), full (complete workflow)",
+    )
+    parser.add_argument("--branch", "-b", help="Branch name (without prefix)")
+    parser.add_argument("--message", "-m", help="Commit message")
+    parser.add_argument("--title", "-t", help="Merge request title")
+    parser.add_argument("--description", "-d", help="Merge request description")
+    parser.add_argument("--force", action="store_true", help="Use safe force-with-lease for push (for rebased branches)")
+    parser.add_argument("--base", "-B", help="Base branch (default: main)")
+    parser.add_argument("--prefix", "-p", help="Branch prefix (default: feature/)")
+    parser.add_argument("--remote", "-r", help="Remote name (default: origin)")
+    
+    args = parser.parse_args()
+    
+    # Configure logging
+    log_level = os.environ.get("LOG_LEVEL", "INFO")
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.add_log_level,
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+            structlog.dev.ConsoleRenderer(colors=True),
+        ],
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+    
+    # Create config from arguments
+    config = GitConfig()
+    if args.base:
+        config.base_branch = args.base
+    if args.prefix:
+        config.branch_prefix = args.prefix
+    if args.remote:
+        config.remote = args.remote
+    
+    workflow = GitWorkflow(config)
+    
+    try:
+        if args.action == "branch":
+            if not args.branch:
+                log.error("branch_name_required")
+                sys.exit(1)
+            await workflow.create_branch(args.branch)
+            
+        elif args.action == "commit":
+            await workflow.stage_all_changes()
+            await workflow.commit_changes(args.message)
+            
+        elif args.action == "push":
+            await workflow.push_branch(args.branch, force=args.force)
+            
+        elif args.action == "rebase":
+            await workflow.rebase_on_base(args.base)
+            # After rebase, push with safe force-with-lease
+            await workflow.push_branch(args.branch, force=True)
+            
+        elif args.action == "mr":
+            mr_url = await workflow.create_merge_request(args.branch, args.title, args.description)
+            log.info("merge_request_url", url=mr_url)
+            
+        elif args.action == "full":
+            if not args.branch:
+                log.error("branch_name_required")
+                sys.exit(1)
+            
+            # Create branch
+            await workflow.create_branch(args.branch)
+            
+            # Stage and commit changes
+            await workflow.stage_all_changes()
+            await workflow.commit_changes(args.message)
+            
+            # Push branch
+            await workflow.push_branch(args.branch)
+            
+            # Create merge request
+            mr_url = await workflow.create_merge_request(args.branch, args.title, args.description)
+            log.info("merge_request_url", url=mr_url)
+            
+        else:
+            parser.print_help()
+            
+    except Exception as e:
+        log.error("workflow_failed", error=str(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## Key Features and Safety Measures
+
+1. **No Force Push**: As per development rules, the script uses `--force-with-lease` instead of `--force` for rebased branches, which is safer and prevents overwriting other developers' work.
+
+2. **Async I/O**: All git operations use `async def` and `asyncio.create_subprocess_exec` to avoid blocking the event loop.
+
+3. **Structured Logging**: Uses `structlog` for all logging instead of print statements or the standard logging module.
+
+4. **Pydantic Models**: Uses Pydantic `BaseModel` for configuration to provide validation and clear schema.
+
+5. **Error Handling**: All external git commands are wrapped in try/except blocks with proper error logging.
+
+6. **Type Hints**: All functions have proper type annotations.
+
+7. **Documentation**: Includes comprehensive docstrings following Google-style format.
+
+## Usage Examples
+
+```bash
+# Create a new feature branch
+python git_workflow.py branch my-feature
+
+# Stage and commit all changes
+python git_workflow.py commit --message "Add new feature"
+
+# Push branch to remote
+python git_workflow.py push
+
+# Rebase and push (uses safe force-with-lease)
+python git_workflow.py rebase
+
+# Create merge request
+python git_workflow.py mr --title "Add new feature" --description "Implements cool functionality"
+
+# Complete workflow (branch → commit → push → MR)
+python git_workflow.py full my-feature --message "Initial commit" --title "Add new feature"
+
+# With custom options
+python git_workflow.py full my-feature --base develop --prefix feature/ --remote upstream
+```
+
+## Environment Variables
+
+- `LOG_LEVEL`: Set logging level (DEBUG, INFO, WARNING, ERROR)
+
+## Production Integration
+
+For production use, you would extend the `create_merge_request` method to integrate with:
+- GitHub API: https://docs.github.com/en/rest/pulls/pulls
+- GitLab API: https://docs.gitlab.com/ee/api/merge_requests.html
+- Bitbucket API: https://developer.atlassian.com/cloud/bitbucket/rest/
+
+The script is designed to be easily extensible for these integrations.

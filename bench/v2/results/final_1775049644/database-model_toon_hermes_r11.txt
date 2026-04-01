@@ -1,0 +1,110 @@
+```python
+"""User management data models and utilities."""
+
+from typing import List, Optional
+from enum import Enum
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, validator, root_validator
+
+logger = structlog.get_logger()
+
+
+class Permission(Enum):
+    """Available permissions in the system."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Role(BaseModel):
+    """Represents a role with associated permissions."""
+    id: int
+    name: str
+    permissions: List[Permission]
+    
+    @validator('name')
+    def name_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError('Role name cannot be empty')
+        return v.strip()
+    
+    class Config:
+        use_enum_values = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    email: EmailStr
+    username: str
+    role_id: int
+    is_active: bool = True
+    full_name: Optional[str] = None
+    
+    @validator('username')
+    def username_must_be_valid(cls, v: str) -> str:
+        if not v or len(v) < 3:
+            raise ValueError('Username must be at least 3 characters')
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username can only contain alphanumeric characters and underscores')
+        return v
+    
+    @validator('full_name')
+    def full_name_must_be_valid(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and len(v.strip()) > 100:
+            raise ValueError('Full name cannot exceed 100 characters')
+        return v.strip() if v else None
+
+
+class UserResponse(BaseModel):
+    """Response model for user operations."""
+    success: bool
+    users: List[User]
+    total: int
+
+
+async def fetch_users(db_url: str) -> UserResponse:
+    """
+    Fetch users from a database URL.
+    
+    Args:
+        db_url: URL endpoint to fetch users from
+        
+    Returns:
+        UserResponse containing the fetched users
+        
+    Raises:
+        httpx.HTTPError: If the HTTP request fails
+        ValueError: If the response format is invalid
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(db_url)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if not isinstance(data, dict):
+                raise ValueError("Invalid response format: expected JSON object")
+            
+            users_data = data.get("users", [])
+            if not isinstance(users_data, list):
+                raise ValueError("Invalid response format: 'users' field must be an array")
+            
+            users = [User.parse_obj(user_data) for user_data in users_data]
+            
+            return UserResponse(
+                success=True,
+                users=users,
+                total=len(users)
+            )
+            
+    except httpx.HTTPError as exc:
+        logger.error("http_error", url=db_url, error=str(exc))
+        raise
+    except (ValueError, KeyError) as exc:
+        logger.error("validation_error", url=db_url, error=str(exc))
+        raise
+```

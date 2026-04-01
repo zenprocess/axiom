@@ -1,4 +1,4 @@
-# Axiom Specification v0.3.0
+# Axiom Specification v0.4.0
 
 ## 1. Overview
 
@@ -232,6 +232,7 @@ Axiom rules can be authored as markdown files with YAML frontmatter. This is the
 ```yaml
 ---
 id: no-force-push
+description: Prevent force-push to protected branches
 category: governance
 domain: Git
 effect: forbid
@@ -239,14 +240,17 @@ priority: critical
 activation: always
 roles: [agent, reviewer]
 globs: ["*.sh", "Makefile"]
+paths: ["*.sh", "Makefile"]
 trigger: push --force
 condition: branch:main
+when_to_use: When reviewing or executing git push commands
 ---
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `id` | string | No (derived from filename if absent) | Stable kebab-case identifier |
+| `description` | string | No | One-line summary of the rule. Used for rule selectors and summaries. |
 | `category` | string | No (defaults to `governance`) | Target Axiom section |
 | `domain` | string | No | Scope: `Git`, `Python`, `Bash`, etc. |
 | `effect` | enum | No (defaults to `inform`) | `allow`, `forbid`, `prefer`, `discourage`, `inform` |
@@ -254,16 +258,21 @@ condition: branch:main
 | `activation` | string | No | `always`, `on-demand`, or cron expression |
 | `roles` | list[string] | No | Agent roles this rule applies to |
 | `globs` | list[string] | No | File patterns that scope the rule |
+| `paths` | list[string] | No | Alias for `globs`. File glob patterns that scope the rule. |
 | `trigger` | string | No | Pattern or command that activates the rule |
 | `condition` | string | No | Narrowing predicate |
+| `when_to_use` | string | No | Hint for model-driven invocation. Signals task-match activation. |
 
 All fields are optional. The body text (after the frontmatter) becomes the `message` field.
+
+**`paths` / `globs` aliasing:** Both fields accept the same glob pattern syntax. When both are present, compilers MUST merge them (union, deduplicated). Compilers SHOULD normalize to `globs` in compiled output.
 
 ### 12.2 Complete Example
 
 ```markdown
 ---
 id: no-force-push
+description: Prevent force-push to protected branches
 category: governance
 domain: Git
 effect: forbid
@@ -271,12 +280,37 @@ priority: critical
 trigger: push --force
 condition: branch:main
 roles: [agent]
+globs: ["*.sh"]
+when_to_use: When reviewing or executing git push commands
 ---
 Never use `git push --force`. It rewrites remote history and can destroy
 other contributors' work. Use `--force-with-lease` instead.
 ```
 
-### 12.3 Compilation Relationship
+### 12.3 Claude Code Compatibility
+
+Any `.claude/rules/*.md` file with Claude Code frontmatter is valid Axiom source. Claude Code uses three frontmatter fields:
+
+| CC Field | Axiom Equivalent | Notes |
+|----------|-----------------|-------|
+| `description` | `description` | Direct match. One-line rule summary. |
+| `paths` | `globs` (alias: `paths`) | Axiom accepts `paths` as an alias for `globs`. |
+| `when_to_use` | `when_to_use` | Direct match. Model-driven invocation hint. |
+
+A CC rule file like:
+
+```markdown
+---
+description: Coding standards for Python files
+paths: ["**/*.py"]
+when_to_use: When writing or modifying Python code
+---
+Use type hints on all function signatures.
+```
+
+compiles without modification. The compiler treats `description` as metadata, maps `paths` to `globs`, carries `when_to_use` as an activation signal, infers `effect: inform` and `priority: medium` from defaults, and uses the body as `message`.
+
+### 12.4 Compilation Relationship
 
 ```
 .claude/rules/*.md  →  Axiom compiler  →  compiled.axiom (TOON)
@@ -439,4 +473,4 @@ An MCP server exposing Axiom resources declares them as standard MCP resources:
 
 ## 17. Versioning
 
-This specification is versioned using semantic versioning. The current version is `0.3.0`. The version is not embedded in the file format; it is tracked by the specification document.
+This specification is versioned using semantic versioning. The current version is `0.4.0`. The version is not embedded in the file format; it is tracked by the specification document.

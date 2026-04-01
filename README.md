@@ -55,18 +55,23 @@ value1,value2,value3,...
 
 ## Source Format
 
-Rules are authored as markdown with YAML frontmatter:
+Rules are authored as markdown with YAML frontmatter. Axiom's frontmatter is a superset of Claude Code's `description`/`paths`/`when_to_use` fields, so `.claude/rules/*.md` files work with both CC and Axiom without modification.
 
 ```markdown
 ---
 id: no-force-push
+description: Prevent force-push to protected branches
 category: governance
 effect: forbid
 priority: critical
 trigger: push --force
+globs: ["*.sh"]
+when_to_use: When reviewing or executing git push commands
 ---
 Never use `git push --force`. Use `--force-with-lease` instead.
 ```
+
+`paths` is accepted as an alias for `globs` (CC compatibility).
 
 ## Pressure Zones
 

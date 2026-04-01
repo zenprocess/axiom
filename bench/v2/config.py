@@ -4,12 +4,16 @@ from __future__ import annotations
 
 FORMATS: list[str] = ["markdown", "toon", "cacp"]
 
-MODELS: list[str] = ["sonnet", "opus"]
+MODELS: list[str] = ["sonnet", "opus", "hermes"]
 
 MODEL_IDS: dict[str, str] = {
     "sonnet": "claude-sonnet-4-6",
     "opus": "claude-opus-4-6",
+    "hermes": "qwen3-coder",
 }
+
+VLLM_ENDPOINT: str = "http://ai.zp.digital:8000"
+HERMES_ENGINE: str = "/home/vvladescu/orchestrator/zendispatcher/hermes-engine.py"
 
 RUNS_PER_CELL: int = 5
 
@@ -30,13 +34,13 @@ PHASES: dict[str, dict] = {
         "runs": 4,
     },
     "final": {
-        "description": "Full dual-model experiment",
-        "models": ["sonnet", "opus"],
+        "description": "Full multi-model experiment",
+        "models": ["sonnet", "opus", "hermes"],
         "runs": 5,
     },
     "overnight": {
         "description": "High-power overnight run",
-        "models": ["sonnet", "opus"],
+        "models": ["sonnet", "opus", "hermes"],
         "runs": 10,
     },
 }

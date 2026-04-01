@@ -167,7 +167,10 @@ def _results_path(output_dir: Path) -> Path:
 
 
 def load_completed(output_dir: Path) -> set[tuple[str, str, str, int]]:
-    """Load already-completed (task, format, model, run) tuples."""
+    """Load successfully-completed (task, format, model, run) tuples.
+
+    Skips error entries so they get retried on resume.
+    """
     path = _results_path(output_dir)
     completed: set[tuple[str, str, str, int]] = set()
     if path.exists():
@@ -175,6 +178,8 @@ def load_completed(output_dir: Path) -> set[tuple[str, str, str, int]]:
             if line.strip():
                 try:
                     rec = json.loads(line)
+                    if rec.get("status") == "error":
+                        continue  # retry errors on resume
                     completed.add((
                         rec["task"],
                         rec["format"],

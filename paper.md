@@ -1,6 +1,6 @@
 # Axiom: A Compact Rule Definition Language for LLM-Native Context Engineering
 
-**V. Vladescu** ([@vvladescu](https://github.com/vvladescu), zenprocess), **Claude** (Anthropic)
+**V. Vladescu** ([@vvladescu](https://github.com/vvladescu), standra.ai / zenprocess)
 
 ---
 
@@ -259,6 +259,12 @@ The practical implication is straightforward: projects can compress their rule f
 For projects requiring near-100% compliance, a three-layer architecture combines static format (Axiom, ~91%), dynamic hooks (PostToolUse compliance checker, ~9% remaining), and pre-merge gates for defense in depth.
 
 The specification, benchmark, and compiler are available at [github.com/zenprocess/axiom](https://github.com/zenprocess/axiom).
+
+## Acknowledgments
+
+This work is part of the [standra.ai](https://standra.ai) ecosystem for AI-assisted software engineering.
+
+**AI Disclosure**: Claude Code (Anthropic) was used to assist with experiment implementation, benchmark automation, and drafting. All hypotheses, experimental design, results analysis, and conclusions were independently formulated and validated by the author.
 
 ## References
 

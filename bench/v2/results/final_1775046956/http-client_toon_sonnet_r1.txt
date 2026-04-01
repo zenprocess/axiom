@@ -1,0 +1,9 @@
+Here's the module — approve the write to save it. Key design decisions:
+
+- **`User` / `Address`** — Pydantic `BaseModel` for validated, typed response parsing. `Address` handles the `zipCode` alias from typical REST APIs.
+- **`UserClient`** — async class using `httpx.AsyncClient`, reused per-call via context manager. `get_user` is `async def` per the I/O rule.
+- **Error hierarchy** — `UserNotFoundError` (404) vs `UserAPIError` (network/other HTTP errors) lets callers handle them differently.
+- **`structlog`** — structured logging on fetch start/success/error; no `print()` or `import logging`.
+- **`main()`** — `asyncio.run()` entry point that fetches user 42 and handles both error types gracefully.
+
+Dependencies needed: `httpx`, `pydantic`, `structlog`.

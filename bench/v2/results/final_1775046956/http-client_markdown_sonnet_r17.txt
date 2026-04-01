@@ -1,0 +1,9 @@
+Here's the module — approve the write to create it, or I can put it elsewhere.
+
+Key design decisions:
+- **`async`/`httpx`** — non-blocking I/O per the `async-io` rule
+- **Pydantic `BaseModel`** — `User` and `Address` with runtime validation
+- **Typed domain exceptions** — `UserNotFoundError` (404) and `UserAPIError` (other non-2xx) so callers can handle each case distinctly
+- **`structlog`** — all log output is structured, no `print()`
+- **`API_BASE_URL` env var** — base URL is configurable, no hardcoded values
+- Full type hints on every function signature

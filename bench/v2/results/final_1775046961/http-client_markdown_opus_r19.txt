@@ -1,0 +1,12 @@
+It seems write permission was denied. Would you like me to write this file to a different location, or would you prefer to review the code first before granting permission?
+
+Here's a summary of what the module contains:
+
+- **`User` and `Address` Pydantic models** for validated, typed API responses
+- **`UserClient` class** with an `async fetch_user(user_id)` method using `httpx.AsyncClient`
+- **Error handling** for both HTTP errors (4xx/5xx) and connection/timeout failures
+- **`structlog`** for all logging (no `print()`)
+- **Base URL from env var** `USER_API_BASE_URL` (defaults to `https://api.example.com`)
+- **`main()`** that fetches user #42 and logs the result
+
+All project dev rules are followed: async I/O, Pydantic models, structlog, type hints, error handling, docstrings, no print/secrets/star-imports.

@@ -1,0 +1,105 @@
+It looks like you've denied write permission to the examples directory. Would you like me to write this file to a different location, or would you prefer I just share the code inline?
+
+Here's the module — `examples/user_client.py`:
+
+```python
+"""Client module for fetching user data from a REST API."""
+
+import asyncio
+import os
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+API_BASE_URL = os.environ.get("USER_API_BASE_URL", "https://api.example.com")
+
+
+class Address(BaseModel):
+    """A user's physical address."""
+
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    address: Address | None = None
+
+
+class UserClient:
+    """Async client for the /users REST API."""
+
+    def __init__(self, base_url: str = API_BASE_URL, timeout: float = 30.0) -> None:
+        """Initialize the client.
+
+        Args:
+            base_url: Base URL of the user API.
+            timeout: Request timeout in seconds.
+        """
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    async def fetch_user(self, user_id: int) -> User:
+        """Fetch a single user by ID.
+
+        Args:
+            user_id: The numeric user ID.
+
+        Returns:
+            A validated User model.
+
+        Raises:
+            httpx.HTTPStatusError: If the API returns a non-2xx status.
+            httpx.RequestError: If the request fails (timeout, connection, etc.).
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        log.info("fetching_user", user_id=user_id, url=url)
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            log.error(
+                "user_fetch_http_error",
+                user_id=user_id,
+                status_code=exc.response.status_code,
+            )
+            raise
+        except httpx.RequestError as exc:
+            log.error("user_fetch_request_error", user_id=user_id, error=str(exc))
+            raise
+
+        user = User.model_validate(response.json())
+        log.info("user_fetched", user_id=user.id, name=user.name)
+        return user
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    user = await client.fetch_user(42)
+    log.info("result", user=user.model_dump())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design choices per your project rules:
+
+- **async-io**: `fetch_user` is `async def` using `httpx.AsyncClient`
+- **pydantic-models**: `User` and `Address` are `BaseModel` subclasses with full type hints
+- **structlog-only**: all logging via `structlog.get_logger()`, no `print()` or stdlib `logging`
+- **error-handling**: HTTP and connection errors caught separately with structured log context, then re-raised
+- **no-secrets**: base URL from `os.environ`, no hardcoded credentials
+- **type-hints**: all functions fully annotated including return types

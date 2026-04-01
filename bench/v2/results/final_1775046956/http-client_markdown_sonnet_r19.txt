@@ -1,0 +1,10 @@
+Here's the module — approve the write to save it, or let me know if you'd prefer a different file location.
+
+**Key design decisions:**
+
+- **`UserClient.fetch_user`** is `async` — all I/O goes through `httpx.AsyncClient` per the `async-io` rule
+- **`User` / `Address`** are Pydantic `BaseModel` subclasses with `model_validate()` for safe deserialization
+- **Typed exceptions** (`UserNotFoundError`, `UserAPIError`) let callers handle 404 vs other failures distinctly
+- **`structlog`** throughout — no `print()` or `logging` imports
+- **`API_BASE_URL` env var** overrides the default base URL so secrets/configs stay out of code
+- Error handling covers: timeout, network failure, 404, and unexpected status codes

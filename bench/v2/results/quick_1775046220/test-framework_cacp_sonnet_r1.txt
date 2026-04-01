@@ -1,0 +1,377 @@
+It seems file write permissions aren't granted. I'll present the complete implementation here instead.
+
+---
+
+**Note on your `print()` request:** Your project rules (`structlog-only` [HIGH], `no-print-debug` [HIGH]) explicitly prohibit `print()`. The implementation below uses `structlog` instead — which gives you structured, coloured output that's strictly better for a test runner anyway.
+
+---
+
+### `testkit.py`
+
+```python
+"""
+testkit — a minimal Python test framework.
+
+Features:
+- Assertions (assertEqual, assertRaises, assertTrue, assertFalse, assertIsNone, assertIn)
+- Test discovery (functions starting with test_)
+- Fixtures (setup/teardown per-test and setup_module/teardown_module per-suite)
+- Test runner with structured output via structlog
+"""
+
+from __future__ import annotations
+
+import inspect
+import sys
+import time
+import traceback
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from types import ModuleType
+from typing import Any
+
+import structlog
+
+log = structlog.get_logger()
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TestResult:
+    """Outcome of a single test function."""
+
+    name: str
+    passed: bool
+    duration_ms: float
+    error: str | None = None
+
+
+@dataclass
+class SuiteResult:
+    """Aggregated results for a test suite."""
+
+    suite_name: str
+    results: list[TestResult] = field(default_factory=list)
+
+    @property
+    def passed(self) -> int:
+        """Number of passing tests."""
+        return sum(1 for r in self.results if r.passed)
+
+    @property
+    def failed(self) -> int:
+        """Number of failing tests."""
+        return sum(1 for r in self.results if not r.passed)
+
+    @property
+    def total(self) -> int:
+        """Total number of tests."""
+        return len(self.results)
+
+
+# ---------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------
+
+
+class AssertionError(Exception):  # noqa: A001
+    """Raised when a testkit assertion fails."""
+
+
+def assertEqual(actual: Any, expected: Any) -> None:
+    """Assert that actual equals expected."""
+    if actual != expected:
+        raise AssertionError(f"assertEqual failed: {actual!r} != {expected!r}")
+
+
+def assertNotEqual(actual: Any, expected: Any) -> None:
+    """Assert that actual does not equal expected."""
+    if actual == expected:
+        raise AssertionError(f"assertNotEqual failed: {actual!r} == {expected!r}")
+
+
+def assertTrue(value: Any) -> None:
+    """Assert that value is truthy."""
+    if not value:
+        raise AssertionError(f"assertTrue failed: {value!r} is not truthy")
+
+
+def assertFalse(value: Any) -> None:
+    """Assert that value is falsy."""
+    if value:
+        raise AssertionError(f"assertFalse failed: {value!r} is not falsy")
+
+
+def assertIsNone(value: Any) -> None:
+    """Assert that value is None."""
+    if value is not None:
+        raise AssertionError(f"assertIsNone failed: {value!r} is not None")
+
+
+def assertIsNotNone(value: Any) -> None:
+    """Assert that value is not None."""
+    if value is None:
+        raise AssertionError("assertIsNotNone failed: value is None")
+
+
+def assertIn(item: Any, container: Any) -> None:
+    """Assert that item is in container."""
+    if item not in container:
+        raise AssertionError(f"assertIn failed: {item!r} not in {container!r}")
+
+
+def assertNotIn(item: Any, container: Any) -> None:
+    """Assert that item is not in container."""
+    if item in container:
+        raise AssertionError(f"assertNotIn failed: {item!r} in {container!r}")
+
+
+def assertRaises(
+    exc_type: type[BaseException],
+    fn: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    """Assert that calling fn(*args, **kwargs) raises exc_type."""
+    try:
+        fn(*args, **kwargs)
+    except exc_type:
+        return
+    except Exception as e:  # noqa: BLE001
+        raise AssertionError(
+            f"assertRaises failed: expected {exc_type.__name__}, "
+            f"got {type(e).__name__}: {e}"
+        ) from e
+    raise AssertionError(f"assertRaises failed: {exc_type.__name__} was not raised")
+
+
+# ---------------------------------------------------------------------------
+# Fixture support
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Fixtures:
+    """Per-suite fixture hooks."""
+
+    setup: Callable[[], None] | None = None
+    teardown: Callable[[], None] | None = None
+    setup_module: Callable[[], None] | None = None
+    teardown_module: Callable[[], None] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+
+def discover_tests(module: ModuleType) -> list[Callable[..., Any]]:
+    """Return all callables in module whose name starts with test_."""
+    return [
+        obj
+        for name, obj in inspect.getmembers(module, inspect.isfunction)
+        if name.startswith("test_")
+    ]
+
+
+def _extract_fixtures(module: ModuleType) -> Fixtures:
+    return Fixtures(
+        setup=getattr(module, "setup", None),
+        teardown=getattr(module, "teardown", None),
+        setup_module=getattr(module, "setup_module", None),
+        teardown_module=getattr(module, "teardown_module", None),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
+
+def _run_test(test_fn: Callable[..., Any], fixtures: Fixtures) -> TestResult:
+    name = test_fn.__name__
+
+    if fixtures.setup:
+        try:
+            fixtures.setup()
+        except Exception:  # noqa: BLE001
+            tb = traceback.format_exc()
+            log.error("fixture_setup_failed", test=name, traceback=tb)
+            return TestResult(name=name, passed=False, duration_ms=0.0, error=f"setup() raised:\n{tb}")
+
+    start = time.perf_counter()
+    error: str | None = None
+    passed = True
+
+    try:
+        test_fn()
+    except AssertionError as exc:
+        passed = False
+        error = str(exc)
+    except Exception:  # noqa: BLE001
+        passed = False
+        error = traceback.format_exc()
+    finally:
+        duration_ms = (time.perf_counter() - start) * 1000
+
+    if fixtures.teardown:
+        try:
+            fixtures.teardown()
+        except Exception:  # noqa: BLE001
+            log.warning("fixture_teardown_failed", test=name, traceback=traceback.format_exc())
+
+    if passed:
+        log.info("test_passed", test=name, duration_ms=round(duration_ms, 2))
+    else:
+        log.warning("test_failed", test=name, duration_ms=round(duration_ms, 2), error=error)
+
+    return TestResult(name=name, passed=passed, duration_ms=round(duration_ms, 2), error=error)
+
+
+def run_suite(module: ModuleType) -> SuiteResult:
+    """Discover and run all tests in module, returning a SuiteResult."""
+    suite_name = getattr(module, "__name__", str(module))
+    fixtures = _extract_fixtures(module)
+    tests = discover_tests(module)
+
+    log.info("suite_start", suite=suite_name, test_count=len(tests))
+
+    if fixtures.setup_module:
+        try:
+            fixtures.setup_module()
+        except Exception:  # noqa: BLE001
+            log.error("setup_module_failed", suite=suite_name, traceback=traceback.format_exc())
+            return SuiteResult(suite_name=suite_name)
+
+    results = [_run_test(t, fixtures) for t in tests]
+
+    if fixtures.teardown_module:
+        try:
+            fixtures.teardown_module()
+        except Exception:  # noqa: BLE001
+            log.warning("teardown_module_failed", suite=suite_name, traceback=traceback.format_exc())
+
+    suite = SuiteResult(suite_name=suite_name, results=results)
+    log.info(
+        "suite_complete",
+        suite=suite_name,
+        passed=suite.passed,
+        failed=suite.failed,
+        total=suite.total,
+    )
+    return suite
+
+
+def run_modules(*modules: ModuleType) -> int:
+    """Run all suites; return exit code 0 (all pass) or 1 (any failure)."""
+    all_suites = [run_suite(m) for m in modules]
+    log.info(
+        "run_complete",
+        suites=len(all_suites),
+        total=sum(s.total for s in all_suites),
+        passed=sum(s.passed for s in all_suites),
+        failed=sum(s.failed for s in all_suites),
+    )
+    return 0 if all(s.failed == 0 for s in all_suites) else 1
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _discover_and_run_file(path: str) -> int:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_testkit_module", path)
+    if spec is None or spec.loader is None:
+        log.error("cannot_import_file", path=path)
+        return 1
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001
+        log.error("module_load_failed", path=path, traceback=traceback.format_exc())
+        return 1
+    return run_modules(module)
+
+
+if __name__ == "__main__":
+    structlog.configure(processors=[structlog.dev.ConsoleRenderer()])
+    if len(sys.argv) < 2:
+        log.error("usage", hint="python testkit.py <test_file.py> [...]")
+        sys.exit(1)
+
+    exit_code = 0
+    for test_file in sys.argv[1:]:
+        exit_code |= _discover_and_run_file(test_file)
+    sys.exit(exit_code)
+```
+
+---
+
+### Example test file (`test_example.py`)
+
+```python
+import testkit as t
+
+# --- module-level fixtures ---
+
+def setup_module() -> None:
+    """Called once before any test in this file."""
+    pass  # e.g. spin up a DB
+
+def teardown_module() -> None:
+    """Called once after all tests in this file."""
+    pass
+
+# --- per-test fixtures ---
+
+def setup() -> None:
+    """Called before each test."""
+    pass
+
+def teardown() -> None:
+    """Called after each test."""
+    pass
+
+# --- tests ---
+
+def test_addition() -> None:
+    t.assertEqual(1 + 1, 2)
+
+def test_string_contains() -> None:
+    t.assertIn("hello", "say hello world")
+
+def test_raises_on_zero_division() -> None:
+    t.assertRaises(ZeroDivisionError, lambda: 1 / 0)
+
+def test_none_check() -> None:
+    t.assertIsNone(None)
+    t.assertIsNotNone(42)
+
+def test_this_will_fail() -> None:
+    t.assertEqual("foo", "bar")   # intentional failure
+```
+
+Run it:
+```bash
+python testkit.py test_example.py
+```
+
+---
+
+### Design summary
+
+| Feature | Implementation |
+|---|---|
+| **Assertions** | 9 functions (`assertEqual`, `assertRaises`, `assertTrue`, etc.) |
+| **Discovery** | `discover_tests(module)` — finds all `test_*` functions via `inspect` |
+| **Fixtures** | `setup` / `teardown` per-test; `setup_module` / `teardown_module` per-file |
+| **Runner** | `run_suite()` per module, `run_modules()` aggregates; returns exit code |
+| **Output** | `structlog` structured events: `test_passed`, `test_failed`, `suite_complete`, `run_complete` |
+| **CLI** | `python testkit.py file1.py file2.py ...` with proper exit code |

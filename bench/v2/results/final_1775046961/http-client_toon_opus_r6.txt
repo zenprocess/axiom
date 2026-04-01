@@ -1,0 +1,83 @@
+It looks like file write permissions are blocked. Here's the module I'd create at `examples/user_client.py`:
+
+```python
+"""Client for fetching user data from a REST API."""
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+logger = structlog.get_logger()
+
+
+class Address(BaseModel):
+    """User address."""
+
+    street: str
+    city: str
+    zipcode: str
+
+
+class User(BaseModel):
+    """User returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    address: Address | None = None
+
+
+class UserClient:
+    """HTTP client for the users API."""
+
+    BASE_URL = "https://api.example.com"
+
+    def __init__(self, base_url: str | None = None) -> None:
+        self.base_url = base_url or self.BASE_URL
+
+    async def fetch_user(self, user_id: int) -> User:
+        """Fetch a single user by ID."""
+        url = f"{self.base_url}/users/{user_id}"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=10.0)
+                response.raise_for_status()
+        except httpx.TimeoutException:
+            logger.error("request_timeout", url=url)
+            raise
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "http_error",
+                url=url,
+                status_code=exc.response.status_code,
+            )
+            raise
+        except httpx.RequestError as exc:
+            logger.error("request_failed", url=url, error=str(exc))
+            raise
+
+        return User.model_validate(response.json())
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    user = await client.fetch_user(42)
+    logger.info("user_fetched", user_id=user.id, name=user.name, email=user.email)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design choices:
+
+- **Pydantic models** (`User`, `Address`) for validated response parsing
+- **`async def fetch_user`** since it's an I/O function (uses `httpx.AsyncClient`)
+- **`structlog`** for structured logging instead of `print`/`logging`
+- **Granular error handling** — catches timeout, HTTP status errors, and connection errors separately with structured log context
+- **Configurable `base_url`** via constructor for testing against different environments
+
+Would you like me to retry writing this to a file, or place it somewhere else?

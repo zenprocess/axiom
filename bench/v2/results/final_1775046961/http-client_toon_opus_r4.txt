@@ -1,0 +1,63 @@
+It looks like file write permissions haven't been granted. Here's the module I'd create at `user_client.py`:
+
+```python
+"""Client for fetching user data from the example REST API."""
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+logger = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    username: str
+
+
+class UserClient:
+    """Async client for the user API."""
+
+    def __init__(self, base_url: str = "https://api.example.com") -> None:
+        self.base_url = base_url
+
+    async def fetch_user(self, user_id: int) -> User:
+        """Fetch a single user by ID."""
+        url = f"{self.base_url}/users/{user_id}"
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                logger.error("api_error", user_id=user_id, status=exc.response.status_code)
+                raise
+            except httpx.RequestError as exc:
+                logger.error("request_failed", user_id=user_id, error=str(exc))
+                raise
+        return User.model_validate(response.json())
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    user = await client.fetch_user(42)
+    logger.info("fetched_user", user=user.model_dump())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key points:
+- **`User` Pydantic model** validates the API response
+- **`UserClient.fetch_user`** is async, uses `httpx.AsyncClient`
+- **Error handling** catches HTTP errors (4xx/5xx) and connection failures separately, logging via structlog before re-raising
+- **`main()`** fetches user #42 and logs the result
+
+Would you like me to try writing the file again, or place it somewhere else?

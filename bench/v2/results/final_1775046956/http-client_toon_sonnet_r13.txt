@@ -1,0 +1,19 @@
+Here's the module — you'll need to approve the write. The key design decisions:
+
+**Models** (`user_client.py`):
+- `Address` and `UserResponse` — Pydantic `BaseModel` with `model_validate()` for strict parsing
+- `UserAPIError` — typed exception carrying `status_code` for caller inspection
+
+**`UserClient` class**:
+- `async def fetch_user(user_id: int) -> UserResponse` — async per the `async-io` rule
+- Uses `httpx.AsyncClient` (context-managed, pooling-safe)
+- Two separate `except` branches: `UserAPIError` for HTTP errors, `httpx.RequestError` for network failures
+- `structlog` throughout, never `print()` or `logging`
+
+**`main()`**:
+- Calls `fetch_user(42)`, handles both error types gracefully, logs the result
+
+**Dependencies needed**:
+```bash
+pip install httpx pydantic structlog
+```

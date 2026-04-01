@@ -1,0 +1,119 @@
+It looks like write permissions were denied twice. Here's the module I'd create at `examples/user_client.py`:
+
+```python
+"""Client module for fetching user data from a REST API."""
+
+import asyncio
+import os
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+BASE_URL = os.environ.get("USER_API_BASE_URL", "https://api.example.com")
+
+
+class Address(BaseModel):
+    """A user's physical address."""
+
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    """A user returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    address: Address | None = None
+
+
+class UserClientError(Exception):
+    """Raised when the user API returns an error."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(f"API error {status_code}: {detail}")
+
+
+class UserClient:
+    """Async client for the /users REST API."""
+
+    def __init__(self, base_url: str = BASE_URL, timeout: float = 30.0) -> None:
+        """Initialize the client.
+
+        Args:
+            base_url: Root URL of the user API.
+            timeout: Request timeout in seconds.
+        """
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
+
+    async def fetch_user(self, user_id: int) -> User:
+        """Fetch a single user by ID.
+
+        Args:
+            user_id: The numeric user identifier.
+
+        Returns:
+            A validated User model.
+
+        Raises:
+            UserClientError: If the API returns a non-2xx status.
+        """
+        url = f"{self._base_url}/users/{user_id}"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+        except httpx.TimeoutException:
+            log.error("request_timeout", url=url, timeout=self._timeout)
+            raise UserClientError(status_code=408, detail="Request timed out")
+        except httpx.HTTPStatusError as exc:
+            log.error(
+                "api_http_error",
+                url=url,
+                status_code=exc.response.status_code,
+            )
+            raise UserClientError(
+                status_code=exc.response.status_code,
+                detail=exc.response.text,
+            )
+        except httpx.RequestError as exc:
+            log.error("request_failed", url=url, error=str(exc))
+            raise UserClientError(status_code=0, detail=str(exc))
+
+        return User.model_validate(response.json())
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    try:
+        user = await client.fetch_user(42)
+        log.info("user_fetched", user_id=user.id, name=user.name, email=user.email)
+    except UserClientError as exc:
+        log.error("failed_to_fetch_user", user_id=42, error=exc.detail)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design choices per your project rules:
+
+- **async-io**: `fetch_user` is `async def` using `httpx.AsyncClient`
+- **pydantic-models**: `User` and `Address` are `BaseModel` subclasses
+- **structlog-only**: all logging via `structlog.get_logger()`
+- **error-handling**: catches timeout, HTTP status, and connection errors separately with structured logging and a domain-specific `UserClientError`
+- **no-secrets**: base URL comes from `os.environ`, no hardcoded keys
+- **type-hints**: all functions have full parameter and return type annotations
+- **docstrings**: all public classes and methods documented
+
+Would you like me to write this to a different location, or should I proceed with the `examples/` directory?

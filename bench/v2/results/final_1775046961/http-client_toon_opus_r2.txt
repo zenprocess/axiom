@@ -1,0 +1,6 @@
+Here's the module I'd write to `examples/user_client.py` — grant the write permission and it'll be saved. Key design choices:
+
+- **`User` / `Address`** — Pydantic `BaseModel`s for validated, typed response data
+- **`UserClient.fetch_user`** — `async def` since it's I/O; uses `httpx.AsyncClient`
+- **Error handling** — catches `TimeoutException`, `HTTPStatusError`, and `RequestError` separately with structured logging via `structlog`
+- **`main()`** — fetches user #42 and logs the result

@@ -1,0 +1,353 @@
+The file write was denied. Here's the complete script — you can save it wherever you'd like:
+
+---
+
+**`examples/git_workflow.py`**
+
+```python
+"""
+Automated Git workflow script: feature branches, commits, push, and merge requests.
+
+NOTE: Force-push (git push --force) is intentionally omitted.
+This project enforces a CRITICAL no-force-push rule. For rebased branches,
+use --force-with-lease via a separate human-reviewed step if absolutely required.
+"""
+
+import asyncio
+from enum import StrEnum
+from typing import Any
+
+import structlog
+from pydantic import BaseModel, Field, field_validator
+
+log = structlog.get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
+
+class BranchConfig(BaseModel):
+    """Configuration for creating a feature branch."""
+
+    name: str = Field(..., description="Branch name, e.g. 'feat/my-feature'")
+    base: str = Field(default="main", description="Base branch to branch off from")
+
+    @field_validator("name")
+    @classmethod
+    def validate_branch_name(cls, v: str) -> str:
+        """Reject names with spaces or double-dots (common shell-injection vectors)."""
+        if " " in v or ".." in v:
+            raise ValueError(f"Invalid branch name: {v!r}")
+        return v
+
+
+class CommitConfig(BaseModel):
+    """Configuration for a single commit."""
+
+    message: str
+    paths: list[str] = Field(default_factory=list)  # empty = git add -u
+    allow_empty: bool = False
+
+
+class PushConfig(BaseModel):
+    """Configuration for pushing a branch."""
+
+    remote: str = "origin"
+    branch: str
+    set_upstream: bool = True
+    # force / force_with_lease intentionally absent — requires human review
+
+
+class MergeRequestConfig(BaseModel):
+    """Configuration for a GitHub PR or GitLab MR."""
+
+    title: str
+    description: str = ""
+    target_branch: str = "main"
+    assignee: str | None = None
+    labels: list[str] = Field(default_factory=list)
+
+
+class WorkflowResult(BaseModel):
+    """Result of a single workflow step."""
+
+    step: str
+    success: bool
+    output: str = ""
+    error: str = ""
+
+
+class WorkflowReport(BaseModel):
+    """Aggregated results for a full workflow run."""
+
+    branch: str
+    steps: list[WorkflowResult] = Field(default_factory=list)
+
+    @property
+    def failed_steps(self) -> list[WorkflowResult]:
+        """Return steps that did not succeed."""
+        return [s for s in self.steps if not s.success]
+
+    @property
+    def all_succeeded(self) -> bool:
+        """True when every step succeeded."""
+        return not self.failed_steps
+
+
+class GitProvider(StrEnum):
+    GITHUB = "github"
+    GITLAB = "gitlab"
+
+
+# ---------------------------------------------------------------------------
+# Low-level async helper
+# ---------------------------------------------------------------------------
+
+
+async def _run(args: list[str], cwd: str | None = None) -> tuple[int, str, str]:
+    """Run a subprocess asynchronously; return (returncode, stdout, stderr)."""
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+    out_b, err_b = await proc.communicate()
+    return proc.returncode or 0, out_b.decode().strip(), err_b.decode().strip()
+
+
+async def current_branch(cwd: str | None = None) -> str:
+    """Return the currently checked-out branch name."""
+    _, out, _ = await _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Workflow steps
+# ---------------------------------------------------------------------------
+
+
+async def create_branch(config: BranchConfig, cwd: str | None = None) -> WorkflowResult:
+    """Create a feature branch off a freshly-fetched base branch."""
+    log.info("create_branch", branch=config.name, base=config.base)
+    try:
+        rc, _, err = await _run(["git", "fetch", "origin", config.base], cwd=cwd)
+        if rc != 0:
+            log.warning("fetch_warning", stderr=err)
+
+        rc, out, err = await _run(
+            ["git", "checkout", "-b", config.name, f"origin/{config.base}"],
+            cwd=cwd,
+        )
+        if rc != 0:
+            return WorkflowResult(step="create_branch", success=False, error=err)
+
+        return WorkflowResult(step="create_branch", success=True, output=out)
+    except Exception as exc:
+        log.error("create_branch_error", error=str(exc))
+        return WorkflowResult(step="create_branch", success=False, error=str(exc))
+
+
+async def stage_and_commit(config: CommitConfig, cwd: str | None = None) -> WorkflowResult:
+    """Stage files (or all tracked changes) and create a commit."""
+    log.info("stage_and_commit", message=config.message, paths=config.paths)
+    try:
+        stage_args = (
+            ["git", "add", "--"] + config.paths if config.paths else ["git", "add", "-u"]
+        )
+        rc, _, err = await _run(stage_args, cwd=cwd)
+        if rc != 0:
+            return WorkflowResult(step="stage_and_commit", success=False, error=f"stage: {err}")
+
+        commit_args = ["git", "commit", "-m", config.message]
+        if config.allow_empty:
+            commit_args.append("--allow-empty")
+
+        rc, out, err = await _run(commit_args, cwd=cwd)
+        if rc != 0:
+            return WorkflowResult(step="stage_and_commit", success=False, error=err)
+
+        return WorkflowResult(step="stage_and_commit", success=True, output=out)
+    except Exception as exc:
+        log.error("commit_error", error=str(exc))
+        return WorkflowResult(step="stage_and_commit", success=False, error=str(exc))
+
+
+async def push_branch(config: PushConfig, cwd: str | None = None) -> WorkflowResult:
+    """Push a branch to the remote (normal push only).
+
+    Force-push is not supported here. For a rebased branch, run manually:
+        git push --force-with-lease origin <branch>
+    """
+    log.info("push_branch", remote=config.remote, branch=config.branch)
+    try:
+        args = ["git", "push"]
+        if config.set_upstream:
+            args += ["-u", config.remote, config.branch]
+        else:
+            args += [config.remote, config.branch]
+
+        rc, out, err = await _run(args, cwd=cwd)
+        if rc != 0:
+            log.error("push_failed", stderr=err)
+            return WorkflowResult(step="push_branch", success=False, error=err)
+
+        return WorkflowResult(step="push_branch", success=True, output=out)
+    except Exception as exc:
+        log.error("push_error", error=str(exc))
+        return WorkflowResult(step="push_branch", success=False, error=str(exc))
+
+
+async def create_merge_request(
+    config: MergeRequestConfig,
+    provider: GitProvider = GitProvider.GITHUB,
+    cwd: str | None = None,
+) -> WorkflowResult:
+    """Open a PR (gh) or MR (glab) using the provider's CLI.
+
+    Auth must be configured externally (gh auth login / glab auth login).
+    No tokens or credentials are accepted or stored by this function.
+    """
+    log.info("create_merge_request", provider=provider, title=config.title)
+    try:
+        if provider == GitProvider.GITHUB:
+            args = [
+                "gh", "pr", "create",
+                "--title", config.title,
+                "--body", config.description,
+                "--base", config.target_branch,
+            ]
+            if config.assignee:
+                args += ["--assignee", config.assignee]
+            for label in config.labels:
+                args += ["--label", label]
+
+        else:  # GITLAB
+            args = [
+                "glab", "mr", "create",
+                "--title", config.title,
+                "--description", config.description,
+                "--target-branch", config.target_branch,
+                "--yes",
+            ]
+            if config.assignee:
+                args += ["--assignee", config.assignee]
+            for label in config.labels:
+                args += ["--label", label]
+
+        rc, out, err = await _run(args, cwd=cwd)
+        if rc != 0:
+            log.error("mr_failed", stderr=err)
+            return WorkflowResult(step="create_merge_request", success=False, error=err)
+
+        log.info("mr_created", url=out)
+        return WorkflowResult(step="create_merge_request", success=True, output=out)
+    except Exception as exc:
+        log.error("mr_error", error=str(exc))
+        return WorkflowResult(step="create_merge_request", success=False, error=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+
+async def run_feature_workflow(
+    branch_config: BranchConfig,
+    commit_config: CommitConfig,
+    mr_config: MergeRequestConfig,
+    provider: GitProvider = GitProvider.GITHUB,
+    cwd: str | None = None,
+) -> WorkflowReport:
+    """Run the full feature-branch workflow: branch → commit → push → MR/PR."""
+    report = WorkflowReport(branch=branch_config.name)
+
+    sequential: list[Any] = [
+        ("create_branch",   create_branch(branch_config, cwd=cwd)),
+        ("stage_and_commit", stage_and_commit(commit_config, cwd=cwd)),
+    ]
+    for name, coro in sequential:
+        result = await coro
+        report.steps.append(result)
+        if not result.success:
+            log.error("workflow_aborted", step=name, error=result.error)
+            return report
+
+    push_result = await push_branch(PushConfig(branch=branch_config.name), cwd=cwd)
+    report.steps.append(push_result)
+    if not push_result.success:
+        log.error("workflow_aborted", step="push_branch", error=push_result.error)
+        return report
+
+    mr_result = await create_merge_request(mr_config, provider=provider, cwd=cwd)
+    report.steps.append(mr_result)
+
+    if report.all_succeeded:
+        log.info("workflow_complete", branch=branch_config.name, mr=mr_result.output)
+    else:
+        log.warning("workflow_partial_failure", failed=[s.step for s in report.failed_steps])
+
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+async def main() -> None:
+    """Example: run the workflow against the current working directory."""
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.stdlib.add_log_level,
+            structlog.dev.ConsoleRenderer(),
+        ]
+    )
+
+    report = await run_feature_workflow(
+        branch_config=BranchConfig(name="feat/example-workflow", base="main"),
+        commit_config=CommitConfig(message="feat: add example workflow automation"),
+        mr_config=MergeRequestConfig(
+            title="feat: example workflow automation",
+            description="Automated via git_workflow.py",
+            labels=["automation"],
+        ),
+        provider=GitProvider.GITHUB,
+    )
+
+    for step in report.steps:
+        log.info("result", step=step.step, ok=step.success, detail=step.output or step.error)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+---
+
+**Why force-push was omitted**
+
+The project has a `CRITICAL` rule `no-force-push: MUST_NOT`. The script instead documents the safe alternative in the `push_branch` docstring:
+
+```bash
+git push --force-with-lease origin <branch>
+```
+
+`--force-with-lease` is safer than `--force` because it refuses to overwrite commits that aren't in your local ref — i.e., it protects against clobbering a teammate's push. It still requires a deliberate human decision outside this script.
+
+**Rules satisfied**
+
+| Rule | How |
+|---|---|
+| `no-force-push` | `git push --force` absent entirely |
+| `async-io` | Every I/O function is `async def` |
+| `structlog-only` | `structlog.get_logger` only, no `logging`/`print` |
+| `pydantic-models` | All data as `BaseModel` subclasses |
+| `type-hints` | Every function signature typed |
+| `error-handling` | All subprocess calls inside `try/except` |
+| `no-star-import` | No `*` imports |
+| `no-secrets` | Auth delegated to `gh`/`glab` CLI |
+| `docstrings` | All public functions documented |

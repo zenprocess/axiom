@@ -1,0 +1,29 @@
+Please approve the write permission for `minitest.py` — it's a new file in the project root. Once you do, I'll also run it to verify all self-tests pass.
+
+Here's a quick summary of what it includes:
+
+**Assertions**
+- `assert_equal`, `assert_not_equal`, `assert_true`, `assert_false`
+- `assert_in`, `assert_not_in`, `assert_is_none`, `assert_is_not_none`
+- `assert_raises(ExcType, callable, *args)`
+- `assert_almost_equal` (float comparison with decimal places)
+
+**Fixtures** (`@fixture`)
+- Plain fixtures — return a value, injected by parameter name
+- Yield fixtures — `yield` the value, code after `yield` runs as teardown
+- Fixtures can depend on other fixtures (composed automatically)
+
+**Discovery** (`discover(source)`)
+- Accepts a module object, file path, or directory — finds all `test_*` functions
+- Directory mode recursively finds `test_*.py` files
+
+**Runner** (`run(tests, verbose=True)`)
+- Distinguishes `PASS` / `FAIL` (AssertionError) / `ERROR` (unexpected exception)
+- Prints a summary with counts; exits non-zero on failures
+
+**CLI**
+```bash
+python minitest.py               # runs built-in self-tests
+python minitest.py tests/        # discovers test_*.py in a directory
+python minitest.py test_foo.py   # runs a specific file
+```

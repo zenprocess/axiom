@@ -1,0 +1,10 @@
+Here's the module — you'll need to approve the write, or I can show you the code to copy manually.
+
+**`user_client.py`** — key design decisions:
+
+- **`User` / `Address`** — Pydantic `BaseModel` with `Field(alias=...)` to handle camelCase API responses
+- **`UserClient.get_user`** — `async def` with `httpx.AsyncClient`; separates 404 (`UserNotFoundError`) from other HTTP/network failures (`UserAPIError`) so callers can handle them distinctly
+- **`main()`** — fetches user #42, logs structured events via `structlog`, prints JSON to stdout
+- All errors are chained with `from exc` to preserve the original traceback
+
+Dependencies needed: `httpx`, `pydantic`, `structlog`.

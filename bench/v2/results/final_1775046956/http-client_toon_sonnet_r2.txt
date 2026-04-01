@@ -1,0 +1,18 @@
+The module I'd create at `user_client.py` follows all the project rules. Here's a breakdown:
+
+**Data models** (`pydantic.BaseModel`):
+- `Address` — nested optional address fields
+- `User` — top-level response model with `model_validate` for parsing
+
+**`UserClient` class**:
+- `async def get_user(user_id: int) -> User` — async I/O per the `async-io` rule
+- Uses `httpx.AsyncClient` with a configurable timeout
+- `try/except` around the request per the `error-handling` rule
+- Raises `UserAPIError` (custom exception with `status_code`) on non-200 responses
+- `structlog` throughout, no `print()` or `logging`
+
+**`main()`**:
+- `asyncio.run(main())` entry point that fetches user #42
+- Catches both `UserAPIError` and `httpx.RequestError` with structured log output
+
+**Dependencies needed**: `httpx`, `pydantic`, `structlog`

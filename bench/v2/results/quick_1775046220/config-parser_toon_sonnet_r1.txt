@@ -1,0 +1,143 @@
+It looks like write permissions aren't granted for that path. Here's the complete implementation — you can save it as `config_loader.py`:
+
+```python
+"""Config loader with priority merging: YAML < env vars < CLI flags."""
+
+import argparse
+import os
+from pathlib import Path
+from typing import Any
+
+import structlog
+import yaml
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class AppConfig(BaseModel):
+    """Application configuration."""
+
+    host: str = "localhost"
+    port: int = 8080
+    debug: bool = False
+    log_level: str = "INFO"
+    database_url: str = ""
+    workers: int = 4
+
+
+def load_yaml_config(path: Path) -> dict[str, Any]:
+    """Load configuration from a YAML file, returning empty dict if absent."""
+    if not path.exists():
+        log.info("yaml_config_skipped", path=str(path))
+        return {}
+    try:
+        with path.open() as f:
+            data = yaml.safe_load(f) or {}
+        log.info("yaml_config_loaded", path=str(path), keys=list(data.keys()))
+        return data
+    except yaml.YAMLError as exc:
+        log.error("yaml_config_parse_error", path=str(path), error=str(exc))
+        return {}
+
+
+def load_env_config(prefix: str = "APP_") -> dict[str, Any]:
+    """Load configuration from prefixed environment variables.
+
+    Keys are lowercased with the prefix stripped: APP_PORT -> port.
+    Values are coerced to bool/int where possible.
+    """
+    config: dict[str, Any] = {}
+    for key, raw in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        config_key = key[len(prefix):].lower()
+        if raw.lower() in ("true", "1", "yes"):
+            config[config_key] = True
+        elif raw.lower() in ("false", "0", "no"):
+            config[config_key] = False
+        else:
+            try:
+                config[config_key] = int(raw)
+            except ValueError:
+                config[config_key] = raw
+    if config:
+        log.info("env_config_loaded", keys=list(config.keys()))
+    return config
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Load merged application config.")
+    p.add_argument("--config", default="config.yaml", metavar="FILE",
+                   help="YAML config file (default: config.yaml)")
+    p.add_argument("--host", help="Server host")
+    p.add_argument("--port", type=int, help="Server port")
+    p.add_argument("--debug", action="store_const", const=True,
+                   help="Enable debug mode")
+    p.add_argument("--log-level", dest="log_level",
+                   choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    p.add_argument("--database-url", dest="database_url", help="Database URL")
+    p.add_argument("--workers", type=int, help="Number of worker threads")
+    return p
+
+
+def load_cli_config() -> tuple[dict[str, Any], Path]:
+    """Parse CLI flags, returning only explicitly-provided values and config path."""
+    args = _build_parser().parse_args()
+    config_path = Path(args.config)
+    config: dict[str, Any] = {
+        k: v for k, v in vars(args).items()
+        if k != "config" and v is not None
+    }
+    if config:
+        log.info("cli_config_loaded", keys=list(config.keys()))
+    return config, config_path
+
+
+def merge_configs(*layers: dict[str, Any]) -> dict[str, Any]:
+    """Shallow-merge config dicts; later layers override earlier ones."""
+    merged: dict[str, Any] = {}
+    for layer in layers:
+        merged.update(layer)
+    return merged
+
+
+def load_config() -> AppConfig:
+    """Build the final AppConfig by merging all sources (lowest to highest priority):
+    YAML file -> environment variables -> CLI flags.
+    """
+    cli_config, config_path = load_cli_config()
+    yaml_config = load_yaml_config(config_path)
+    env_config = load_env_config()
+
+    merged = merge_configs(yaml_config, env_config, cli_config)
+    config = AppConfig(**merged)
+
+    log.info("final_config", **config.model_dump())
+    return config
+
+
+if __name__ == "__main__":
+    structlog.configure(
+        processors=[
+            structlog.stdlib.add_log_level,
+            structlog.dev.ConsoleRenderer(),
+        ]
+    )
+    load_config()
+```
+
+**Key design decisions:**
+
+- **Priority**: YAML → env vars → CLI (each overrides the previous)
+- **`AppConfig`** is a Pydantic `BaseModel` — validation happens automatically on merge, and unknown keys from YAML/env will raise a `ValidationError` cleanly
+- **Env vars**: `APP_PORT=9000` maps to `port=9000`; booleans and ints are coerced
+- **CLI `--debug`**: uses `store_const` so an absent flag stays `None` (not overriding lower-priority sources) vs. `store_true` which would always default to `False`
+- **Logging**: `structlog` throughout — `log.info("final_config", **config.model_dump())` emits the full config as structured fields, not a print statement
+- **`load_cli_config`** strips `None` values before returning so they don't clobber defaults from YAML/env
+
+**Usage example:**
+```bash
+# config.yaml sets port=9000, env sets host, CLI sets debug
+APP_HOST=myserver python config_loader.py --debug --workers 8
+```

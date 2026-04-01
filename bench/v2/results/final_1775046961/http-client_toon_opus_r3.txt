@@ -1,0 +1,79 @@
+It looks like write permission was denied. Here's the module I'd create at `examples/fetch_user.py`:
+
+```python
+"""Fetch user data from a REST API."""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+BASE_URL = "https://api.example.com"
+
+
+class Address(BaseModel):
+    """User's address."""
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+    id: int
+    name: str
+    email: str
+    address: Optional[Address] = None
+
+
+class UserAPIError(Exception):
+    """Raised when the user API request fails."""
+    def __init__(self, user_id: int, status_code: int, detail: str) -> None:
+        self.user_id = user_id
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(f"Failed to fetch user {user_id}: {status_code} {detail}")
+
+
+async def fetch_user(client: httpx.AsyncClient, user_id: int) -> User:
+    """Fetch a single user by ID from the REST API."""
+    url = f"{BASE_URL}/users/{user_id}"
+    try:
+        response = await client.get(url)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise UserAPIError(user_id, exc.response.status_code, exc.response.text) from exc
+    except httpx.RequestError as exc:
+        raise UserAPIError(user_id, 0, str(exc)) from exc
+
+    return User.model_validate(response.json())
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    async with httpx.AsyncClient() as client:
+        try:
+            user = await fetch_user(client, user_id=42)
+            log.info("fetched_user", user_id=user.id, name=user.name, email=user.email)
+        except UserAPIError:
+            log.exception("user_fetch_failed", user_id=42)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design choices:
+
+- **Async I/O** with `httpx.AsyncClient` for the network call
+- **Pydantic models** (`User`, `Address`) for response validation
+- **`UserAPIError`** custom exception wrapping both HTTP errors and connection failures
+- **structlog** for logging (no `print()` or stdlib `logging`)
+- **Type hints** on all signatures
+
+Would you like me to write this to a file (you'll need to approve the write permission)?

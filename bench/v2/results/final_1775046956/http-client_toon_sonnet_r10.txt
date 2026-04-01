@@ -1,0 +1,109 @@
+Here's the module — you can create `user_client.py` with this content:
+
+```python
+"""Client for fetching user data from the REST API."""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel, Field
+
+log = structlog.get_logger(__name__)
+
+BASE_URL = "https://api.example.com"
+
+
+class Address(BaseModel):
+    street: str
+    city: str
+    state: str
+    zip_code: str = Field(alias="zipCode")
+
+    model_config = {"populate_by_name": True}
+
+
+class UserResponse(BaseModel):
+    id: int
+    name: str
+    email: str
+    username: str
+    phone: Optional[str] = None
+    address: Optional[Address] = None
+
+
+class UserNotFoundError(Exception):
+    """Raised when a user ID does not exist."""
+
+
+class UserAPIError(Exception):
+    """Raised on unexpected API errors."""
+
+
+class UserClient:
+    """HTTP client for the users endpoint."""
+
+    def __init__(self, base_url: str = BASE_URL, timeout: float = 10.0) -> None:
+        self._base_url = base_url
+        self._timeout = timeout
+
+    async def get_user(self, user_id: int) -> UserResponse:
+        """Fetch a single user by ID.
+
+        Raises:
+            UserNotFoundError: If the user does not exist (404).
+            UserAPIError: On any other non-2xx response or network error.
+        """
+        url = f"{self._base_url}/users/{user_id}"
+        logger = log.bind(user_id=user_id, url=url)
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.get(url)
+
+            if response.status_code == 404:
+                logger.warning("user_not_found")
+                raise UserNotFoundError(f"User {user_id} not found")
+
+            response.raise_for_status()
+            user = UserResponse.model_validate(response.json())
+            logger.info("user_fetched", name=user.name)
+            return user
+
+        except (UserNotFoundError, UserAPIError):
+            raise
+        except httpx.TimeoutException as exc:
+            logger.error("request_timeout")
+            raise UserAPIError(f"Request timed out for user {user_id}") from exc
+        except httpx.HTTPStatusError as exc:
+            logger.error("http_error", status=exc.response.status_code)
+            raise UserAPIError(f"HTTP {exc.response.status_code} fetching user {user_id}") from exc
+        except httpx.RequestError as exc:
+            logger.error("network_error", error=str(exc))
+            raise UserAPIError(f"Network error fetching user {user_id}") from exc
+
+
+async def main() -> None:
+    """Fetch and display user #42."""
+    client = UserClient()
+    try:
+        user = await client.get_user(42)
+        log.info("result", id=user.id, name=user.name, email=user.email, username=user.username)
+    except UserNotFoundError as exc:
+        log.warning("not_found", error=str(exc))
+    except UserAPIError as exc:
+        log.error("api_error", error=str(exc))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Key design decisions:**
+
+- **`httpx` + `async def`** — async I/O per project rules; `httpx.AsyncClient` used as a context manager per request (stateless client, no connection pooling needed here).
+- **Pydantic models** — `UserResponse` and `Address` with field aliasing for camelCase JSON keys (`zipCode` → `zip_code`).
+- **Two custom exceptions** — `UserNotFoundError` for 404 (caller may want to handle separately) vs `UserAPIError` for everything else (timeouts, 5xx, network failures).
+- **`structlog`** — structured logging with bound context (`user_id`, `url`) on every log line; no `print()` or `logging`.
+- **`except (UserNotFoundError, UserAPIError): raise`** — re-raises our own exceptions before the broad `httpx` catch blocks swallow them.

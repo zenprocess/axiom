@@ -1,0 +1,187 @@
+```python
+import argparse
+import os
+from typing import Any, Dict, Optional
+
+import yaml
+from pydantic import BaseModel, BaseSettings, Field, validator
+import structlog
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.JSONRenderer(),
+    ],
+    logger_factory=structlog.PrintLoggerFactory(),
+)
+
+logger = structlog.get_logger()
+
+
+class DatabaseConfig(BaseModel):
+    host: str = Field(default="localhost")
+    port: int = Field(default=5432)
+    name: str = Field(default="mydb")
+    user: str = Field(default="user")
+    password: str = Field(default="")
+
+
+class AppConfig(BaseSettings):
+    app_name: str = Field(default="MyApp")
+    debug: bool = Field(default=False)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+
+    class Config:
+        env_prefix = "APP_"
+
+
+def load_yaml_config(file_path: str) -> Dict[str, Any]:
+    """
+    Load configuration from a YAML file.
+
+    Args:
+        file_path: Path to the YAML configuration file.
+
+    Returns:
+        Dictionary containing the parsed YAML configuration.
+    """
+    try:
+        with open(file_path, "r") as file:
+            return yaml.safe_load(file) or {}
+    except FileNotFoundError:
+        logger.warning("yaml_file_not_found", file_path=file_path)
+        return {}
+    except yaml.YAMLError as exc:
+        logger.error("yaml_parse_error", error=str(exc), file_path=file_path)
+        return {}
+
+
+def get_env_config() -> Dict[str, Any]:
+    """
+    Load configuration from environment variables.
+
+    Returns:
+        Dictionary containing environment variable configuration.
+    """
+    env_config = {}
+    for key, value in os.environ.items():
+        if key.startswith("APP_"):
+            # Convert APP_DB_HOST -> app.database.host
+            env_key = key[4:].lower()  # Remove APP_ prefix
+            parts = env_key.split("_")
+            current = env_config
+            for part in parts[:-1]:
+                if part not in current:
+                    current[part] = {}
+                current = current[part]
+            current[parts[-1]] = value
+    return env_config
+
+
+def parse_cli_args() -> Dict[str, Any]:
+    """
+    Parse command-line arguments and return configuration overrides.
+
+    Returns:
+        Dictionary containing command-line configuration overrides.
+    """
+    parser = argparse.ArgumentParser(description="Application configuration")
+    parser.add_argument("--app-name", type=str, help="Application name")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--db-host", type=str, help="Database host")
+    parser.add_argument("--db-port", type=int, help="Database port")
+    parser.add_argument("--db-name", type=str, help="Database name")
+    parser.add_argument("--db-user", type=str, help="Database user")
+    parser.add_argument("--db-password", type=str, help="Database password")
+
+    args = parser.parse_args()
+    cli_config = {}
+
+    if args.app_name:
+        cli_config["app_name"] = args.app_name
+    if args.debug:
+        cli_config["debug"] = args.debug
+
+    if any(
+        [
+            args.db_host,
+            args.db_port is not None,
+            args.db_name,
+            args.db_user,
+            args.db_password,
+        ]
+    ):
+        cli_config["database"] = {}
+        if args.db_host:
+            cli_config["database"]["host"] = args.db_host
+        if args.db_port is not None:
+            cli_config["database"]["port"] = args.db_port
+        if args.db_name:
+            cli_config["database"]["name"] = args.db_name
+        if args.db_user:
+            cli_config["database"]["user"] = args.db_user
+        if args.db_password:
+            cli_config["database"]["password"] = args.db_password
+
+    return cli_config
+
+
+def merge_configs(*configs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recursively merge configuration dictionaries with priority: last config overrides previous ones.
+
+    Args:
+        *configs: Configuration dictionaries to merge.
+
+    Returns:
+        Merged configuration dictionary.
+    """
+    def _deep_merge(base: Dict, override: Dict) -> Dict:
+        result = base.copy()
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = _deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+
+    merged = {}
+    for config in configs:
+        merged = _deep_merge(merged, config)
+    return merged
+
+
+def load_config(config_path: Optional[str] = None) -> AppConfig:
+    """
+    Load and merge configuration from multiple sources: YAML file, environment variables, and CLI arguments.
+
+    Priority order (highest to lowest):
+    1. CLI arguments
+    2. Environment variables
+    3. YAML configuration file
+    4. Default values
+
+    Args:
+        config_path: Optional path to YAML configuration file.
+
+    Returns:
+        Pydantic AppConfig model with merged configuration.
+    """
+    # Load configurations from all sources
+    yaml_config = load_yaml_config(config_path) if config_path else {}
+    env_config = get_env_config()
+    cli_config = parse_cli_args()
+
+    # Merge configurations with priority
+    merged_config = merge_configs(yaml_config, env_config, cli_config)
+
+    # Convert to AppConfig model
+    config = AppConfig(**merged_config)
+
+    # Log final config for debugging (using structlog)
+    logger.info("configuration_loaded", config=config.dict())
+
+    return config
+```

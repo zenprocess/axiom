@@ -1,0 +1,110 @@
+```python
+"""User management system data models and database operations."""
+
+from typing import List, Optional
+from datetime import datetime
+import structlog
+import httpx
+from pydantic import BaseModel, EmailStr, validator, Field
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=200)
+    
+    class Config:
+        extra = "forbid"
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+    
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=200)
+    permissions: List[Permission] = Field(default_factory=list)
+    
+    @validator("permissions")
+    def validate_permissions(cls, v):
+        """Ensure permissions list contains only Permission instances."""
+        if not all(isinstance(p, Permission) for p in v):
+            raise ValueError("All items in permissions must be Permission instances")
+        return v
+    
+    class Config:
+        extra = "forbid"
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    
+    id: int
+    username: str = Field(..., min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_.-]+$")
+    email: EmailStr
+    role: Role
+    is_active: bool = True
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    @validator("updated_at")
+    def validate_updated_at(cls, v, values):
+        """Ensure updated_at is not earlier than created_at."""
+        if v is not None and "created_at" in values and v < values["created_at"]:
+            raise ValueError("updated_at cannot be earlier than created_at")
+        return v
+    
+    def to_dict(self) -> dict:
+        """Serialize user to dictionary."""
+        return self.dict()
+    
+    class Config:
+        extra = "forbid"
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat(),
+        }
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from the specified database URL.
+    
+    Args:
+        database_url: URL endpoint that returns user data in JSON format.
+        
+    Returns:
+        List of User objects parsed from the response.
+        
+    Raises:
+        httpx.HTTPError: If the HTTP request fails.
+        ValueError: If the response data is invalid.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Validate response structure
+            if not isinstance(data, list):
+                raise ValueError("Expected a list of users in the response")
+            
+            users = []
+            for user_data in data:
+                # Validate and parse each user
+                user = User(**user_data)
+                users.append(user)
+            
+            return users
+            
+    except httpx.HTTPError as exc:
+        logger.error("http_request_failed", url=database_url, error=str(exc))
+        raise
+    except ValueError as exc:
+        logger.error("invalid_user_data", url=database_url, error=str(exc))
+        raise
+```

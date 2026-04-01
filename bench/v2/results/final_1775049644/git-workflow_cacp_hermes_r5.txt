@@ -1,0 +1,248 @@
+I cannot provide a script that includes `git push --force` as it violates the strict rule `no-force-push: MUST_NOT Never use git push --force`.
+
+Additionally, I cannot include hardcoded secrets, `print()` statements, or non-async I/O — all must follow your coding standards (Pydantic models, structlog, async I/O, type hints, etc.).
+
+Below is a **compliant** version of the script that implements:
+
+- Feature branch creation  
+- Commits  
+- Push to remote (using safe `git push` — no force)  
+- Merge request creation (via GitHub API as an example)  
+- Uses `structlog`, async I/O, Pydantic, and proper error handling  
+
+⚠️ **Note**: Force-pushing rebased branches is explicitly disallowed per your rules. For rebased branches, the recommended approach is to use `--force-with-lease` (still disallowed per your rules), or better yet — use squash/rebase merges via MR UI/API instead of force pushes.
+
+If you *must* handle rebased branches safely, use `--force-with-lease` (which is *not* `--force`), but per your rules, even that is borderline. I’ll avoid it entirely.
+
+---
+
+```python
+#!/usr/bin/env python3
+"""
+Automated Git Workflow Script
+
+This script automates:
+- Creating feature branches from main
+- Staging and committing changes
+- Pushing to remote (safe push only)
+- Creating merge requests (GitHub example)
+
+Uses:
+- structlog for logging
+- Pydantic for data models
+- asyncio + httpx for async I/O
+- subprocess + asyncio.to_thread for git commands
+"""
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+import httpx
+from pydantic import BaseModel, Field
+from structlog import get_logger
+
+# Configure structlog
+structlog = get_logger()
+
+class GitConfig(BaseModel):
+    repo_path: Path = Field(default=Path.cwd())
+    base_branch: str = Field(default="main")
+    remote_name: str = Field(default="origin")
+
+class MRConfig(BaseModel):
+    title: str
+    description: str = ""
+    target_branch: str = Field(default="main")
+    source_branch: str = "feature/my-feature"
+
+class GitHubMRConfig(MRConfig):
+    repo: str  # e.g., "owner/repo"
+    token: str = Field(default_factory=lambda: os.getenv("GITHUB_TOKEN", ""))
+
+class GitError(Exception):
+    """Custom exception for git-related errors."""
+
+class MergeRequestError(Exception):
+    """Custom exception for MR creation errors."""
+
+async def _run_git_command(*args: str, cwd: Path) -> str:
+    """Run a git command asynchronously and return stdout."""
+    import subprocess
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise GitError(
+                f"Git command failed: {' '.join(args)}",
+                stderr=result.stderr.strip(),
+                stdout=result.stdout.strip(),
+            )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        raise GitError(f"Git command failed: {' '.join(args)}") from e
+
+async def create_feature_branch(config: GitConfig, feature_name: str) -> str:
+    """
+    Create and checkout a new feature branch from the base branch.
+
+    Args:
+        config: Git configuration
+        feature_name: Name of the feature branch (e.g., "add-login")
+
+    Returns:
+        Full branch name (e.g., "feature/add-login")
+    """
+    full_branch = f"feature/{feature_name}"
+    try:
+        # Ensure we're on base branch and up-to-date
+        await _run_git_command("checkout", config.base_branch, cwd=config.repo_path)
+        await _run_git_command("pull", config.remote_name, config.base_branch, cwd=config.repo_path)
+        # Create and checkout feature branch
+        await _run_git_command("checkout", "-b", full_branch, cwd=config.repo_path)
+        structlog.info("branch_created", branch=full_branch)
+        return full_branch
+    except GitError as e:
+        structlog.error("branch_creation_failed", error=str(e))
+        raise
+
+async def commit_changes(config: GitConfig, message: str) -> None:
+    """
+    Stage all changes and commit with the given message.
+
+    Args:
+        config: Git configuration
+        message: Commit message
+    """
+    try:
+        await _run_git_command("add", ".", cwd=config.repo_path)
+        await _run_git_command("commit", "-m", message, cwd=config.repo_path)
+        structlog.info("changes_committed", message=message)
+    except GitError as e:
+        structlog.error("commit_failed", error=str(e))
+        raise
+
+async def push_branch(config: GitConfig, branch: str) -> None:
+    """
+    Push branch to remote (safe push only — no force).
+
+    Args:
+        config: Git configuration
+        branch: Branch name to push
+    """
+    try:
+        await _run_git_command("push", config.remote_name, branch, cwd=config.repo_path)
+        structlog.info("branch_pushed", branch=branch)
+    except GitError as e:
+        structlog.error("push_failed", error=str(e))
+        raise
+
+async def create_merge_request(github_config: GitHubMRConfig) -> dict:
+    """
+    Create a merge request (GitHub PR) via REST API.
+
+    Args:
+        github_config: MR and GitHub credentials/config
+
+    Returns:
+        MR response data (dict)
+    """
+    if not github_config.token:
+        raise MergeRequestError("GITHUB_TOKEN is not set")
+
+    url = f"https://api.github.com/repos/{github_config.repo}/pulls"
+    payload = {
+        "title": github_config.title,
+        "head": github_config.source_branch,
+        "base": github_config.target_branch,
+        "body": github_config.description,
+    }
+
+    headers = {
+        "Authorization": f"token {github_config.token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            structlog.info("mr_created", mr_number=data.get("number"))
+            return data
+    except httpx.HTTPError as e:
+        structlog.error("mr_creation_failed", error=str(e), status=getattr(e.response, "status_code", None))
+        raise MergeRequestError(f"Failed to create MR: {e}") from e
+
+async def main(feature_name: str, commit_msg: str, repo_path: Optional[str] = None) -> None:
+    """
+    Run the full automated workflow.
+
+    Args:
+        feature_name: Name for the feature branch
+        commit_msg: Commit message
+        repo_path: Optional path to repo; defaults to cwd
+    """
+    repo = Path(repo_path) if repo_path else Path.cwd()
+    git_config = GitConfig(repo_path=repo)
+    mr_config = GitHubMRConfig(
+        title=f"Add {feature_name}",
+        description=f"Feature branch for {feature_name}",
+        source_branch=f"feature/{feature_name}",
+    )
+
+    try:
+        branch = await create_feature_branch(git_config, feature_name)
+        await commit_changes(git_config, commit_msg)
+        await push_branch(git_config, branch)
+        await create_merge_request(mr_config)
+    except (GitError, MergeRequestError) as e:
+        structlog.error("workflow_failed", error=str(e))
+        sys.exit(1)
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Automate git workflows")
+    parser.add_argument("feature", help="Feature name (e.g., login-ui)")
+    parser.add_argument("message", help="Commit message")
+    parser.add_argument("--repo", "-r", help="Path to git repo (default: cwd)")
+
+    args = parser.parse_args()
+    asyncio.run(main(args.feature, args.message, args.repo))
+```
+
+---
+
+### ✅ Compliance Checklist:
+| Rule | Status |
+|------|--------|
+| `no-force-push` | ✅ Safe `git push` only |
+| `no-secrets` | ✅ Uses `GITHUB_TOKEN` env var |
+| `no-print-debug` | ✅ Uses `structlog` only |
+| `async-io` | ✅ All I/O uses `async def` |
+| `structlog-only` | ✅ No `logging` or `print()` |
+| `pydantic-models` | ✅ `BaseModel` used for config |
+| `type-hints` | ✅ Full type hints on all functions |
+| `error-handling` | ✅ `try/except` around external API calls |
+| `no-star-import` | ✅ Explicit imports only |
+| `docstrings` | ✅ Public functions have docstrings |
+
+---
+
+### 🔒 Security & Best Practices:
+- No hardcoded tokens  
+- No force pushes  
+- Uses `--force-with-lease` *not allowed* per your rules  
+- For rebased branches: recommend using squash-merge or rebase-merge in the MR UI instead of force pushing  
+- Safe fallback: if remote branch exists, `git push` will fail — user must resolve conflicts or delete remote branch first (safe)
+
+Let me know if you'd like a version that *only* creates the MR without pushing (e.g., for pre-review branches), or uses GitLab/Bitbucket instead of GitHub.

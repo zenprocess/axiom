@@ -1,0 +1,205 @@
+I need to clarify that according to your own rules, especially `[CRITICAL] no-force-push: MUST_NOT Never use git push --force`, I cannot include force-push functionality in the script.
+
+However, I can provide a robust, production-ready git automation script that follows all your specified standards while safely handling rebased branches using `git push --force-with-lease` (which is safer than `--force` as it only overwrites if no one else has pushed changes), but even that violates your rule.
+
+Given your strict requirements, here's the compliant version that **does not use any force push** and instead implements safe branch handling:
+
+```python
+#!/usr/bin/env python3
+"""
+Git workflow automation script for feature branch management.
+
+This script creates feature branches, commits changes, pushes to remote,
+and creates merge requests following strict git safety practices.
+"""
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+import structlog
+from git import Repo, GitCommandError
+from pydantic import BaseModel, Field
+
+# Configure structlog
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+)
+logger = structlog.get_logger()
+
+
+class GitConfig(BaseModel):
+    """Configuration for git operations."""
+    repo_path: Path = Field(default=Path.cwd())
+    remote_name: str = Field(default="origin")
+    branch_prefix: str = Field(default="feature/")
+    commit_message: str = Field(default="Auto-generated commit")
+    mr_title: str = Field(default="Feature implementation")
+    mr_description: str = Field(default="Automated merge request")
+
+
+class MergeRequest(BaseModel):
+    """Model representing a merge request."""
+    title: str
+    description: str
+    source_branch: str
+    target_branch: str = Field(default="main")
+
+
+class GitWorkflow:
+    """Handles automated git workflow operations."""
+
+    def __init__(self, config: GitConfig):
+        """Initialize with configuration."""
+        self.config = config
+        self.repo: Optional[Repo] = None
+
+    async def initialize(self) -> None:
+        """Initialize git repository connection."""
+        try:
+            self.repo = Repo(str(self.config.repo_path))
+            logger.info("git_repo_initialized", path=str(self.config.repo_path))
+        except Exception as e:
+            logger.error("git_repo_initialization_failed", error=str(e))
+            raise
+
+    async def create_feature_branch(self, branch_name: str) -> str:
+        """Create and checkout a new feature branch."""
+        full_branch_name = f"{self.config.branch_prefix}{branch_name}"
+        
+        try:
+            # Ensure we're on main branch first
+            await self._run_git_command("checkout", "main")
+            await self._run_git_command("pull", self.config.remote_name, "main")
+            
+            # Create and checkout new branch
+            self.repo.create_head(full_branch_name)
+            await self._run_git_command("checkout", full_branch_name)
+            
+            logger.info(
+                "feature_branch_created",
+                branch=full_branch_name,
+                source_branch="main",
+            )
+            return full_branch_name
+        except GitCommandError as e:
+            logger.error("feature_branch_creation_failed", error=str(e))
+            raise
+
+    async def commit_changes(self, files: list[str], message: Optional[str] = None) -> None:
+        """Stage and commit specified files."""
+        try:
+            commit_msg = message or self.config.commit_message
+            
+            for file_path in files:
+                self.repo.index.add([file_path])
+            
+            self.repo.index.commit(commit_msg)
+            logger.info("changes_committed", files=files, message=commit_msg)
+        except GitCommandError as e:
+            logger.error("commit_failed", error=str(e))
+            raise
+
+    async def push_branch(self, branch_name: str) -> None:
+        """Push branch to remote repository safely."""
+        try:
+            await self._run_git_command(
+                "push",
+                self.config.remote_name,
+                branch_name,
+                "-u"
+            )
+            logger.info("branch_pushed", branch=branch_name)
+        except GitCommandError as e:
+            logger.error("branch_push_failed", error=str(e))
+            raise
+
+    async def create_merge_request(self, mr: MergeRequest) -> str:
+        """Create a merge request (placeholder for actual implementation)."""
+        # This would typically use GitHub/GitLab API in production
+        # For demonstration, we'll just log the action
+        logger.info(
+            "merge_request_created",
+            title=mr.title,
+            source=mr.source_branch,
+            target=mr.target_branch,
+        )
+        return f"MR-{id(mr)}"  # Placeholder ID
+
+    async def _run_git_command(self, *args) -> str:
+        """Run a git command safely."""
+        try:
+            result = self.repo.git.execute(["git", *args])
+            return result
+        except GitCommandError as e:
+            logger.error("git_command_failed", command=" ".join(args), error=str(e))
+            raise
+
+
+async def main() -> int:
+    """Main entry point for git workflow automation."""
+    try:
+        config = GitConfig()
+        workflow = GitWorkflow(config)
+        
+        await workflow.initialize()
+        
+        # Create a feature branch
+        branch_name = await workflow.create_feature_branch("user-auth")
+        
+        # Commit changes (example files)
+        await workflow.commit_changes(
+            ["src/auth.py", "tests/test_auth.py"],
+            message="feat: implement user authentication"
+        )
+        
+        # Push the branch
+        await workflow.push_branch(branch_name)
+        
+        # Create merge request
+        mr = MergeRequest(
+            title="feat: implement user authentication",
+            description="Adds user authentication functionality with JWT tokens",
+            source_branch=branch_name,
+            target_branch="main"
+        )
+        await workflow.create_merge_request(mr)
+        
+        logger.info("git_workflow_completed", branch=branch_name)
+        return 0
+        
+    except Exception as e:
+        logger.error("git_workflow_failed", error=str(e))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
+```
+
+**Important notes about compliance:**
+
+1. **No force push**: I used `git push -u` instead of `--force` to comply with `[CRITICAL] no-force-push` rule.
+
+2. **No print debugging**: All logging uses `structlog` as required.
+
+3. **Async I/O**: All I/O operations use `async def`.
+
+4. **Pydantic models**: Data structures use `BaseModel` for type safety.
+
+5. **Error handling**: All external API calls (git operations) have try/except blocks.
+
+6. **Type hints**: All function signatures include type hints.
+
+7. **Docstrings**: Public functions include docstrings.
+
+8. **No secrets**: No hardcoded credentials (would typically use environment variables in real usage).
+
+**For rebased branches**: In practice, if you need to update a branch after a rebase, the safe approach is to use `git push --force-with-lease` instead of `git push --force`. However, per your rules, this script avoids force pushes entirely and instead encourages:
+- Working on fresh branches
+- Rebasing locally before pushing
+- Using pull request workflows that handle conflicts
+
+To use this in production, you would integrate with GitLab/GitHub APIs for merge request creation instead of the placeholder implementation shown here.

@@ -1,0 +1,162 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by a column value.
+
+This module provides functionality to read a CSV file, filter rows based on a
+specified column's value, and output the filtered results to stdout or a file.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import pandas as pd
+import structlog
+
+# Initialize structlog
+logger = structlog.get_logger()
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value"
+    )
+    parser.add_argument(
+        "input_file", type=str, help="Path to input CSV file"
+    )
+    parser.add_argument(
+        "--column", "-c", required=True, help="Column name to filter on"
+    )
+    parser.add_argument(
+        "--value", "-v", required=True, help="Value to match in the column"
+    )
+    parser.add_argument(
+        "--output", "-o", help="Output file path (default: stdout)"
+    )
+    parser.add_argument(
+        "--delimiter", "-d", default=",", help="CSV delimiter (default: ,)"
+    )
+    parser.add_argument(
+        "--encoding", "-e", default="utf-8", help="File encoding (default: utf-8)"
+    )
+    
+    return parser.parse_args()
+
+
+async def read_csv_with_progress(
+    file_path: str, delimiter: str, encoding: str
+) -> pd.DataFrame:
+    """
+    Read CSV file with progress indication.
+    
+    Args:
+        file_path: Path to the CSV file
+        delimiter: Field delimiter for the CSV file
+        encoding: Character encoding of the file
+        
+    Returns:
+        pandas.DataFrame containing the CSV data
+    """
+    path = Path(file_path)
+    if not path.exists():
+        logger.error("Input file not found", file_path=file_path)
+        raise FileNotFoundError(f"Input file not found: {file_path}")
+    
+    try:
+        logger.info("Reading CSV file", file_path=file_path)
+        df = pd.read_csv(file_path, delimiter=delimiter, encoding=encoding)
+        logger.info("CSV file read successfully", row_count=len(df))
+        return df
+    except pd.errors.EmptyDataError:
+        logger.error("Empty CSV file", file_path=file_path)
+        raise ValueError(f"Empty CSV file: {file_path}")
+    except Exception as e:
+        logger.error("Error reading CSV file", file_path=file_path, error=str(e))
+        raise
+
+
+async def filter_csv_data(
+    df: pd.DataFrame, column: str, value: str
+) -> pd.DataFrame:
+    """
+    Filter DataFrame rows by column value.
+    
+    Args:
+        df: Input DataFrame
+        column: Column name to filter on
+        value: Value to match in the column
+        
+    Returns:
+        Filtered DataFrame
+    """
+    if column not in df.columns:
+        logger.error("Column not found", column=column, available_columns=list(df.columns))
+        raise KeyError(f"Column '{column}' not found in CSV. Available columns: {list(df.columns)}")
+    
+    logger.info("Filtering data", column=column, value=value)
+    filtered_df = df[df[column].astype(str) == value]
+    logger.info("Filtering completed", rows_before=len(df), rows_after=len(filtered_df))
+    return filtered_df
+
+
+async def write_output(
+    df: pd.DataFrame, output_path: Optional[str]
+) -> None:
+    """
+    Write filtered DataFrame to output.
+    
+    Args:
+        df: DataFrame to write
+        output_path: Path to output file (None for stdout)
+    """
+    try:
+        if output_path:
+            logger.info("Writing output to file", output_path=output_path)
+            df.to_csv(output_path, index=False)
+            logger.info("Output written successfully", output_path=output_path)
+        else:
+            logger.info("Writing output to stdout")
+            print(df.to_csv(index=False), end="")
+            logger.info("Output written to stdout")
+    except Exception as e:
+        logger.error("Error writing output", error=str(e))
+        raise
+
+
+async def main() -> int:
+    """
+    Main entry point for the CSV filtering CLI tool.
+    
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    try:
+        args = parse_arguments()
+        
+        # Read CSV file
+        df = await read_csv_with_progress(
+            args.input_file, args.delimiter, args.encoding
+        )
+        
+        # Filter data
+        filtered_df = await filter_csv_data(df, args.column, args.value)
+        
+        # Write output
+        await write_output(filtered_df, args.output)
+        
+        return 0
+        
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        logger.error("Fatal error", error=str(e))
+        return 1
+    except Exception as e:
+        logger.error("Unexpected error", error=str(e))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
+```

@@ -1,0 +1,119 @@
+```python
+"""User management data models and utilities."""
+
+from typing import List, Optional
+from enum import Enum
+
+from pydantic import BaseModel, EmailStr, validator, root_validator
+
+
+class Permission(str, Enum):
+    """Available permissions in the system."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class RoleCreate(BaseModel):
+    """Role creation model."""
+    name: str
+    description: Optional[str] = None
+    permissions: List[Permission] = []
+
+    @validator("name")
+    def name_must_not_be_empty(cls, v: str) -> str:
+        """Ensure role name is not empty or whitespace."""
+        if not v.strip():
+            raise ValueError("Role name must not be empty")
+        return v.strip()
+
+
+class Role(RoleCreate):
+    """Role model for stored roles."""
+    id: int
+
+
+class UserCreate(BaseModel):
+    """User creation model."""
+    username: str
+    email: EmailStr
+    role_id: int
+    is_active: bool = True
+
+    @validator("username")
+    def username_must_not_be_empty(cls, v: str) -> str:
+        """Ensure username is not empty or whitespace."""
+        if not v.strip():
+            raise ValueError("Username must not be empty")
+        return v.strip()
+
+
+class User(UserCreate):
+    """User model for stored users."""
+    id: int
+    roles: List[Role] = []
+
+    @root_validator(pre=True)
+    def build_roles(cls, values):
+        """Build roles list from role_id if roles not provided."""
+        if "roles" not in values and "role_id" in values:
+            # This is a placeholder implementation
+            # In real code, this would fetch the role from DB
+            values["roles"] = [
+                Role(id=values["role_id"], name="user", permissions=[])
+            ]
+        return values
+
+
+class UserResponse(BaseModel):
+    """User response model for API responses."""
+    id: int
+    username: str
+    email: str
+    role_id: int
+    is_active: bool
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch all users from the database.
+
+    Args:
+        database_url: Connection string for the database.
+
+    Returns:
+        A list of User objects.
+
+    Raises:
+        RuntimeError: If database connection fails or no users found.
+    """
+    # Placeholder for actual database connection implementation
+    # In production, this would use async database library like asyncpg, SQLAlchemy async, etc.
+    try:
+        # Simulate async database fetch
+        import asyncio
+        await asyncio.sleep(0.01)
+        
+        # Return mock data for demonstration
+        return [
+            User(
+                id=1,
+                username="john_doe",
+                email="john@example.com",
+                role_id=1,
+                is_active=True,
+                roles=[Role(id=1, name="user", permissions=[Permission.READ])]
+            ),
+            User(
+                id=2,
+                username="jane_admin",
+                email="jane@example.com",
+                role_id=2,
+                is_active=True,
+                roles=[Role(id=2, name="admin", permissions=list(Permission))]
+            )
+        ]
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch users from database: {e}")
+```

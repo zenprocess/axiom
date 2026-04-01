@@ -1,0 +1,216 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by column value with progress tracking.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+from pydantic import BaseModel
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for the CSV filter operation."""
+    input_file: Path
+    output_file: Optional[Path] = None
+    column_name: str
+    column_value: str
+    delimiter: str = ","
+    quotechar: str = '"'
+
+
+def parse_args() -> FilterConfig:
+    """Parse command-line arguments and return a validated config."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value with progress tracking"
+    )
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Path to the input CSV file",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        help="Path to write filtered output (stdout if not specified)",
+    )
+    parser.add_argument(
+        "--column",
+        "-c",
+        required=True,
+        help="Column name to filter on",
+    )
+    parser.add_argument(
+        "--value",
+        "-v",
+        required=True,
+        help="Value to match in the specified column",
+    )
+    parser.add_argument(
+        "--delimiter",
+        "-d",
+        default=",",
+        help="CSV field delimiter (default: ',')",
+    )
+    parser.add_argument(
+        "--quotechar",
+        "-q",
+        default='"',
+        help="CSV quote character (default: '\"')",
+    )
+    
+    args = parser.parse_args()
+    return FilterConfig(**vars(args))
+
+
+def read_csv_rows(input_file: Path, delimiter: str, quotechar: str) -> List[dict]:
+    """Read CSV file and return list of row dictionaries."""
+    rows = []
+    try:
+        with input_file.open("r", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(
+                csvfile, delimiter=delimiter, quotechar=quotechar
+            )
+            for row in reader:
+                rows.append(row)
+    except FileNotFoundError as exc:
+        logger.error("Input file not found", path=str(input_file), exc_info=exc)
+        sys.exit(1)
+    except csv.Error as exc:
+        logger.error("CSV parsing error", path=str(input_file), exc_info=exc)
+        sys.exit(1)
+    except UnicodeDecodeError as exc:
+        logger.error("Encoding error", path=str(input_file), exc_info=exc)
+        sys.exit(1)
+    return rows
+
+
+def filter_rows(
+    rows: List[dict], column_name: str, column_value: str
+) -> List[dict]:
+    """Filter rows where column_name equals column_value."""
+    filtered = []
+    total = len(rows)
+    for i, row in enumerate(rows, 1):
+        # Progress logging every 10% for readability
+        if i % max(1, total // 10) == 0 or i == total:
+            logger.info(
+                "Filtering progress",
+                processed=i,
+                total=total,
+                percentage=int(i / total * 100),
+            )
+        
+        try:
+            if row.get(column_name, "") == column_value:
+                filtered.append(row)
+        except Exception as exc:
+            logger.warning(
+                "Row filtering error",
+                row_index=i,
+                column=column_name,
+                value=column_value,
+                exc_info=exc,
+            )
+            continue
+    
+    return filtered
+
+
+def write_csv_rows(
+    rows: List[dict], output_file: Optional[Path], delimiter: str, quotechar: str
+) -> None:
+    """Write filtered rows to output file or stdout."""
+    if not rows:
+        logger.info("No matching rows found")
+        return
+    
+    fieldnames = list(rows[0].keys())
+    
+    try:
+        if output_file:
+            with output_file.open("w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.DictWriter(
+                    csvfile,
+                    fieldnames=fieldnames,
+                    delimiter=delimiter,
+                    quotechar=quotechar,
+                    quoting=csv.QUOTE_MINIMAL,
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+            logger.info("Output written to file", path=str(output_file))
+        else:
+            writer = csv.DictWriter(
+                sys.stdout,
+                fieldnames=fieldnames,
+                delimiter=delimiter,
+                quotechar=quotechar,
+                quoting=csv.QUOTE_MINIMAL,
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+    except PermissionError as exc:
+        logger.error("Permission denied writing output", exc_info=exc)
+        sys.exit(1)
+    except Exception as exc:
+        logger.error("Error writing output", exc_info=exc)
+        sys.exit(1)
+
+
+def main() -> None:
+    """Main entry point for the CLI tool."""
+    config = parse_args()
+    
+    logger.info(
+        "Starting CSV filter operation",
+        input_file=str(config.input_file),
+        column=config.column_name,
+        value=config.column_value,
+    )
+    
+    # Read all rows
+    rows = read_csv_rows(
+        config.input_file, config.delimiter, config.quotechar
+    )
+    logger.info("Read rows from input file", count=len(rows))
+    
+    # Filter rows
+    filtered_rows = filter_rows(rows, config.column_name, config.column_value)
+    logger.info(
+        "Filtering completed",
+        matched=len(filtered_rows),
+        total=len(rows),
+    )
+    
+    # Write output
+    write_csv_rows(filtered_rows, config.output_file, config.delimiter, config.quotechar)
+
+
+if __name__ == "__main__":
+    main()
+```

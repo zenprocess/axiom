@@ -1,0 +1,263 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by column value.
+
+This module provides a command-line interface to read a CSV file,
+filter rows based on a column value match, and output the results.
+Progress is displayed during processing, and errors are handled gracefully.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+# Configure structlog for structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.processors.format_exc_info,
+        structlog.dev.ConsoleRenderer(colors=True),
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger(__name__)
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s data.csv --column status --value active
+  %(prog)s input.csv -c "user_id" -v "123" -o filtered.csv
+        """,
+    )
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Input CSV file path",
+    )
+    parser.add_argument(
+        "-c",
+        "--column",
+        required=True,
+        type=str,
+        help="Column name to filter on",
+    )
+    parser.add_argument(
+        "-v",
+        "--value",
+        required=True,
+        type=str,
+        help="Value to match in the specified column",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help="Output file path (default: stdout)",
+    )
+    parser.add_argument(
+        "-d",
+        "--delimiter",
+        type=str,
+        default=",",
+        help="CSV delimiter (default: ',')",
+    )
+    return parser.parse_args()
+
+
+async def read_csv_file(input_path: Path) -> List[dict]:
+    """
+    Read CSV file and return list of dictionaries.
+
+    Args:
+        input_path: Path to the input CSV file
+
+    Returns:
+        List of dictionaries representing CSV rows
+
+    Raises:
+        FileNotFoundError: If the input file doesn't exist
+        csv.Error: If there's an error parsing the CSV
+    """
+    try:
+        with input_path.open(mode="r", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile, delimiter=",")
+            rows = list(reader)
+            logger.info(
+                "csv_read_success",
+                file=str(input_path),
+                row_count=len(rows),
+            )
+            return rows
+    except FileNotFoundError as exc:
+        logger.error(
+            "file_not_found",
+            file=str(input_path),
+            error=str(exc),
+        )
+        raise
+    except csv.Error as exc:
+        logger.error(
+            "csv_parse_error",
+            file=str(input_path),
+            error=str(exc),
+        )
+        raise
+
+
+async def filter_rows(
+    rows: List[dict], column: str, value: str
+) -> List[dict]:
+    """
+    Filter rows by matching column value.
+
+    Args:
+        rows: List of CSV row dictionaries
+        column: Column name to filter on
+        value: Value to match in the specified column
+
+    Returns:
+        List of rows where the specified column matches the value
+    """
+    filtered = []
+    total_rows = len(rows)
+    matched_count = 0
+
+    for i, row in enumerate(rows):
+        # Progress update every 10% and at the end
+        if (i + 1) % max(1, total_rows // 10) == 0 or i == total_rows - 1:
+            progress = ((i + 1) / total_rows) * 100 if total_rows > 0 else 100
+            logger.debug(
+                "filter_progress",
+                processed=i + 1,
+                total=total_rows,
+                progress=f"{progress:.1f}%",
+            )
+
+        # Check if column exists and matches value
+        if column in row and row[column] == value:
+            filtered.append(row)
+            matched_count += 1
+
+    logger.info(
+        "filter_complete",
+        total_rows=total_rows,
+        matched_rows=matched_count,
+        filter_column=column,
+        filter_value=value,
+    )
+    return filtered
+
+
+async def write_output(
+    rows: List[dict], output_path: Optional[Path], delimiter: str
+) -> None:
+    """
+    Write filtered rows to output.
+
+    Args:
+        rows: List of filtered row dictionaries
+        output_path: Path to output file, or None for stdout
+        delimiter: CSV delimiter to use
+    """
+    if not rows:
+        logger.warning("no_rows_to_output")
+        return
+
+    # Use fieldnames from first row if available
+    fieldnames = list(rows[0].keys()) if rows else []
+
+    try:
+        if output_path is None:
+            # Output to stdout
+            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames, delimiter=delimiter)
+            writer.writeheader()
+            writer.writerows(rows)
+            logger.info(
+                "output_written",
+                output="stdout",
+                row_count=len(rows),
+            )
+        else:
+            # Output to file
+            with output_path.open(mode="w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames, delimiter=delimiter)
+                writer.writeheader()
+                writer.writerows(rows)
+                logger.info(
+                    "output_written",
+                    output=str(output_path),
+                    row_count=len(rows),
+                )
+    except IOError as exc:
+        logger.error(
+            "output_error",
+            error=str(exc),
+        )
+        raise
+
+
+async def main() -> int:
+    """
+    Main entry point for the CSV filter CLI tool.
+
+    Returns:
+        Exit code (0 for success, non-zero for errors)
+    """
+    try:
+        args = parse_arguments()
+
+        logger.info(
+            "start_filter",
+            input_file=str(args.input_file),
+            column=args.column,
+            value=args.value,
+            output=str(args.output) if args.output else "stdout",
+        )
+
+        # Read CSV file
+        rows = await read_csv_file(args.input_file)
+
+        # Filter rows
+        filtered_rows = await filter_rows(rows, args.column, args.value)
+
+        # Write output
+        await write_output(filtered_rows, args.output, args.delimiter)
+
+        return 0
+
+    except FileNotFoundError as exc:
+        logger.error("file_error", error=str(exc))
+        return 1
+    except csv.Error as exc:
+        logger.error("csv_error", error=str(exc))
+        return 2
+    except IOError as exc:
+        logger.error("io_error", error=str(exc))
+        return 3
+    except Exception as exc:
+        logger.error("unexpected_error", error=str(exc))
+        return 99
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    exit_code = asyncio.run(main())
+    sys.exit(exit_code)
+```

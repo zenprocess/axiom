@@ -1,0 +1,95 @@
+```python
+"""Data models and utilities for a user management system."""
+
+from typing import List, Optional
+from pydantic import BaseModel, EmailStr, validator, Field
+import structlog
+import httpx
+import asyncio
+
+log = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission that can be assigned to a role."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=200)
+
+    class Config:
+        extra = "forbid"
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=200)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    @validator("name")
+    def name_must_be_valid(cls, v):
+        if not v.replace("_", "").isalnum():
+            raise ValueError("name must contain only alphanumeric characters and underscores")
+        return v
+
+    class Config:
+        extra = "forbid"
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    username: str = Field(..., min_length=3, max_length=30)
+    email: EmailStr
+    full_name: Optional[str] = Field(None, max_length=100)
+    role: Role
+    is_active: bool = True
+    created_at: Optional[str] = None
+
+    @validator("username")
+    def username_must_be_valid(cls, v):
+        if not v.replace("_", "").isalnum():
+            raise ValueError("username must contain only alphanumeric characters and underscores")
+        return v.lower()
+
+    def to_dict(self) -> dict:
+        """Serialize user to dictionary."""
+        return self.dict()
+
+    class Config:
+        extra = "forbid"
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database API endpoint.
+
+    Args:
+        database_url: URL of the users API endpoint
+
+    Returns:
+        List of User objects
+
+    Raises:
+        httpx.HTTPError: If the request fails
+        ValueError: If the response data fails validation
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            users_data = response.json()
+
+            if not isinstance(users_data, list):
+                raise ValueError("Expected a list of users in response")
+
+            return [User(**user_data) for user_data in users_data]
+
+    except httpx.HTTPError as e:
+        log.error("http_request_failed", url=database_url, error=str(e))
+        raise
+    except ValueError as e:
+        log.error("user_validation_failed", url=database_url, error=str(e))
+        raise
+```

@@ -1,0 +1,147 @@
+Here's a Python module implementing the requested data models (`User`, `Role`, `Permission`) with validation and serialization using **Pydantic**, plus an async function to fetch users from a database URL — all conforming to the provided rules:
+
+✅ Uses `structlog` only  
+✅ All I/O is async (`async def`)  
+✅ No hardcoded secrets  
+✅ Pydantic models with type hints & validation  
+✅ Proper error handling  
+✅ No `print()` or `logging`  
+✅ Docstrings on public functions  
+✅ No star imports  
+
+```python
+# user_models.py
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+from urllib.parse import urlparse
+
+import httpx
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+from structlog import get_logger
+
+logger = get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission granting access to a specific action or resource."""
+    model_config = ConfigDict(extra='forbid')
+
+    name: str = Field(..., description="Unique name of the permission, e.g., 'user.read'")
+    description: Optional[str] = Field(None, description="Human-readable description")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v:
+            raise ValueError("Permission name cannot be empty")
+        if not all(c.isalnum() or c in "._-" for c in v):
+            raise ValueError("Permission name must contain only alphanumeric, '.', '_' or '-' characters")
+        return v
+
+
+class Role(BaseModel):
+    """Represents a role with a set of permissions."""
+    model_config = ConfigDict(extra='forbid')
+
+    id: int = Field(..., ge=1, description="Unique numeric identifier")
+    name: str = Field(..., pattern=r"^[a-z0-9_]+$", description="Snake-case role name, e.g., 'admin'")
+    description: Optional[str] = Field(None, description="Human-readable description")
+    permissions: List[Permission] = Field(default_factory=list, description="List of associated permissions")
+
+    def has_permission(self, name: str) -> bool:
+        """Check if the role grants a given permission by name."""
+        return any(p.name == name for p in self.permissions)
+
+
+class User(BaseModel):
+    """Represents a system user with roles and metadata."""
+    model_config = ConfigDict(extra='forbid')
+
+    id: int = Field(..., ge=1, description="Unique numeric user ID")
+    username: str = Field(..., min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9_]+$",
+                          description="Username, alphanumeric + underscore only")
+    email: str = Field(..., pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", description="Valid email address")
+    role_ids: List[int] = Field(default_factory=list, description="IDs of assigned roles")
+    created_at: Optional[datetime] = Field(default=None, description="Account creation timestamp")
+    updated_at: Optional[datetime] = Field(default=None, description="Last update timestamp")
+    is_active: bool = Field(default=True, description="Whether the user account is active")
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return v.lower().strip()
+
+    def get_permissions(self, roles_map: Dict[int, Role]) -> List[Permission]:
+        """Resolve all effective permissions from assigned role IDs."""
+        perms = []
+        seen = set()
+        for rid in self.role_ids:
+            role = roles_map.get(rid)
+            if role:
+                for p in role.permissions:
+                    if p.name not in seen:
+                        perms.append(p)
+                        seen.add(p.name)
+        return perms
+
+
+async def fetch_users(database_url: str, timeout: float = 5.0) -> List[User]:
+    """
+    Fetch users from a remote database API endpoint.
+
+    Args:
+        database_url: URL to the API endpoint returning a JSON list of user records.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        List of validated User objects.
+
+    Raises:
+        ValueError: If the URL is invalid or not an HTTP(S) scheme.
+        RuntimeError: If the HTTP request fails or the response is malformed.
+    """
+    parsed = urlparse(database_url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}. Must be 'http' or 'https'.")
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Failed to fetch users: {exc}") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid JSON in response: {exc}") from exc
+
+    if not isinstance(data, list):
+        raise RuntimeError(f"Expected list of users, got {type(data).__name__}")
+
+    users = []
+    for idx, user_data in enumerate(data):
+        try:
+            users.append(User.model_validate(user_data))
+        except Exception as exc:
+            logger.warning("user_validation_failed", index=idx, error=str(exc))
+            # Skip invalid entries, but do not fail the entire batch
+            continue
+
+    return users
+``` 
+
+### Notes
+
+- **Validation**:
+  - `Permission.name`: Alphanumeric + `._-`
+  - `Role.name`: Snake-case only (`^[a-z0-9_]+$`)
+  - `User.username`: Same pattern, length 3–32
+  - `User.email`: Basic email regex; normalized to lowercase
+- **Serialization**: Pydantic handles `.model_dump()` / `.model_validate()` automatically
+- **Extensibility**: `roles_map` in `User.get_permissions()` is intentionally flexible — caller supplies context
+- **Logging**: Uses `structlog` only (via `get_logger`), no `print` or `logging`
+- **Safety**: No hardcoded secrets, no `--force` push triggers, no star imports
+
+Let me know if you’d like a companion module for roles/permissions management or a test suite!

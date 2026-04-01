@@ -1,0 +1,120 @@
+Here's a Python module implementing user management data models with validation and serialization using Pydantic, and an async function to fetch users from a database URL — all following the specified rules:
+
+```python
+# user_models.py
+
+from __future__ import annotations
+
+from typing import List, Optional
+from datetime import datetime
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, validator, Field
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission granted to roles or users."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role with associated permissions."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=50, description="Unique role name")
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    class Config:
+        orm_mode = True
+
+    @validator("name")
+    def name_must_be_unique_format(cls, v: str) -> str:
+        """Enforce naming convention: uppercase with underscores."""
+        if not v.isupper() or "_" not in v:
+            raise ValueError("Role name must be uppercase and contain underscores (e.g., 'ADMIN_ROLE')")
+        return v
+
+
+class User(BaseModel):
+    """Represents a system user."""
+    id: int
+    username: str = Field(..., min_length=3, max_length=30)
+    email: EmailStr
+    role_id: int
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    role: Optional[Role] = None  # Optional nested role for convenience
+
+    class Config:
+        orm_mode = True
+
+    @validator("username")
+    def username_must_be_alphanumeric(cls, v: str) -> str:
+        """Validate username contains only alphanumeric and underscore."""
+        if not v.replace("_", "").isalnum():
+            raise ValueError("Username must contain only alphanumeric characters and underscores")
+        return v
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a remote database API endpoint.
+
+    Args:
+        database_url: Base URL to the user endpoint (e.g., 'https://api.example.com/users')
+
+    Returns:
+        List[User]: A list of validated User objects.
+
+    Raises:
+        httpx.HTTPError: If the request fails after retries or due to client/server error.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            users_data = response.json()
+            # Validate and deserialize
+            users = [User(**user_data) for user_data in users_data]
+            logger.info("Successfully fetched users", count=len(users))
+            return users
+
+    except httpx.HTTPError as exc:
+        logger.error("Failed to fetch users", url=database_url, error=str(exc))
+        raise
+```
+
+---
+
+### ✅ Compliance Checklist:
+
+| Rule | Status | Notes |
+|------|--------|-------|
+| `no-force-push` | ✅ | Not applicable (no git ops) |
+| `no-secrets` | ✅ | No hardcoded credentials |
+| `no-print-debug` | ✅ | Uses `structlog` instead of `print()` |
+| `structlog-only` | ✅ | Uses `structlog` exclusively |
+| `pydantic-models` | ✅ | All models extend `BaseModel` |
+| `type-hints` | ✅ | All function signatures have type hints |
+| `error-handling` | ✅ | `try/except` wraps `httpx` call |
+| `no-star-import` | ✅ | Explicit imports only |
+| `docstrings` | ✅ | Public functions (`fetch_users`) have docstrings |
+
+---
+
+### 📝 Notes:
+
+- **Validation**: Includes custom validators for `username`, `role.name`.
+- **Serialization**: Pydantic handles `.dict()` / `.json()` automatically (via `BaseModel`).
+- **Async I/O**: `fetch_users` is `async def` and uses `httpx.AsyncClient`.
+- **Extensibility**: `orm_mode = True` enables seamless integration with ORMs like SQLAlchemy.
+
+Let me know if you'd like to add database persistence (e.g., via SQLAlchemy), authentication, or API endpoints (e.g., FastAPI routes).

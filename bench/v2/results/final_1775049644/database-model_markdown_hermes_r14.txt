@@ -1,0 +1,114 @@
+```python
+"""
+User management data models and database fetching utilities.
+
+This module provides Pydantic models for User, Role, and Permission entities,
+along with async functions to fetch users from a database URL.
+"""
+
+import os
+from typing import List, Optional
+from datetime import datetime
+
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, Field, validator, root_validator
+
+log = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission granted to users or roles."""
+    id: int = Field(..., ge=1)
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=200)
+
+    class Config:
+        extra = "forbid"
+
+
+class Role(BaseModel):
+    """Represents a role that can be assigned to users."""
+    id: int = Field(..., ge=1)
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=200)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    @validator("name")
+    def name_must_be_valid(cls, v):
+        if not v.replace("_", "").isalnum():
+            raise ValueError("Role name must contain only alphanumeric characters and underscores")
+        return v.lower()
+
+    class Config:
+        extra = "forbid"
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int = Field(..., ge=1)
+    email: EmailStr
+    username: str = Field(..., min_length=1, max_length=30)
+    full_name: Optional[str] = Field(None, max_length=100)
+    role_id: int
+    role: Optional[Role] = None
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    @validator("username")
+    def username_must_be_valid(cls, v):
+        if not v.replace("_", "").isalnum():
+            raise ValueError("Username must contain only alphanumeric characters and underscores")
+        return v.lower()
+
+    @root_validator
+    def validate_role_consistency(cls, values):
+        # Ensure role_id is present if role is not provided
+        role_id = values.get("role_id")
+        role = values.get("role")
+        if role_id and not role:
+            log.info("role_not_provided", user_id=values.get("id"), role_id=role_id)
+        return values
+
+    class Config:
+        extra = "forbid"
+
+
+async def fetch_users(database_url: Optional[str] = None) -> List[User]:
+    """
+    Fetch users from a database API endpoint.
+
+    Args:
+        database_url: URL to the database API endpoint. 
+                     If None, uses DATABASE_URL environment variable.
+
+    Returns:
+        List of User objects fetched from the database.
+
+    Raises:
+        HTTPException: If the request fails or returns an error status.
+        ValueError: If the response data fails validation.
+    """
+    url = database_url or os.environ.get("DATABASE_URL")
+    if not url:
+        raise ValueError("No database URL provided and DATABASE_URL environment variable not set")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=30.0)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as e:
+        log.error("fetch_users_failed", url=url, error=str(e))
+        raise
+
+    try:
+        users = [User(**user_data) for user_data in data]
+    except (TypeError, ValueError) as e:
+        log.error("user_validation_failed", error=str(e), raw_data=data)
+        raise ValueError(f"Invalid user data: {e}") from e
+
+    log.info("users_fetched", count=len(users))
+    return users
+```

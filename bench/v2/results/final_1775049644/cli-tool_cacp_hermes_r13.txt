@@ -1,0 +1,229 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by a column value.
+
+Usage:
+    python csv_filter.py input.csv --column name --value John
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+from pydantic import BaseModel, ValidationError
+
+# Initialize structlog for logging
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging_level="INFO"),
+)
+logger = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for CSV filtering."""
+    input_file: Path
+    column: str
+    value: str
+    output_file: Optional[Path] = None
+    delimiter: str = ","
+    encoding: str = "utf-8"
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value."
+    )
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Path to input CSV file",
+    )
+    parser.add_argument(
+        "--column",
+        "-c",
+        required=True,
+        help="Column name to filter on",
+    )
+    parser.add_argument(
+        "--value",
+        "-v",
+        required=True,
+        help="Value to match in the specified column",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        help="Output file path (default: stdout)",
+    )
+    parser.add_argument(
+        "--delimiter",
+        "-d",
+        default=",",
+        help="CSV delimiter (default: comma)",
+    )
+    parser.add_argument(
+        "--encoding",
+        "-e",
+        default="utf-8",
+        help="File encoding (default: utf-8)",
+    )
+    return parser.parse_args()
+
+
+async def read_csv_file(config: FilterConfig) -> List[dict]:
+    """
+    Read and return CSV data.
+
+    Args:
+        config: FilterConfig with file and parsing parameters.
+
+    Returns:
+        List of dictionaries representing CSV rows.
+
+    Raises:
+        FileNotFoundError: If input file does not exist.
+        ValueError: If column name is not found in CSV header.
+    """
+    logger.info("reading_csv_file", path=str(config.input_file))
+    
+    try:
+        with config.input_file.open("r", encoding=config.encoding) as file:
+            reader = csv.DictReader(file, delimiter=config.delimiter)
+            
+            if config.column not in reader.fieldnames:
+                raise ValueError(
+                    f"Column '{config.column}' not found in CSV header. "
+                    f"Available columns: {reader.fieldnames}"
+                )
+            
+            rows = []
+            for row in reader:
+                rows.append(row)
+            
+            logger.info("csv_read_complete", row_count=len(rows))
+            return rows
+    except FileNotFoundError as e:
+        logger.error("file_not_found", path=str(config.input_file))
+        raise
+
+
+async def filter_rows(rows: List[dict], column: str, value: str) -> List[dict]:
+    """
+    Filter rows by matching column value.
+
+    Args:
+        rows: List of CSV row dictionaries.
+        column: Column name to filter on.
+        value: Value to match.
+
+    Returns:
+        Filtered list of rows.
+    """
+    logger.info("filtering_rows", column=column, value=value, total_rows=len(rows))
+    
+    filtered = [row for row in rows if row.get(column) == value]
+    
+    logger.info("filtering_complete", filtered_count=len(filtered))
+    return filtered
+
+
+async def write_output(
+    rows: List[dict], 
+    output_path: Optional[Path] = None, 
+    delimiter: str = ","
+) -> None:
+    """
+    Write filtered rows to output.
+
+    Args:
+        rows: List of filtered row dictionaries.
+        output_path: Output file path (None for stdout).
+        delimiter: CSV delimiter for output.
+    """
+    if not rows:
+        logger.warning("no_rows_to_output")
+        return
+
+    logger.info("writing_output", row_count=len(rows))
+    
+    fieldnames = list(rows[0].keys())
+    
+    if output_path:
+        try:
+            with output_path.open("w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=delimiter)
+                writer.writeheader()
+                writer.writerows(rows)
+            logger.info("output_written", path=str(output_path))
+        except IOError as e:
+            logger.error("output_write_failed", path=str(output_path), error=str(e))
+            raise
+    else:
+        # Write to stdout
+        writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames, delimiter=delimiter)
+        writer.writeheader()
+        writer.writerows(rows)
+        logger.info("output_written", destination="stdout")
+
+
+async def main() -> int:
+    """
+    Main entry point for the CLI tool.
+
+    Returns:
+        Exit code (0 for success, 1 for error).
+    """
+    try:
+        args = parse_args()
+        
+        # Validate config
+        config = FilterConfig(
+            input_file=args.input_file,
+            column=args.column,
+            value=args.value,
+            output_file=args.output,
+            delimiter=args.delimiter,
+            encoding=args.encoding,
+        )
+        
+        # Read CSV
+        try:
+            rows = await read_csv_file(config)
+        except (FileNotFoundError, ValueError) as e:
+            logger.error("processing_failed", error=str(e))
+            return 1
+        
+        # Filter rows
+        filtered_rows = await filter_rows(rows, config.column, config.value)
+        
+        # Write output
+        try:
+            await write_output(filtered_rows, config.output_file, config.delimiter)
+        except IOError as e:
+            logger.error("output_failed", error=str(e))
+            return 1
+        
+        logger.info("processing_complete", success=True)
+        return 0
+        
+    except ValidationError as e:
+        logger.error("invalid_configuration", error=str(e))
+        return 1
+    except KeyboardInterrupt:
+        logger.info("processing_interrupted")
+        return 130
+    except Exception as e:
+        logger.error("unexpected_error", error=str(e))
+        return 1
+
+
+if __name__ == "__main__":
+    import asyncio
+    sys.exit(asyncio.run(main()))
+```

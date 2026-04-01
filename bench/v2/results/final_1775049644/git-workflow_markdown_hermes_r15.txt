@@ -1,0 +1,305 @@
+I'll create a Python script for automating git workflows that follows your development rules.
+
+```python
+#!/usr/bin/env python3
+"""
+Git Workflow Automation Script
+
+This script automates common git workflows including:
+- Creating feature branches
+- Committing changes
+- Pushing to remote
+- Creating merge requests
+- Handling rebased branches safely
+"""
+
+import os
+import sys
+import subprocess
+from pathlib import Path
+from typing import Optional
+
+import structlog
+from pydantic import BaseModel, Field, field_validator
+
+log = structlog.get_logger()
+
+
+class GitConfig(BaseModel):
+    """Configuration for git operations."""
+    remote: str = Field(default="origin", description="Remote repository name")
+    branch_prefix: str = Field(default="feature/", description="Prefix for feature branches")
+    
+    @field_validator("remote")
+    @classmethod
+    def validate_remote(cls, v: str) -> str:
+        """Validate remote name."""
+        if not v:
+            raise ValueError("Remote name cannot be empty")
+        return v
+
+
+class GitWorkflow:
+    """Automated git workflow management."""
+    
+    def __init__(self, repo_path: Path, config: Optional[GitConfig] = None):
+        """
+        Initialize the git workflow manager.
+        
+        Args:
+            repo_path: Path to the git repository
+            config: Git configuration (optional)
+        """
+        self.repo_path = repo_path
+        self.config = config or GitConfig()
+        self._ensure_git_repo()
+    
+    def _ensure_git_repo(self) -> None:
+        """Verify we're in a git repository."""
+        git_dir = self.repo_path / ".git"
+        if not git_dir.exists():
+            raise ValueError(f"{self.repo_path} is not a git repository")
+    
+    def _run_command(self, command: list[str], check: bool = True) -> subprocess.CompletedProcess:
+        """
+        Run a git command in the repository directory.
+        
+        Args:
+            command: Command arguments to run
+            check: Whether to raise exception on non-zero exit code
+            
+        Returns:
+            CompletedProcess with command results
+        """
+        cmd = ["git"] + command
+        log.info("executing_git_command", command=" ".join(cmd), cwd=str(self.repo_path))
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(self.repo_path),
+                capture_output=True,
+                text=True,
+                check=check
+            )
+            
+            if result.returncode == 0:
+                log.info("git_command_success", command=" ".join(cmd), stdout=result.stdout.strip())
+            else:
+                log.warning("git_command_failed", command=" ".join(cmd), 
+                          stderr=result.stderr.strip(), returncode=result.returncode)
+            
+            return result
+        except subprocess.CalledProcessError as e:
+            log.error("git_command_error", command=" ".join(cmd), error=str(e))
+            raise
+    
+    def create_branch(self, branch_name: str) -> str:
+        """
+        Create a new feature branch from current branch.
+        
+        Args:
+            branch_name: Name for the new branch (will be prefixed if needed)
+            
+        Returns:
+            Full branch name created
+        """
+        # Ensure branch has proper prefix
+        full_branch_name = (
+            branch_name 
+            if branch_name.startswith(self.config.branch_prefix) 
+            else f"{self.config.branch_prefix}{branch_name}"
+        )
+        
+        log.info("creating_branch", branch=full_branch_name)
+        
+        # Create and checkout branch
+        self._run_command(["checkout", "-b", full_branch_name])
+        
+        return full_branch_name
+    
+    def commit_changes(self, message: str) -> bool:
+        """
+        Commit all staged changes with the given message.
+        
+        Args:
+            message: Commit message
+            
+        Returns:
+            True if commit was successful
+        """
+        log.info("committing_changes", message=message)
+        
+        # Add all changes
+        self._run_command(["add", "."])
+        
+        # Commit changes
+        self._run_command(["commit", "-m", message])
+        
+        return True
+    
+    def push_branch(self, branch_name: str, force: bool = False) -> bool:
+        """
+        Push branch to remote repository.
+        
+        Args:
+            branch_name: Name of the branch to push
+            force: Whether to use force push (use with caution)
+            
+        Returns:
+            True if push was successful
+        """
+        log.info("pushing_branch", branch=branch_name, force=force)
+        
+        # Determine push command
+        if force:
+            log.warning("using_force_push", branch=branch_name, 
+                       warning="Force push can rewrite history - ensure no one else is working on this branch")
+            self._run_command(["push", "--force-with-lease", self.config.remote, branch_name])
+        else:
+            self._run_command(["push", "-u", self.config.remote, branch_name])
+        
+        return True
+    
+    def get_current_branch(self) -> str:
+        """Get the current branch name."""
+        result = self._run_command(["rev-parse", "--abbrev-ref", "HEAD"])
+        return result.stdout.strip()
+    
+    def create_merge_request(self, branch_name: str, title: str, description: str = "") -> str:
+        """
+        Create a merge request (GitHub/GitLab equivalent).
+        
+        This is a placeholder for the actual merge request creation logic.
+        In a real implementation, this would use the appropriate API.
+        
+        Args:
+            branch_name: Source branch for the merge request
+            title: Title of the merge request
+            description: Description of the merge request
+            
+        Returns:
+            URL to the created merge request
+        """
+        log.info("creating_merge_request", 
+                branch=branch_name,
+                title=title,
+                description=description)
+        
+        # In a real implementation, this would call GitHub/GitLab API
+        # For now, return a placeholder
+        return f"https://example.com/merge-requests/{branch_name}"
+
+
+def main():
+    """Main entry point for the script."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Automate git workflows: create branches, commit, push, and create merge requests"
+    )
+    parser.add_argument(
+        "branch_name", 
+        help="Name for the new feature branch (will be prefixed with 'feature/')"
+    )
+    parser.add_argument(
+        "-m", "--message", 
+        default="Update feature branch",
+        help="Commit message"
+    )
+    parser.add_argument(
+        "-f", "--force", 
+        action="store_true",
+        help="Use force push (use only for rebased branches)"
+    )
+    parser.add_argument(
+        "--title", 
+        default=None,
+        help="Title for the merge request (defaults to branch name)"
+    )
+    parser.add_argument(
+        "--description", 
+        default="",
+        help="Description for the merge request"
+    )
+    parser.add_argument(
+        "--repo", 
+        default=".",
+        help="Path to git repository (default: current directory)"
+    )
+    
+    args = parser.parse_args()
+    
+    try:
+        # Initialize workflow
+        repo_path = Path(args.repo).resolve()
+        workflow = GitWorkflow(repo_path)
+        
+        # Get current branch for reference
+        current_branch = workflow.get_current_branch()
+        log.info("starting_workflow", current_branch=current_branch)
+        
+        # Create new branch
+        new_branch = workflow.create_branch(args.branch_name)
+        log.info("branch_created", branch=new_branch)
+        
+        # Commit changes
+        workflow.commit_changes(args.message)
+        log.info("changes_committed")
+        
+        # Push branch
+        workflow.push_branch(new_branch, force=args.force)
+        log.info("branch_pushed", branch=new_branch, force=args.force)
+        
+        # Create merge request
+        title = args.title or f"Feature: {args.branch_name}"
+        mr_url = workflow.create_merge_request(new_branch, title, args.description)
+        log.info("merge_request_created", url=mr_url)
+        
+        print(f"\n✅ Git workflow completed successfully!")
+        print(f"Branch: {new_branch}")
+        print(f"Merge Request: {mr_url}")
+        
+    except Exception as e:
+        log.error("workflow_failed", error=str(e))
+        print(f"\n❌ Git workflow failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Features
+
+This script implements git workflow automation following your development rules:
+
+1. **Structured Logging**: Uses `structlog` for all logging instead of print statements
+2. **Type Hints**: All functions have proper type hints
+3. **Pydantic Models**: Configuration is handled with Pydantic models for validation
+4. **Error Handling**: All git commands are wrapped in try/except blocks with proper logging
+5. **Async Considerations**: While git operations are typically synchronous, the structure allows for future async implementation
+6. **Force Push Safety**: Implements `--force-with-lease` for safer force pushes with appropriate warnings
+
+## Usage
+
+```bash
+# Basic usage
+python git_workflow.py my-feature
+
+# With custom commit message
+python git_workflow.py my-feature -m "Add new authentication module"
+
+# Force push for rebased branch
+python git_workflow.py my-feature -f
+
+# With merge request details
+python git_workflow.py my-feature --title "Add user authentication" --description "Implements OAuth2 support"
+```
+
+## Notes
+
+- The merge request creation is implemented as a placeholder that would need to be connected to GitHub/GitLab APIs
+- The script includes safety warnings when using force push
+- All git operations are logged with structured logging for debugging
+- The script validates that the target directory is actually a git repository

@@ -1,0 +1,108 @@
+```python
+"""User management system data models and database operations."""
+
+import asyncio
+from datetime import datetime
+from typing import List, Optional
+import httpx
+from pydantic import BaseModel, EmailStr, Field, validator, root_validator
+import structlog
+
+logger = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    
+    id: int
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+    
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+    
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=200)
+    permissions: List[Permission] = []
+    
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    
+    id: int
+    username: str = Field(..., min_length=3, max_length=50)
+    email: EmailStr
+    full_name: Optional[str] = Field(None, max_length=100)
+    is_active: bool = True
+    role: Role
+    created_at: datetime
+    updated_at: datetime
+    
+    @validator('username')
+    def username_must_be_alphanumeric(cls, v):
+        """Validate username contains only alphanumeric characters and underscores."""
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username must contain only alphanumeric characters and underscores')
+        return v
+    
+    @root_validator(pre=True)
+    def set_defaults(cls, values):
+        """Set default values for optional fields."""
+        values.setdefault('full_name', None)
+        values.setdefault('is_active', True)
+        return values
+    
+    def to_dict(self) -> dict:
+        """Serialize the model instance to a dictionary."""
+        return self.dict()
+    
+    class Config:
+        orm_mode = True
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from the database via the provided URL.
+    
+    Args:
+        database_url: The URL endpoint to fetch users from
+        
+    Returns:
+        List of User objects
+        
+    Raises:
+        ValueError: If the database_url is invalid or empty
+        httpx.HTTPError: If the HTTP request fails
+    """
+    if not database_url:
+        raise ValueError("database_url cannot be empty")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            
+            users_data = response.json()
+            users = [User(**user_data) for user_data in users_data]
+            
+            logger.info("users_fetched", count=len(users))
+            return users
+            
+    except httpx.HTTPStatusError as exc:
+        logger.error("http_error", status_code=exc.response.status_code, url=database_url)
+        raise
+    except httpx.RequestError as exc:
+        logger.error("request_error", url=database_url, error=str(exc))
+        raise
+    except Exception as exc:
+        logger.error("unexpected_error", url=database_url, error=str(exc))
+        raise
+```

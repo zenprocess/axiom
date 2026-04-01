@@ -1,0 +1,134 @@
+```python
+import os
+from typing import List, Optional
+from datetime import datetime
+from enum import Enum
+
+import structlog
+from pydantic import BaseModel, EmailStr, validator, Field
+import httpx
+
+log = structlog.get_logger()
+
+
+class Role(Enum):
+    ADMIN = "admin"
+    USER = "user"
+    GUEST = "guest"
+    MODERATOR = "moderator"
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(default=None, max_length=255)
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "name": "read_users",
+                "description": "Permission to view user information"
+            }
+        }
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    username: str = Field(..., min_length=3, max_length=30)
+    email: EmailStr
+    role: Role
+    permissions: List[Permission] = Field(default_factory=list)
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    @validator('username')
+    def username_alphanumeric(cls, v: str) -> str:
+        """Ensure username contains only alphanumeric characters and underscores."""
+        if not v.replace('_', '').isalnum():
+            raise ValueError('username must contain only alphanumeric characters and underscores')
+        return v
+
+    @validator('permissions', each_item=True)
+    def permissions_must_have_name(cls, v: Permission) -> Permission:
+        """Ensure each permission has a name."""
+        if not v.name:
+            raise ValueError('permission must have a name')
+        return v
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "username": "john_doe",
+                "email": "john@example.com",
+                "role": "user",
+                "permissions": [
+                    {"name": "read_profile", "description": "View own profile"}
+                ],
+                "is_active": True
+            }
+        }
+
+
+class RoleResponse(BaseModel):
+    """Response model for role information."""
+    role: Role
+    permissions: List[Permission] = Field(default_factory=list)
+
+
+class PermissionResponse(BaseModel):
+    """Response model for permission information."""
+    permissions: List[Permission]
+
+
+async def fetch_users(database_url: str, api_key: Optional[str] = None) -> List[User]:
+    """
+    Fetch users from a database endpoint.
+
+    Args:
+        database_url: The URL of the database API endpoint.
+        api_key: Optional API key for authentication.
+
+    Returns:
+        A list of User objects.
+
+    Raises:
+        ValueError: If the database_url is empty or invalid.
+        RuntimeError: If the API call fails.
+    """
+    if not database_url:
+        raise ValueError("database_url cannot be empty")
+
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url, headers=headers, timeout=30.0)
+            response.raise_for_status()
+            users_data = response.json()
+            
+            # Validate that the response is a list
+            if not isinstance(users_data, list):
+                raise RuntimeError("Expected a list of users from the API")
+            
+            users = [User(**user_data) for user_data in users_data]
+            log.info("fetched_users", count=len(users), url=database_url)
+            return users
+
+    except httpx.HTTPStatusError as e:
+        log.error("http_error", status_code=e.response.status_code, url=database_url, error=str(e))
+        raise RuntimeError(f"HTTP error occurred: {e}") from e
+    except httpx.TimeoutException as e:
+        log.error("timeout_error", url=database_url, error=str(e))
+        raise RuntimeError(f"Request timed out: {e}") from e
+    except httpx.RequestError as e:
+        log.error("request_error", url=database_url, error=str(e))
+        raise RuntimeError(f"Request error occurred: {e}") from e
+    except Exception as e:
+        log.error("unexpected_error", url=database_url, error=str(e))
+        raise RuntimeError(f"Unexpected error occurred: {e}") from e
+```

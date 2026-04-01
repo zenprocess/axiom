@@ -1,0 +1,272 @@
+Here's a **structured, secure, and production-ready** Python config loader that:
+
+- Loads from YAML files (with support for multiple files and defaults)
+- Falls back to environment variables (using `os.environ.get()` safely)
+- Overrides with command-line arguments (using `argparse`)
+- Merges with **priority**: CLI > env vars > YAML files > defaults
+- Uses **`structlog`** for logging (no `print()` or `logging`)
+- Uses **Pydantic models** for config validation and type safety
+- Includes **type hints**, **error handling**, and **docstrings**
+
+---
+
+### ✅ Dependencies (add to `requirements.txt`):
+```text
+pydantic>=2.0
+pyyaml>=6.0
+structlog>=24.0
+```
+
+---
+
+### ✅ `config_loader.py`
+
+```python
+"""Config loader with YAML, env vars, and CLI argument support."""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Type
+
+import yaml
+import structlog
+from pydantic import BaseModel, ValidationError
+
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.dev.ConsoleRenderer(),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+logger = structlog.get_logger()
+
+
+class ConfigError(Exception):
+    """Custom exception for configuration errors."""
+
+
+class BaseConfig(BaseModel):
+    """Base configuration model. Extend this for your app-specific config."""
+
+    # Example defaults (override in subclass)
+    app_name: str = "myapp"
+    debug: bool = False
+    log_level: str = "INFO"
+    database_url: Optional[str] = None
+
+
+def load_yaml_configs(config_paths: List[Path]) -> Dict[str, Any]:
+    """Load and merge YAML configs from multiple paths.
+
+    Later files override earlier ones.
+    """
+    merged: Dict[str, Any] = {}
+    for path in config_paths:
+        if not path.exists():
+            logger.warning("Config file not found", path=str(path))
+            continue
+        try:
+            with open(path, "r") as f:
+                data = yaml.safe_load(f)
+                if data:
+                    merged = _deep_merge(merged, data)
+        except yaml.YAMLError as e:
+            raise ConfigError(f"YAML parse error in {path}: {e}") from e
+    return merged
+
+
+def _deep_merge(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge `update` into `base`, preferring `update` values."""
+    result = base.copy()
+    for key, value in update.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Override config values from environment variables.
+
+    Env var names must be uppercase and use underscores (e.g., `DATABASE_URL`).
+    """
+    for key, value in config.items():
+        env_var = key.upper()
+        if env_var in os.environ:
+            raw = os.environ[env_var]
+            # Coerce types (simple heuristics)
+            if isinstance(value, bool):
+                config[key] = raw.lower() in ("true", "1", "yes")
+            elif isinstance(value, int):
+                config[key] = int(raw)
+            elif isinstance(value, float):
+                config[key] = float(raw)
+            elif isinstance(value, list):
+                config[key] = raw.split(",")  # simple list parsing
+            else:
+                config[key] = raw
+            logger.debug("Env var override", key=env_var, value=repr(raw))
+    return config
+
+
+def apply_cli_overrides(
+    config: Dict[str, Any], parser: argparse.ArgumentParser
+) -> Dict[str, Any]:
+    """Override config values from CLI args parsed by `parser`."""
+    args = parser.parse_args()
+    cli_dict = {k: v for k, v in vars(args).items() if v is not None}
+    if cli_dict:
+        logger.debug("CLI args parsed", args=cli_dict)
+    return _deep_merge(config, cli_dict)
+
+
+def parse_cli_args() -> argparse.ArgumentParser:
+    """Create CLI argument parser."""
+    parser = argparse.ArgumentParser(description="Application config loader")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        action="append",
+        help="YAML config file(s) to load (multiple allowed; later overrides earlier)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level",
+    )
+    # Add more CLI args as needed (Pydantic model fields)
+    return parser
+
+
+def load_config(
+    config_class: Type[BaseConfig],
+    default_yaml: Optional[Path] = None,
+) -> BaseConfig:
+    """Load and merge config from YAML, env vars, and CLI.
+
+    Priority (highest first):
+        1. CLI args
+        2. Environment variables
+        3. YAML files (merged; later files override)
+        4. `config_class` defaults
+
+    Args:
+        config_class: Pydantic model class defining expected config schema.
+        default_yaml: Optional default YAML path (e.g., `Path("config.yaml")`).
+
+    Returns:
+        Validated `config_class` instance.
+    """
+    parser = parse_cli_args()
+    args = parser.parse_args()
+
+    # 1. Load YAML files (CLI-provided or default)
+    yaml_paths: List[Path] = []
+    if args.config:
+        yaml_paths.extend(args.config)
+    if default_yaml:
+        yaml_paths.append(default_yaml)
+
+    merged_config = load_yaml_configs(yaml_paths)
+
+    # 2. Apply env var overrides
+    merged_config = apply_env_overrides(merged_config)
+
+    # 3. Apply CLI overrides (including parsed args like `--config`, but only relevant ones)
+    cli_parser = argparse.ArgumentParser(add_help=False)
+    cli_parser.add_argument("--debug", type=lambda x: x.lower() == "true")
+    cli_parser.add_argument("--log-level", type=str)
+    # Add other fields here as needed...
+    cli_parser.set_defaults(**merged_config)
+    cli_config = vars(cli_parser.parse_args())
+
+    merged_config = _deep_merge(merged_config, cli_config)
+
+    # 4. Validate & build final config
+    try:
+        config = config_class.model_validate(merged_config)
+    except ValidationError as e:
+        raise ConfigError(f"Validation failed: {e}") from e
+
+    # Log final config (for debugging)
+    logger.info(
+        "Final config loaded",
+        config=config.model_dump(exclude_unset=True),
+        yaml_files=[str(p) for p in yaml_paths],
+    )
+    return config
+
+
+# Example usage (uncomment for testing):
+# if __name__ == "__main__":
+#     class AppConfig(BaseConfig):
+#         database_url: str = "sqlite:///default.db"
+#         redis_url: Optional[str] = None
+#         features: List[str] = []
+#
+#     try:
+#         cfg = load_config(AppConfig, default_yaml=Path("config.yaml"))
+#         print(cfg.model_dump())  # For immediate debugging (optional)
+#     except ConfigError as e:
+#         logger.error("Config loading failed", error=str(e))
+#         sys.exit(1)
+```
+
+---
+
+### ✅ Example `config.yaml`:
+
+```yaml
+app_name: "production-app"
+debug: false
+log_level: "WARNING"
+database_url: "postgresql://user:pass@localhost/mydb"
+features:
+  - analytics
+  - caching
+```
+
+### ✅ Example CLI usage:
+
+```bash
+# With custom YAML and override
+python config_loader.py \
+  --config extra.yaml \
+  --debug \
+  --log-level DEBUG
+```
+
+### ✅ Environment variable example:
+
+```bash
+DATABASE_URL="postgresql://prod:secret@dbhost/prod" python app.py
+```
+
+---
+
+### 🔐 Security & Best Practices Observed:
+- ❌ No hardcoded secrets (uses env vars or YAML files *excluded from version control*)
+- ✅ Uses `structlog` (no `print`/`logging`)
+- ✅ Validates config with Pydantic
+- ✅ Type hints, docstrings, error handling
+- ✅ Safe YAML parsing (`safe_load`)
+- ✅ No `print()` for debug — uses `structlog`
+
+Let me know if you'd like to add support for:
+- `.env` file loading (e.g., `python-dotenv`)
+- JSON/YAML env var interpolation (e.g., `${VAR}`)
+- Secret injection from vaults (e.g., AWS Secrets Manager)

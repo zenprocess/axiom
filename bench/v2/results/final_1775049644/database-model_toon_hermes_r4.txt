@@ -1,0 +1,106 @@
+```python
+"""User management system data models and utilities."""
+
+import httpx
+from typing import List, Optional
+from pydantic import BaseModel, Field, validator, EmailStr
+import structlog
+
+logger = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    id: int = Field(..., description="Unique identifier for the permission")
+    name: str = Field(..., min_length=1, max_length=100, description="Name of the permission")
+    description: Optional[str] = Field(None, description="Description of the permission")
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+    id: int = Field(..., description="Unique identifier for the role")
+    name: str = Field(..., min_length=1, max_length=50, description="Name of the role")
+    description: Optional[str] = Field(None, description="Description of the role")
+    permissions: List[Permission] = Field(default_factory=list, description="List of permissions assigned to the role")
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int = Field(..., description="Unique identifier for the user")
+    username: str = Field(..., min_length=3, max_length=50, description="Username")
+    email: EmailStr = Field(..., description="User's email address")
+    full_name: Optional[str] = Field(None, max_length=100, description="User's full name")
+    role: Role = Field(..., description="Role assigned to the user")
+    is_active: bool = Field(True, description="Whether the user account is active")
+    created_at: Optional[str] = Field(None, description="ISO 8601 timestamp of user creation")
+
+    @validator('username')
+    def validate_username(cls, v):
+        """Ensure username contains only alphanumeric characters and underscores."""
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username must contain only alphanumeric characters and underscores')
+        return v
+
+    class Config:
+        orm_mode = True
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database API endpoint.
+
+    Args:
+        database_url: URL of the database API endpoint that returns user data
+
+    Returns:
+        List of User objects
+
+    Raises:
+        ValueError: If the response format is invalid
+        RuntimeError: If the API request fails
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Handle both single user and list of users responses
+            if isinstance(data, dict):
+                # Assume it's a single user if id is present
+                if 'id' in data and 'username' in data:
+                    return [User(**data)]
+                # Otherwise assume it's a paginated response
+                if 'items' in data:
+                    data = data['items']
+                else:
+                    raise ValueError("Unexpected response format: missing 'items' or user data")
+            
+            # Validate and convert each item to User model
+            users = []
+            for item in data:
+                try:
+                    user = User(**item)
+                    users.append(user)
+                except Exception as e:
+                    logger.warning("Failed to parse user", error=str(e), raw_data=item)
+                    continue
+            
+            return users
+            
+    except httpx.HTTPStatusError as e:
+        logger.error("HTTP error fetching users", status_code=e.response.status_code, url=database_url)
+        raise RuntimeError(f"HTTP error fetching users: {e.response.status_code}") from e
+    except httpx.RequestError as e:
+        logger.error("Request error fetching users", url=database_url, error=str(e))
+        raise RuntimeError(f"Request error fetching users: {e}") from e
+    except Exception as e:
+        logger.error("Unexpected error fetching users", url=database_url, error=str(e))
+        raise RuntimeError(f"Unexpected error fetching users: {e}") from e
+```

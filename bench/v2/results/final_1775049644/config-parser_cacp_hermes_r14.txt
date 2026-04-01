@@ -1,0 +1,188 @@
+```python
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import yaml
+import structlog
+from pydantic import BaseModel, Field, ValidationError
+from dotenv import load_dotenv
+import argparse
+
+# Initialize structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.set_exc_info,
+        structlog.dev.ConsoleRenderer(),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=False,
+)
+
+logger = structlog.get_logger()
+
+
+class Config(BaseModel):
+    """Application configuration model."""
+    app_name: str = Field(default="app", description="Application name")
+    debug: bool = Field(default=False, description="Enable debug mode")
+    database_url: str = Field(default="sqlite:///app.db", description="Database connection URL")
+    api_key: Optional[str] = Field(default=None, description="API key for external services")
+    log_level: str = Field(default="INFO", description="Logging level")
+
+
+def load_yaml_config(file_path: str) -> Dict[str, Any]:
+    """
+    Load configuration from a YAML file.
+
+    Args:
+        file_path: Path to the YAML configuration file.
+
+    Returns:
+        Dictionary containing configuration values.
+    """
+    try:
+        path = Path(file_path)
+        if not path.is_file():
+            logger.warning("config_file_not_found", file_path=file_path)
+            return {}
+
+        with open(path, "r", encoding="utf-8") as file:
+            config = yaml.safe_load(file)
+            if not isinstance(config, dict):
+                logger.warning("invalid_yaml_format", file_path=file_path)
+                return {}
+            return config
+    except (yaml.YAMLError, OSError) as e:
+        logger.error("failed_to_load_yaml", file_path=file_path, error=str(e))
+        return {}
+
+
+def load_env_vars(prefix: str = "APP_") -> Dict[str, Any]:
+    """
+    Load configuration from environment variables with optional prefix.
+
+    Args:
+        prefix: Prefix for environment variable names.
+
+    Returns:
+        Dictionary containing environment variable configuration values.
+    """
+    env_config = {}
+    for key, value in os.environ.items():
+        if key.startswith(prefix):
+            env_key = key[len(prefix):].lower()
+            env_config[env_key] = value
+    return env_config
+
+
+def load_cli_args(args: Optional[list] = None) -> Dict[str, Any]:
+    """
+    Parse command-line arguments into configuration dictionary.
+
+    Args:
+        args: List of command-line arguments (defaults to sys.argv[1:]).
+
+    Returns:
+        Dictionary containing command-line argument values.
+    """
+    parser = argparse.ArgumentParser(description="Application configuration")
+    parser.add_argument("--app-name", type=str, help="Application name")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--database-url", type=str, help="Database connection URL")
+    parser.add_argument("--api-key", type=str, help="API key for external services")
+    parser.add_argument("--log-level", type=str, help="Logging level")
+
+    parsed_args = parser.parse_args(args)
+    cli_config = {k: v for k, v in vars(parsed_args).items() if v is not None}
+    return cli_config
+
+
+def merge_configs(*configs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Merge multiple configuration dictionaries with priority (later overrides earlier).
+
+    Args:
+        *configs: Variable number of configuration dictionaries to merge.
+
+    Returns:
+        Merged configuration dictionary.
+    """
+    merged = {}
+    for config in configs:
+        if config:
+            for key, value in config.items():
+                if key not in merged:
+                    merged[key] = value
+                elif isinstance(merged[key], dict) and isinstance(value, dict):
+                    merged[key] = merge_configs(merged[key], value)
+                else:
+                    merged[key] = value
+    return merged
+
+
+def create_config(
+    yaml_file: str = "config.yaml",
+    env_prefix: str = "APP_",
+    cli_args: Optional[list] = None,
+) -> Config:
+    """
+    Create a validated configuration object by merging sources with priority.
+
+    Priority (lowest to highest):
+    1. YAML file
+    2. Environment variables
+    3. Command-line arguments
+
+    Args:
+        yaml_file: Path to the YAML configuration file.
+        env_prefix: Prefix for environment variable names.
+        cli_args: Command-line arguments (defaults to sys.argv[1:]).
+
+    Returns:
+        Validated Config object.
+
+    Raises:
+        ValidationError: If configuration fails validation.
+    """
+    try:
+        # Load configurations in order of priority
+        yaml_config = load_yaml_config(yaml_file)
+        env_config = load_env_vars(env_prefix)
+        cli_config = load_cli_args(cli_args)
+
+        # Merge with priority (later sources override earlier ones)
+        merged_config = merge_configs(yaml_config, env_config, cli_config)
+
+        # Validate and create config model
+        config = Config(**merged_config)
+        logger.info("config_loaded_successfully", config=config.dict())
+        return config
+
+    except ValidationError as e:
+        logger.error("config_validation_failed", error=str(e))
+        raise
+    except Exception as e:
+        logger.error("unexpected_error_during_config_loading", error=str(e))
+        raise
+
+
+if __name__ == "__main__":
+    # Load and validate configuration
+    try:
+        config = create_config(
+            yaml_file="config.yaml",
+            env_prefix="APP_",
+            cli_args=sys.argv[1:]
+        )
+        # Note: No print() used for debugging per rule; logging handled by structlog
+    except (ValidationError, Exception) as e:
+        logger.error("failed_to_load_config", error=str(e))
+        sys.exit(1)
+```

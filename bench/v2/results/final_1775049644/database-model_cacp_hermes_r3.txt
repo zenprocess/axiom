@@ -1,0 +1,142 @@
+```python
+"""User management system data models and utilities."""
+
+from typing import List, Optional
+from datetime import datetime
+from urllib.parse import urlparse
+import structlog
+
+from pydantic import BaseModel, EmailStr, validator, Field
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission that can be assigned to roles."""
+    name: str = Field(..., description="Unique name of the permission")
+    description: Optional[str] = Field(None, description="Description of what this permission allows")
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role that can be assigned to users."""
+    id: int
+    name: str = Field(..., description="Unique name of the role")
+    description: Optional[str] = Field(None, description="Description of the role")
+    permissions: List[Permission] = Field(default_factory=list, description="Permissions assigned to this role")
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    email: EmailStr = Field(..., description="User's email address")
+    username: str = Field(..., min_length=3, max_length=32, description="User's username")
+    full_name: Optional[str] = Field(None, description="User's full name")
+    role_id: Optional[int] = Field(None, description="ID of the user's primary role")
+    is_active: bool = Field(default=True, description="Whether the user account is active")
+    created_at: datetime = Field(default_factory=datetime.utcnow, description="Account creation timestamp")
+    updated_at: datetime = Field(default_factory=datetime.utcnow, description="Last update timestamp")
+    role: Optional[Role] = Field(None, description="Full role information")
+
+    @validator('updated_at', pre=True, always=True)
+    def set_updated_at(cls, v):
+        """Set updated_at to current time if not provided."""
+        return v or datetime.utcnow()
+
+    class Config:
+        orm_mode = True
+
+
+class UserCreate(BaseModel):
+    """Data model for creating a new user."""
+    email: EmailStr
+    username: str = Field(..., min_length=3, max_length=32)
+    full_name: Optional[str] = None
+    role_id: Optional[int] = None
+    is_active: bool = True
+
+
+class UserUpdate(BaseModel):
+    """Data model for updating an existing user."""
+    email: Optional[EmailStr] = None
+    username: Optional[str] = Field(None, min_length=3, max_length=32)
+    full_name: Optional[str] = None
+    role_id: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+async def fetch_users_from_db(db_url: str) -> List[User]:
+    """
+    Fetch users from a database using the provided connection URL.
+
+    Args:
+        db_url: Database connection URL (e.g., 'postgresql://user:pass@host/dbname')
+
+    Returns:
+        List of User models retrieved from the database
+
+    Raises:
+        ValueError: If the database URL is invalid
+        RuntimeError: If database connection fails
+    """
+    # Validate the database URL
+    parsed_url = urlparse(db_url)
+    if not all([parsed_url.scheme, parsed_url.netloc]):
+        raise ValueError("Invalid database URL format")
+
+    try:
+        # In a real implementation, this would use async database drivers like asyncpg or SQLAlchemy async
+        # For demonstration purposes, we'll simulate fetching users
+        logger.info("fetching_users", db_url_scheme=parsed_url.scheme)
+        
+        # Simulated database response
+        users_data = [
+            {
+                "id": 1,
+                "email": "john.doe@example.com",
+                "username": "johndoe",
+                "full_name": "John Doe",
+                "role_id": 1,
+                "is_active": True,
+                "role": {
+                    "id": 1,
+                    "name": "admin",
+                    "description": "System administrator",
+                    "permissions": [
+                        {"name": "read_users", "description": "Can view user data"},
+                        {"name": "write_users", "description": "Can modify user data"},
+                        {"name": "delete_users", "description": "Can delete user accounts"}
+                    ]
+                }
+            },
+            {
+                "id": 2,
+                "email": "jane.smith@example.com",
+                "username": "janesmith",
+                "full_name": "Jane Smith",
+                "role_id": 2,
+                "is_active": True,
+                "role": {
+                    "id": 2,
+                    "name": "editor",
+                    "description": "Content editor",
+                    "permissions": [
+                        {"name": "read_users", "description": "Can view user data"},
+                        {"name": "write_users", "description": "Can modify user data"}
+                    ]
+                }
+            }
+        ]
+        
+        # Convert to User models
+        return [User(**user_data) for user_data in users_data]
+        
+    except Exception as exc:
+        logger.error("database_fetch_failed", error=str(exc))
+        raise RuntimeError(f"Failed to fetch users from database: {exc}") from exc
+```

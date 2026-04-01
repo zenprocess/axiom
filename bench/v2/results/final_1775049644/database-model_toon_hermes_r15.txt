@@ -1,0 +1,128 @@
+```python
+"""
+User management data models and utilities.
+
+This module provides Pydantic models for User, Role, and Permission, along with
+functions to fetch users from a database URL with proper error handling and
+structured logging.
+"""
+
+from typing import List, Optional
+from datetime import datetime
+from enum import Enum
+
+import httpx
+from pydantic import BaseModel, EmailStr, validator, Field
+import structlog
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.format_exc_info,
+        structlog.processors.JSONRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger()
+
+
+class PermissionEnum(str, Enum):
+    """Available permissions."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
+
+
+class Permission(BaseModel):
+    """Represents a permission."""
+    name: PermissionEnum
+    description: str = Field(..., max_length=255)
+
+    class Config:
+        use_enum_values = True
+
+
+class Role(BaseModel):
+    """Represents a role with associated permissions."""
+    id: int
+    name: str = Field(..., max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission]
+
+    @validator("name")
+    def name_must_not_be_empty(cls, v):
+        if not v.strip():
+            raise ValueError("Role name cannot be empty or whitespace")
+        return v.strip()
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    username: str = Field(..., max_length=50)
+    email: EmailStr
+    full_name: Optional[str] = Field(None, max_length=100)
+    role: Role
+    is_active: bool = True
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    @validator("username")
+    def username_must_not_be_empty(cls, v):
+        if not v.strip():
+            raise ValueError("Username cannot be empty or whitespace")
+        return v.strip()
+
+
+class UserList(BaseModel):
+    """Response model for user list."""
+    users: List[User]
+    total: int
+
+
+async def fetch_users(database_url: str) -> UserList:
+    """
+    Fetch users from a database API endpoint.
+
+    Args:
+        database_url: URL of the users API endpoint.
+
+    Returns:
+        UserList containing the fetched users.
+
+    Raises:
+        httpx.HTTPError: If the request fails or returns an error status code.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Handle potential nested response structures
+            if isinstance(data, list):
+                users_data = data
+                total = len(users_data)
+            elif isinstance(data, dict) and "users" in data:
+                users_data = data["users"]
+                total = data.get("total", len(users_data))
+            else:
+                users_data = [data]
+                total = 1
+                
+            users = [User(**user_data) for user_data in users_data]
+            return UserList(users=users, total=total)
+            
+    except httpx.HTTPError as exc:
+        logger.error("http_error", url=database_url, error=str(exc))
+        raise
+    except Exception as exc:
+        logger.error("unexpected_error", url=database_url, error=str(exc))
+        raise
+```

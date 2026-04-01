@@ -1,0 +1,258 @@
+I'll write a Python script that automates git workflows following all the rules specified, particularly noting that **force-push is prohibited** per rule `no-force-push`.
+
+```python
+#!/usr/bin/env python3
+"""
+Git Workflow Automation Script
+
+This script automates common git workflows:
+- Create feature branches
+- Stage and commit changes
+- Push to remote
+- Create merge requests
+
+NOTE: Force-push operations are intentionally NOT implemented due to safety concerns
+and in accordance with project rules.
+"""
+
+import os
+import subprocess
+import sys
+from typing import Optional
+
+import httpx
+from pydantic import BaseModel
+
+
+class GitConfig(BaseModel):
+    """Configuration for git operations."""
+    remote: str = "origin"
+    base_branch: str = "main"
+    prefix: str = "feature/"
+
+
+class MRConfig(BaseModel):
+    """Configuration for merge request creation."""
+    api_url: str
+    token: str
+    project_id: str
+
+
+class GitWorkflowError(Exception):
+    """Custom exception for git workflow errors."""
+    pass
+
+
+class GitWorkflow:
+    """Class to handle git workflow automation."""
+
+    def __init__(self, config: GitConfig):
+        self.config = config
+
+    def _run_command(self, cmd: list[str], cwd: Optional[str] = None) -> str:
+        """Run a shell command and return its output."""
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=cwd or os.getcwd()
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            raise GitWorkflowError(f"Command failed: {' '.join(cmd)}\nError: {e.stderr}")
+
+    def create_feature_branch(self, branch_name: str) -> str:
+        """
+        Create a new feature branch from the base branch.
+
+        Args:
+            branch_name: Name for the new feature branch (without prefix)
+
+        Returns:
+            Full branch name created
+        """
+        full_branch_name = f"{self.config.prefix}{branch_name}"
+        
+        # Ensure we're on the base branch and up to date
+        self._run_command(["git", "checkout", self.config.base_branch])
+        self._run_command(["git", "pull", self.config.remote, self.config.base_branch])
+        
+        # Create and checkout new branch
+        self._run_command(["git", "checkout", "-b", full_branch_name])
+        
+        return full_branch_name
+
+    def stage_and_commit(self, message: str, files: Optional[list[str]] = None) -> None:
+        """
+        Stage and commit changes.
+
+        Args:
+            message: Commit message
+            files: Optional list of files to stage (defaults to all changes)
+        """
+        # Stage files
+        if files:
+            self._run_command(["git", "add"] + files)
+        else:
+            self._run_command(["git", "add", "."])
+        
+        # Commit changes
+        self._run_command(["git", "commit", "-m", message])
+
+    def push_branch(self, branch_name: str, force: bool = False) -> None:
+        """
+        Push branch to remote repository.
+        
+        NOTE: Force push is disabled per project rules.
+        
+        Args:
+            branch_name: Name of the branch to push
+            force: Force push flag (always False per rules)
+        """
+        # Always set force=False per no-force-push rule
+        if force:
+            raise ValueError("Force push is prohibited per project rules")
+        
+        # Push branch to remote
+        self._run_command(["git", "push", self.config.remote, branch_name])
+
+
+class MergeRequestCreator:
+    """Class to create merge requests via API."""
+
+    def __init__(self, config: MRConfig):
+        self.config = config
+        self.headers = {
+            "PRIVATE-TOKEN": self.config.token,
+            "Content-Type": "application/json"
+        }
+
+    async def create_merge_request(
+        self,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description: str = ""
+    ) -> dict:
+        """
+        Create a merge request via API.
+        
+        Args:
+            source_branch: Source branch name
+            target_branch: Target branch name
+            title: MR title
+            description: MR description
+
+        Returns:
+            MR data from the API response
+        """
+        url = f"{self.config.api_url}/merge_requests"
+        data = {
+            "id": self.config.project_id,
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "title": title,
+            "description": description
+        }
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url,
+                    headers=self.headers,
+                    json=data
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPError as e:
+            raise GitWorkflowError(f"Failed to create merge request: {e}")
+
+
+async def main():
+    """Main function to demonstrate the git workflow."""
+    # Example usage
+    git_config = GitConfig(
+        remote="origin",
+        base_branch="main",
+        prefix="feature/"
+    )
+    
+    mr_config = MRConfig(
+        api_url="https://gitlab.com/api/v4/projects/12345",
+        token=os.getenv("GITLAB_TOKEN"),  # In real usage, use secure token handling
+        project_id="12345"
+    )
+    
+    # Create git workflow handler
+    workflow = GitWorkflow(git_config)
+    
+    try:
+        # Create feature branch
+        branch = workflow.create_feature_branch("new-feature")
+        print(f"Created branch: {branch}")
+        
+        # Stage and commit changes (example)
+        # In real usage, you'd make changes to files first
+        workflow.stage_and_commit(
+            message="Add new feature implementation",
+            files=["src/new_feature.py"]
+        )
+        print("Changes committed")
+        
+        # Push branch (force=False per rules)
+        workflow.push_branch(branch, force=False)
+        print(f"Pushed branch to {git_config.remote}/{branch}")
+        
+        # Create merge request (async)
+        mr_creator = MergeRequestCreator(mr_config)
+        mr_data = await mr_creator.create_merge_request(
+            source_branch=branch,
+            target_branch=git_config.base_branch,
+            title="feat: Add new feature",
+            description="This MR implements the new feature."
+        )
+        print(f"Merge request created: {mr_data.get('web_url')}")
+        
+    except GitWorkflowError as e:
+        print(f"Git workflow error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```
+
+Key features of this script:
+
+1. **No force-push**: The `push_branch` method explicitly prohibits force push with a clear error if attempted.
+
+2. **Pydantic models**: Uses `GitConfig` and `MRConfig` models for configuration.
+
+3. **Type hints**: All functions have proper type hints.
+
+4. **Async I/O**: Uses `async def` and `httpx.AsyncClient` for the merge request API calls.
+
+5. **Error handling**: Includes try/except blocks for external API calls and subprocess operations.
+
+6. **Custom exception**: Uses a custom `GitWorkflowError` for workflow-specific errors.
+
+7. **No logging/print for debugging**: Uses standard `print` only for output, not debugging.
+
+8. **Docstrings**: All public methods have comprehensive docstrings.
+
+9. **No star imports**: Uses explicit imports.
+
+10. **Environment variables for secrets**: Token is loaded from environment variable rather than hardcoded.
+
+To use this script:
+1. Set the `GITLAB_TOKEN` environment variable with a valid access token
+2. Update the `MRConfig` project ID and API URL
+3. Modify the files to commit in the `stage_and_commit` call
+
+The script follows safe git practices by always pulling the latest changes before creating branches and avoiding force pushes that could disrupt other developers' work.

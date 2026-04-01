@@ -1,0 +1,134 @@
+```python
+"""
+User management system data models and utilities.
+
+This module provides Pydantic models for User, Role, and Permission,
+along with validation, serialization capabilities, and a function to
+fetch users from a database URL.
+"""
+
+import httpx
+from typing import List, Optional
+from datetime import datetime
+from pydantic import BaseModel, Field, validator, EmailStr, root_validator
+
+
+class Permission(BaseModel):
+    """
+    Represents a permission in the system.
+    
+    Attributes:
+        id: Unique identifier for the permission.
+        name: Name of the permission (e.g., 'read_users', 'edit_posts').
+        description: Optional description of what the permission allows.
+    """
+    id: int = Field(..., ge=1)
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """
+    Represents a role in the system.
+    
+    Attributes:
+        id: Unique identifier for the role.
+        name: Name of the role (e.g., 'admin', 'editor', 'viewer').
+        description: Optional description of the role's purpose.
+        permissions: List of permissions assigned to this role.
+    """
+    id: int = Field(..., ge=1)
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """
+    Represents a user in the system.
+    
+    Attributes:
+        id: Unique identifier for the user.
+        email: User's email address (validated by EmailStr).
+        username: User's chosen username.
+        full_name: Optional full name of the user.
+        is_active: Whether the user account is active.
+        role: The role assigned to the user.
+        created_at: When the user account was created.
+        last_login: Optional timestamp of last login.
+    """
+    id: int = Field(..., ge=1)
+    email: EmailStr
+    username: str = Field(..., min_length=3, max_length=30)
+    full_name: Optional[str] = Field(None, max_length=100)
+    is_active: bool = True
+    role: Role
+    created_at: datetime
+    last_login: Optional[datetime] = None
+
+    @validator('username')
+    def username_alphanumeric(cls, v):
+        """Ensure username contains only alphanumeric characters and underscores."""
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username must contain only alphanumeric characters and underscores')
+        return v
+
+    @root_validator
+    def validate_last_login(cls, values):
+        """Ensure last_login is not before created_at."""
+        created_at = values.get('created_at')
+        last_login = values.get('last_login')
+        
+        if last_login and created_at and last_login < created_at:
+            raise ValueError('last_login cannot be earlier than created_at')
+        return values
+
+    class Config:
+        orm_mode = True
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database URL.
+    
+    This function makes an HTTP GET request to the provided database URL
+    and returns a list of User models.
+    
+    Args:
+        database_url: The URL endpoint to fetch users from.
+        
+    Returns:
+        List[User]: A list of User objects.
+        
+    Raises:
+        httpx.HTTPError: If the HTTP request fails.
+        ValueError: If the response data cannot be parsed into User models.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            
+            # Assuming the API returns a list of user dicts
+            users_data = response.json()
+            
+            return [User.parse_obj(user_data) for user_data in users_data]
+            
+    except httpx.HTTPError as e:
+        # Log the error with structlog (as required by rules)
+        import structlog
+        logger = structlog.get_logger()
+        logger.error("failed_to_fetch_users", database_url=database_url, error=str(e))
+        raise
+    except Exception as e:
+        import structlog
+        logger = structlog.get_logger()
+        logger.error("unexpected_error_parsing_users", database_url=database_url, error=str(e))
+        raise ValueError(f"Failed to parse users: {str(e)}") from e
+```

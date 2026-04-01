@@ -1,0 +1,176 @@
+```python
+"""
+User management data models and database fetching utilities.
+
+This module provides Pydantic models for User, Role, and Permission entities,
+along with validation, serialization, and async database fetching functionality.
+"""
+
+import asyncio
+from typing import List, Optional
+from datetime import datetime
+from urllib.parse import urlparse
+import structlog
+
+from pydantic import BaseModel, Field, validator, root_validator, EmailStr, HttpUrl
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """
+    Represents a permission in the system.
+    
+    Attributes:
+        id: Unique identifier for the permission
+        name: Name of the permission (e.g., "read_users", "write_settings")
+        description: Description of what the permission allows
+    """
+    id: int = Field(..., ge=1)
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """
+    Represents a role in the system.
+    
+    Attributes:
+        id: Unique identifier for the role
+        name: Name of the role (e.g., "admin", "editor")
+        description: Description of the role's responsibilities
+        permissions: List of permissions assigned to this role
+    """
+    id: int = Field(..., ge=1)
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """
+    Represents a user in the system.
+    
+    Attributes:
+        id: Unique identifier for the user
+        email: User's email address (validated)
+        username: User's username
+        full_name: User's full name
+        role: Role assigned to the user
+        is_active: Whether the user account is active
+        created_at: When the user was created
+        updated_at: When the user was last updated
+    """
+    id: int = Field(..., ge=1)
+    email: EmailStr
+    username: str = Field(..., min_length=3, max_length=50)
+    full_name: Optional[str] = Field(None, max_length=100)
+    role: Role
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime
+
+    @validator("username")
+    def username_must_be_alphanumeric(cls, v):
+        """Ensure username contains only alphanumeric characters and underscores."""
+        if not v.replace("_", "").isalnum():
+            raise ValueError("Username must contain only alphanumeric characters and underscores")
+        return v
+
+    @root_validator(skip_on_failure=True)
+    def check_dates(cls, values):
+        """Ensure updated_at is not before created_at."""
+        created = values.get("created_at")
+        updated = values.get("updated_at")
+        if created and updated and updated < created:
+            raise ValueError("updated_at cannot be before created_at")
+        return values
+
+    class Config:
+        orm_mode = True
+
+
+async def fetch_users_from_db(db_url: str) -> List[User]:
+    """
+    Fetch users from a database using the provided connection URL.
+    
+    Args:
+        db_url: Database connection URL (must be valid and supported)
+        
+    Returns:
+        List of User objects fetched from the database
+        
+    Raises:
+        ValueError: If the database URL is invalid
+        RuntimeError: If there's an error connecting to the database
+        
+    Example:
+        >>> users = await fetch_users_from_db("sqlite:///users.db")
+    """
+    # Validate database URL format
+    try:
+        parsed = urlparse(db_url)
+        if not parsed.scheme or not parsed.netloc and not parsed.path:
+            raise ValueError(f"Invalid database URL: {db_url}")
+    except Exception as exc:
+        logger.error("url_validation_failed", error=str(exc))
+        raise ValueError(f"Invalid database URL format: {db_url}") from exc
+
+    # Simulate async database connection
+    # In a real implementation, this would use an async database driver
+    try:
+        # Simulate async I/O operation
+        await asyncio.sleep(0.01)
+        
+        # Simulate returning users (in production, this would query the DB)
+        users_data = [
+            {
+                "id": 1,
+                "email": "admin@example.com",
+                "username": "admin_user",
+                "full_name": "System Administrator",
+                "role": {
+                    "id": 1,
+                    "name": "admin",
+                    "permissions": [
+                        {"id": 1, "name": "read_users", "description": "Can view users"},
+                        {"id": 2, "name": "write_users", "description": "Can modify users"}
+                    ]
+                },
+                "is_active": True,
+                "created_at": datetime(2023, 1, 1, 12, 0, 0),
+                "updated_at": datetime(2023, 6, 15, 14, 30, 0)
+            },
+            {
+                "id": 2,
+                "email": "editor@example.com",
+                "username": "editor_one",
+                "full_name": "Content Editor",
+                "role": {
+                    "id": 2,
+                    "name": "editor",
+                    "permissions": [
+                        {"id": 3, "name": "read_content", "description": "Can view content"},
+                        {"id": 4, "name": "write_content", "description": "Can create content"}
+                    ]
+                },
+                "is_active": True,
+                "created_at": datetime(2023, 2, 15, 9, 0, 0),
+                "updated_at": datetime(2023, 5, 20, 11, 45, 0)
+            }
+        ]
+        
+        users = [User(**user_data) for user_data in users_data]
+        logger.info("users_fetched_successfully", count=len(users))
+        return users
+        
+    except Exception as exc:
+        logger.error("database_fetch_failed", error=str(exc))
+        raise RuntimeError(f"Failed to fetch users from database: {str(exc)}") from exc
+```

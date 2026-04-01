@@ -1,0 +1,128 @@
+```python
+"""
+User management system data models and utilities.
+
+This module provides Pydantic models for User, Role, and Permission,
+along with validation, serialization, and a function to fetch users
+from a database URL.
+"""
+
+from typing import List, Optional
+from urllib.parse import urlparse
+
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, Field, validator
+
+logger = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """
+    Represents a permission in the system.
+
+    Attributes:
+        id: Unique identifier for the permission.
+        name: Name of the permission (e.g., "read_users").
+        description: Description of what the permission allows.
+    """
+    id: int = Field(..., ge=1, description="Unique identifier for the permission")
+    name: str = Field(..., min_length=1, max_length=50, description="Name of the permission")
+    description: Optional[str] = Field(None, max_length=255, description="Description of the permission")
+
+    class Config:
+        validate_assignment = True
+
+
+class Role(BaseModel):
+    """
+    Represents a role in the system.
+
+    Attributes:
+        id: Unique identifier for the role.
+        name: Name of the role (e.g., "admin").
+        permissions: List of permissions associated with the role.
+        description: Optional description of the role.
+    """
+    id: int = Field(..., ge=1, description="Unique identifier for the role")
+    name: str = Field(..., min_length=1, max_length=50, description="Name of the role")
+    permissions: List[Permission] = Field(default_factory=list, description="Permissions associated with the role")
+    description: Optional[str] = Field(None, max_length=255, description="Description of the role")
+
+    class Config:
+        validate_assignment = True
+
+
+class User(BaseModel):
+    """
+    Represents a user in the system.
+
+    Attributes:
+        id: Unique identifier for the user.
+        email: User's email address (validated).
+        username: User's username.
+        role: Role assigned to the user.
+        is_active: Whether the user account is active.
+        created_at: Timestamp of user creation (optional, ISO 8601 format).
+    """
+    id: int = Field(..., ge=1, description="Unique identifier for the user")
+    email: EmailStr = Field(..., description="User's email address")
+    username: str = Field(..., min_length=1, max_length=30, description="User's username")
+    role: Role = Field(..., description="Role assigned to the user")
+    is_active: bool = Field(default=True, description="Whether the user account is active")
+    created_at: Optional[str] = Field(None, description="ISO 8601 timestamp of user creation")
+
+    @validator("created_at", pre=True)
+    def validate_created_at(cls, v):
+        # Allow None or ISO 8601 formatted string
+        if v is None:
+            return v
+        # Simple validation that it looks like ISO 8601 (not comprehensive)
+        if "T" in v and ("+" in v or "Z" in v):
+            return v
+        raise ValueError("created_at must be an ISO 8601 formatted timestamp")
+
+    class Config:
+        validate_assignment = True
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database URL.
+
+    Args:
+        database_url: URL to the database API endpoint that returns user data.
+
+    Returns:
+        A list of User objects.
+
+    Raises:
+        ValueError: If the URL is invalid or does not point to a valid endpoint.
+        RuntimeError: If the HTTP request fails or the response is malformed.
+    """
+    # Validate URL structure
+    parsed_url = urlparse(database_url)
+    if not all([parsed_url.scheme, parsed_url.netloc]):
+        raise ValueError("Invalid database URL: missing scheme or netloc")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as exc:
+        logger.error("http_request_failed", url=database_url, error=str(exc))
+        raise RuntimeError(f"Failed to fetch users: {exc}") from exc
+    except Exception as exc:
+        logger.error("unexpected_error_fetching_users", url=database_url, error=str(exc))
+        raise RuntimeError(f"Unexpected error while fetching users: {exc}") from exc
+
+    # Validate and convert to User models
+    try:
+        users_data = data if isinstance(data, list) else [data]
+        users = [User(**user_dict) for user_dict in users_data]
+        return users
+    except Exception as exc:
+        logger.error("invalid_user_data", url=database_url, error=str(exc))
+        raise RuntimeError("Malformed user data in response") from exc
+```

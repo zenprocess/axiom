@@ -1,0 +1,131 @@
+```python
+"""
+User management data models and database interaction utilities.
+"""
+
+import asyncio
+from datetime import datetime
+from typing import List, Optional
+from urllib.parse import urlparse
+
+import structlog
+from pydantic import BaseModel, EmailStr, Field, validator
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """
+    Represents a permission in the system.
+    """
+    id: int
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """
+    Represents a role in the system, which can be assigned to users.
+    """
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = []
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """
+    Represents a user in the system.
+    """
+    id: int
+    username: str = Field(..., min_length=3, max_length=50)
+    email: EmailStr
+    role_id: int
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime
+
+    role: Optional[Role] = None
+
+    @validator('username')
+    def username_must_be_alphanumeric(cls, v):
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username must contain only alphanumeric characters and underscores')
+        return v
+
+    class Config:
+        orm_mode = True
+
+
+async def fetch_users_from_db(database_url: str) -> List[User]:
+    """
+    Fetch users from a database using the provided database URL.
+
+    Args:
+        database_url: A SQLAlchemy-compatible database URL (e.g., 'postgresql://user:pass@host/db')
+
+    Returns:
+        List[User]: A list of User models fetched from the database
+
+    Raises:
+        ValueError: If the database URL is invalid or missing required components
+        RuntimeError: If database operations fail
+    """
+    # Validate database URL structure
+    parsed = urlparse(database_url)
+    if not all([parsed.scheme, parsed.netloc]):
+        raise ValueError("Invalid database URL: scheme and host are required")
+
+    try:
+        # Import here to avoid circular dependencies and keep dependencies optional
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        # Create engine and session
+        engine = create_engine(database_url)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+        # Note: In production, use async SQLAlchemy (sqlalchemy.ext.asyncio)
+        # For this implementation, we assume a synchronous DB adapter is available
+        # or wrap the sync calls in asyncio.to_thread()
+        async with asyncio.TaskGroup() as tg:
+            task = tg.create_task(asyncio.to_thread(_fetch_users_sync, SessionLocal))
+            users_data = task.result()
+
+        # Convert ORM models to Pydantic models
+        return [User.model_validate(user) for user in users_data]
+
+    except ImportError as e:
+        logger.error("Missing database dependencies", exc_info=True)
+        raise RuntimeError("Database dependencies not installed") from e
+    except Exception as e:
+        logger.error("Database fetch failed", exc_info=True)
+        raise RuntimeError(f"Failed to fetch users from database: {e}") from e
+
+
+def _fetch_users_sync(session_factory):
+    """
+    Internal synchronous function to fetch users from the database.
+
+    Args:
+        session_factory: SQLAlchemy session factory
+
+    Returns:
+        List of User ORM models
+    """
+    session = session_factory()
+    try:
+        # This assumes User model is imported and registered with SQLAlchemy
+        # In practice, this would be something like:
+        # from myapp.models import User as UserModel
+        # return session.query(UserModel).all()
+        raise NotImplementedError("Database models and queries must be implemented per project")
+    finally:
+        session.close()
+```

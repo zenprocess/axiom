@@ -1,0 +1,246 @@
+```python
+# config_loader.py
+import argparse
+import os
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import yaml
+from pydantic import BaseModel, Field, ValidationError
+import structlog
+
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger()
+
+
+class Config(BaseModel):
+    """Configuration model."""
+    app_name: str = Field("myapp", description="Application name")
+    debug: bool = Field(False, description="Enable debug mode")
+    log_level: str = Field("INFO", description="Logging level")
+    database_url: str = Field(..., description="Database connection URL")
+    api_key: Optional[str] = Field(None, description="API key for external services")
+    max_connections: int = Field(10, description="Maximum number of connections")
+
+
+def load_yaml_config(file_path: Path) -> Dict[str, Any]:
+    """
+    Load configuration from a YAML file.
+    
+    Args:
+        file_path: Path to the YAML configuration file.
+        
+    Returns:
+        Dictionary of configuration values.
+    """
+    if not file_path.exists():
+        logger.warning("Config file not found", file_path=str(file_path))
+        return {}
+    
+    try:
+        with open(file_path, "r") as f:
+            config = yaml.safe_load(f)
+            logger.info("Loaded config from YAML", file_path=str(file_path))
+            return config or {}
+    except yaml.YAMLError as e:
+        logger.error("Failed to parse YAML config", error=str(e))
+        return {}
+
+
+def load_env_config() -> Dict[str, Any]:
+    """
+    Load configuration from environment variables.
+    
+    Returns:
+        Dictionary of configuration values from environment variables.
+    """
+    env_config = {}
+    
+    # Map environment variables to config fields
+    # Prefix all environment variables with "APP_"
+    env_vars = {
+        "APP_APP_NAME": "app_name",
+        "APP_DEBUG": "debug",
+        "APP_LOG_LEVEL": "log_level",
+        "APP_DATABASE_URL": "database_url",
+        "APP_API_KEY": "api_key",
+        "APP_MAX_CONNECTIONS": "max_connections",
+    }
+    
+    for env_var, config_key in env_vars.items():
+        if env_var in os.environ:
+            value = os.environ[env_var]
+            # Convert to appropriate type
+            if config_key in ("debug", "max_connections"):
+                try:
+                    value = int(value) if config_key == "max_connections" else value.lower() in ("true", "1", "yes")
+                except ValueError:
+                    logger.warning(
+                        "Invalid environment variable value",
+                        env_var=env_var,
+                        value=value
+                    )
+                    continue
+            env_config[config_key] = value
+    
+    return env_config
+
+
+def load_cli_config(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
+    """
+    Load configuration from command-line arguments.
+    
+    Args:
+        args: Parsed command-line arguments. If None, argparse will be used.
+        
+    Returns:
+        Dictionary of configuration values from CLI arguments.
+    """
+    parser = argparse.ArgumentParser(description="Application configuration")
+    parser.add_argument(
+        "--app-name",
+        type=str,
+        help="Application name"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode"
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level"
+    )
+    parser.add_argument(
+        "--database-url",
+        type=str,
+        help="Database connection URL"
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        help="API key for external services"
+    )
+    parser.add_argument(
+        "--max-connections",
+        type=int,
+        help="Maximum number of connections"
+    )
+    
+    parsed_args = args or parser.parse_args()
+    cli_config = {}
+    
+    for key, value in vars(parsed_args).items():
+        if value is not None:
+            cli_config[key.replace("-", "_")] = value
+    
+    return cli_config
+
+
+def merge_configs(*configs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Merge multiple configuration dictionaries with priority:
+    Later configs override earlier ones.
+    
+    Args:
+        *configs: Configuration dictionaries to merge.
+        
+    Returns:
+        Merged configuration dictionary.
+    """
+    merged = {}
+    for config in configs:
+        for key, value in config.items():
+            if isinstance(value, dict) and key in merged and isinstance(merged[key], dict):
+                merged[key] = merge_configs(merged[key], value)
+            else:
+                merged[key] = value
+    return merged
+
+
+def validate_config(raw_config: Dict[str, Any]) -> Config:
+    """
+    Validate and create a Config object from raw configuration.
+    
+    Args:
+        raw_config: Raw configuration dictionary.
+        
+    Returns:
+        Validated Config object.
+        
+    Raises:
+        ValidationError: If validation fails.
+    """
+    try:
+        config = Config(**raw_config)
+        logger.info("Configuration validated successfully")
+        return config
+    except ValidationError as e:
+        logger.error("Configuration validation failed", errors=e.errors())
+        raise
+
+
+def get_config(
+    yaml_file: Optional[Path] = None,
+    cli_args: Optional[argparse.Namespace] = None,
+) -> Config:
+    """
+    Get the final configuration by merging sources with priority.
+    Priority (highest to lowest): CLI args > Environment variables > YAML file > Defaults.
+    
+    Args:
+        yaml_file: Path to the YAML config file. If None, uses default path.
+        cli_args: Parsed CLI arguments. If None, argparse will be used.
+        
+    Returns:
+        Final validated Config object.
+    """
+    # Default YAML file path
+    default_yaml = Path("config.yaml")
+    yaml_file = yaml_file or default_yaml
+    
+    # Load configs from all sources
+    yaml_config = load_yaml_config(yaml_file)
+    env_config = load_env_config()
+    cli_config = load_cli_config(cli_args)
+    
+    # Merge configs with priority
+    merged_config = merge_configs(yaml_config, env_config, cli_config)
+    
+    # Validate and create Config object
+    config = validate_config(merged_config)
+    
+    # Print final config for debugging
+    logger.info(
+        "Final configuration",
+        config=config.dict(exclude_unset=True)
+    )
+    
+    return config
+
+
+if __name__ == "__main__":
+    try:
+        config = get_config()
+        print(f"Loaded configuration: {config}")
+    except Exception as e:
+        logger.error("Failed to load configuration", error=str(e))
+        raise
+```

@@ -1,0 +1,161 @@
+```python
+"""
+User management system data models and database integration module.
+
+This module provides Pydantic models for User, Role, and Permission,
+along with serialization support and an asynchronous function to fetch users
+from a database URL.
+"""
+
+import json
+from typing import List, Optional
+from urllib.parse import urlparse
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, Field, validator, root_validator
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """
+    Represents a permission that can be assigned to a role.
+    
+    Attributes:
+        id: Unique identifier for the permission
+        name: Human-readable name of the permission
+        description: Description of what the permission allows
+    """
+    id: int = Field(..., ge=1)
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=200)
+
+
+class Role(BaseModel):
+    """
+    Represents a role that can be assigned to users.
+    
+    Attributes:
+        id: Unique identifier for the role
+        name: Unique name of the role (e.g., "admin", "editor")
+        description: Description of the role's purpose
+        permissions: List of permissions associated with this role
+    """
+    id: int = Field(..., ge=1)
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=200)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    @validator("name")
+    def validate_name(cls, v):
+        """Ensure role name is lowercase and contains only alphanumeric characters and underscores."""
+        if not v.replace("_", "").isalnum() or not v.islower():
+            raise ValueError("Role name must be lowercase and contain only alphanumeric characters and underscores")
+        return v
+
+
+class User(BaseModel):
+    """
+    Represents a user in the system.
+    
+    Attributes:
+        id: Unique identifier for the user
+        email: User's email address (validated by EmailStr)
+        username: Unique username for the user
+        full_name: User's full name
+        role: Role assigned to the user
+        is_active: Whether the user account is active
+        created_at: ISO 8601 formatted creation timestamp
+    """
+    id: int = Field(..., ge=1)
+    email: EmailStr
+    username: str = Field(..., min_length=3, max_length=30)
+    full_name: Optional[str] = Field(None, max_length=100)
+    role: Role
+    is_active: bool = True
+    created_at: str  # ISO 8601 format
+
+    class Config:
+        """Pydantic configuration for serialization."""
+        json_encoders = {
+            # No special encoders needed for standard types
+        }
+
+    @validator("username")
+    def validate_username(cls, v):
+        """Ensure username contains only alphanumeric characters and underscores."""
+        if not v.replace("_", "").isalnum():
+            raise ValueError("Username must contain only alphanumeric characters and underscores")
+        return v
+
+    def to_dict(self) -> dict:
+        """Serialize the user model to a dictionary."""
+        return self.dict()
+
+    def to_json(self) -> str:
+        """Serialize the user model to a JSON string."""
+        return self.json()
+
+
+async def fetch_users_from_db(db_url: str) -> List[User]:
+    """
+    Fetch users from a database endpoint and return them as User models.
+    
+    This function performs an HTTP GET request to the provided database URL
+    and deserializes the response into a list of User models.
+    
+    Args:
+        db_url: The URL endpoint to fetch users from (must be a valid HTTP/HTTPS URL)
+        
+    Returns:
+        List of User models parsed from the response
+        
+    Raises:
+        ValueError: If the URL is invalid or the response format is incorrect
+        httpx.HTTPError: For network-related errors
+    """
+    # Validate URL format
+    parsed_url = urlparse(db_url)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+        raise ValueError("Invalid database URL: must be a valid HTTP/HTTPS URL")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(db_url)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Handle both single user and list of users
+            if isinstance(data, dict):
+                users_data = [data]
+            elif isinstance(data, list):
+                users_data = data
+            else:
+                raise ValueError("Invalid response format: expected object or array")
+            
+            users = []
+            for user_data in users_data:
+                # Convert permissions and role data if needed
+                if "role" in user_data and isinstance(user_data["role"], dict):
+                    role_data = user_data["role"]
+                    if "permissions" in role_data and isinstance(role_data["permissions"], list):
+                        role_data["permissions"] = [Permission(**perm) for perm in role_data["permissions"]]
+                    user_data["role"] = Role(**role_data)
+                
+                user = User(**user_data)
+                users.append(user)
+            
+            logger.info("users_fetched", count=len(users), url=db_url)
+            return users
+            
+    except httpx.HTTPStatusError as exc:
+        logger.error("http_error", status_code=exc.response.status_code, url=db_url)
+        raise
+    except httpx.RequestError as exc:
+        logger.error("request_error", error=str(exc), url=db_url)
+        raise
+    except Exception as exc:
+        logger.error("unexpected_error", error=str(exc), url=db_url)
+        raise ValueError(f"Failed to fetch users: {str(exc)}") from exc
+```

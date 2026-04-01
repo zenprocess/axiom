@@ -1,0 +1,315 @@
+I'll create a Python config loader that reads from YAML files, environment variables, and command-line flags with proper priority merging. Following the development rules, I'll use `structlog` for logging, Pydantic models for data structures, and proper async patterns where needed.
+
+```python
+import argparse
+import os
+from pathlib import Path
+from typing import Any, Dict, Optional, Type, TypeVar, Union
+
+import structlog
+from pydantic import BaseModel, BaseSettings, ConfigDict, Field
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    EnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+import yaml
+
+# Configure structlog for structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.dev.ConsoleRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=False,
+)
+
+log = structlog.get_logger()
+
+
+class ConfigError(Exception):
+    """Custom exception for configuration errors."""
+    pass
+
+
+class ConfigLoader:
+    """Load configuration from multiple sources with priority merging.
+    
+    Priority order (highest to lowest):
+    1. Command-line arguments
+    2. Environment variables
+    3. YAML configuration file
+    4. Default values
+    """
+    
+    def __init__(self, 
+                 config_path: Optional[str] = None,
+                 model_class: Type[BaseModel] = None):
+        """
+        Initialize the config loader.
+        
+        Args:
+            config_path: Path to the YAML configuration file
+            model_class: Pydantic model class for the configuration
+        """
+        self.config_path = config_path
+        self.model_class = model_class
+        self._yaml_config: Dict[str, Any] = {}
+        self._env_config: Dict[str, Any] = {}
+        self._cli_config: Dict[str, Any] = {}
+    
+    def load_yaml(self, path: Optional[str] = None) -> Dict[str, Any]:
+        """Load configuration from YAML file."""
+        path = path or self.config_path
+        if not path:
+            log.info("no_yaml_config_path", 
+                    message="No YAML config path provided, skipping YAML loading")
+            return {}
+        
+        yaml_path = Path(path)
+        if not yaml_path.exists():
+            log.warning("yaml_config_not_found", path=str(yaml_path))
+            return {}
+        
+        try:
+            with open(yaml_path, 'r') as f:
+                config = yaml.safe_load(f)
+                # Ensure we have a dict, not None or other types
+                self._yaml_config = config if isinstance(config, dict) else {}
+                log.info("yaml_config_loaded", path=str(yaml_path))
+                return self._yaml_config
+        except yaml.YAMLError as e:
+            log.error("yaml_parse_error", path=str(yaml_path), error=str(e))
+            raise ConfigError(f"Failed to parse YAML config file {path}: {e}")
+    
+    def load_env(self, prefix: str = "") -> Dict[str, Any]:
+        """Load configuration from environment variables.
+        
+        Args:
+            prefix: Prefix for environment variables (e.g., "APP_" will look for APP_DB_HOST)
+            
+        Returns:
+            Dictionary of environment variable configurations
+        """
+        self._env_config = {}
+        
+        # If model class is provided, extract environment variable names from field info
+        if self.model_class:
+            for field_name, field_info in self.model_class.model_fields.items():
+                env_var = field_info.validation_alias or field_name
+                if prefix and not env_var.startswith(prefix):
+                    env_var = f"{prefix}{env_var}"
+                
+                if env_var in os.environ:
+                    self._env_config[field_name] = os.environ[env_var]
+        else:
+            # Fallback: look for all env vars with prefix
+            for key, value in os.environ.items():
+                if key.startswith(prefix):
+                    # Convert to snake_case if needed
+                    field_name = key.lower().replace(prefix.lower(), "").replace("_", ".")
+                    self._env_config[field_name] = value
+        
+        log.info("env_config_loaded", count=len(self._env_config))
+        return self._env_config
+    
+    def load_cli(self, 
+                 parser: Optional[argparse.ArgumentParser] = None,
+                 args: Optional[list] = None) -> Dict[str, Any]:
+        """Load configuration from command-line arguments.
+        
+        Args:
+            parser: Existing argparse parser (if None, creates a new one)
+            args: Command-line arguments (if None, uses sys.argv[1:])
+            
+        Returns:
+            Dictionary of CLI argument configurations
+        """
+        self._cli_config = {}
+        
+        # Create parser if not provided
+        if parser is None:
+            parser = argparse.ArgumentParser(description="Configuration loader")
+        
+        # If model class is provided, add arguments based on model fields
+        if self.model_class:
+            for field_name, field_info in self.model_class.model_fields.items():
+                cli_arg = f"--{field_name.replace('_', '-')}"
+                
+                # Determine argument type from field annotation
+                field_type = field_info.annotation
+                if field_type is None:
+                    # Default to string if no type info
+                    field_type = str
+                
+                # Handle Optional types
+                origin = getattr(field_type, '__origin__', None)
+                if origin is Union:
+                    args = field_type.__args__
+                    # Get the first non-None type
+                    field_type = next((arg for arg in args if arg is not type(None)), str)
+                
+                # Add argument to parser
+                parser.add_argument(
+                    cli_arg,
+                    dest=field_name,
+                    type=field_type,
+                    default=argparse.SUPPRESS,
+                    help=f"Configuration for {field_name}"
+                )
+        
+        # Parse arguments
+        parsed_args = parser.parse_args(args)
+        
+        # Convert to dictionary, excluding None values
+        self._cli_config = {k: v for k, v in vars(parsed_args).items() 
+                          if v is not argparse.SUPPRESS}
+        
+        log.info("cli_config_loaded", count=len(self._cli_config))
+        return self._cli_config
+    
+    def merge_configs(self) -> Dict[str, Any]:
+        """Merge configurations from all sources with priority.
+        
+        Priority order (highest to lowest):
+        1. Command-line arguments
+        2. Environment variables
+        3. YAML configuration file
+        4. Default values
+        
+        Returns:
+            Merged configuration dictionary
+        """
+        # Start with empty dict
+        merged = {}
+        
+        # Apply in reverse priority order (lowest first)
+        merged.update(self._yaml_config)
+        merged.update(self._env_config)
+        merged.update(self._cli_config)
+        
+        log.info("config_merged", 
+                yaml_count=len(self._yaml_config),
+                env_count=len(self._env_config),
+                cli_count=len(self._cli_config))
+        
+        return merged
+    
+    def load(self, 
+             parser: Optional[argparse.ArgumentParser] = None,
+             args: Optional[list] = None) -> Dict[str, Any]:
+        """Load configuration from all sources and merge them.
+        
+        Args:
+            parser: Existing argparse parser (if None, creates a new one)
+            args: Command-line arguments (if None, uses sys.argv[1:])
+            
+        Returns:
+            Final merged configuration dictionary
+        """
+        # Load from all sources
+        self.load_yaml()
+        self.load_env()
+        self.load_cli(parser, args)
+        
+        # Merge with priority
+        return self.merge_configs()
+    
+    def load_as_model(self, 
+                     parser: Optional[argparse.ArgumentParser] = None,
+                     args: Optional[list] = None) -> BaseModel:
+        """Load configuration and validate it against a Pydantic model.
+        
+        Args:
+            parser: Existing argparse parser (if None, creates a new one)
+            args: Command-line arguments (if None, uses sys.argv[1:])
+            
+        Returns:
+            Pydantic model instance with validated configuration
+            
+        Raises:
+            ConfigError: If validation fails
+        """
+        if not self.model_class:
+            raise ConfigError("Model class not set for load_as_model()")
+        
+        merged_config = self.load(parser, args)
+        
+        try:
+            # Create model instance with merged config
+            config_model = self.model_class(**merged_config)
+            
+            # Log the final configuration for debugging
+            log.info("config_loaded", 
+                    model=self.model_class.__name__,
+                    config=config_model.model_dump())
+            
+            return config_model
+        except Exception as e:
+            log.error("config_validation_error", 
+                     model=self.model_class.__name__, 
+                     error=str(e))
+            raise ConfigError(f"Configuration validation failed: {e}")
+
+
+# Example usage and test
+if __name__ == "__main__":
+    # Example model definition
+    class AppConfig(BaseModel):
+        """Application configuration model."""
+        model_config = ConfigDict(extra='ignore')
+        
+        app_name: str = "MyApp"
+        debug: bool = False
+        log_level: str = "INFO"
+        database: Dict[str, Any] = Field(default_factory=dict)
+        api_key: str = ""
+    
+    # Create config loader with model
+    loader = ConfigLoader(config_path="config.yaml", model_class=AppConfig)
+    
+    # Load and validate configuration
+    try:
+        config = loader.load_as_model()
+        print("\n--- Final Configuration ---")
+        print(f"App Name: {config.app_name}")
+        print(f"Debug: {config.debug}")
+        print(f"Log Level: {config.log_level}")
+        print(f"Database: {config.database}")
+        print(f"API Key: {'*' * len(config.api_key)}" if config.api_key else "API Key: (not set)")
+    except ConfigError as e:
+        print(f"Configuration error: {e}")
+```
+
+This implementation:
+
+1. **Uses structlog** for structured logging instead of print statements
+2. **Uses Pydantic models** for configuration data validation and type safety
+3. **Implements proper priority merging** with CLI > ENV > YAML > defaults
+4. **Handles errors gracefully** with custom exceptions and detailed logging
+5. **Includes comprehensive docstrings** following the rules
+6. **Uses type hints** for all functions and parameters
+7. **Avoids print statements** for debugging by using structured logging
+
+Key features:
+- ConfigLoader class that handles loading from multiple sources
+- Priority merging where later sources override earlier ones
+- Support for Pydantic model validation
+- Flexible configuration through environment variables and CLI arguments
+- Proper error handling and logging throughout
+
+To use this in production, you would typically:
+1. Define your configuration as a Pydantic model
+2. Create a ConfigLoader instance with your model class
+3. Call `load_as_model()` to get a validated configuration object
+4. Use the configuration throughout your application
+
+The example includes a simple test in the `__main__` block to demonstrate usage.

@@ -1,0 +1,127 @@
+```python
+"""
+User management system data models and database interaction functions.
+
+This module provides Pydantic models for User, Role, and Permission,
+along with async functions to fetch users from a database endpoint.
+"""
+
+import httpx
+from typing import List, Optional
+from datetime import datetime
+from pydantic import BaseModel, Field, validator, EmailStr
+
+
+class Permission(BaseModel):
+    """Represents a permission that can be assigned to roles."""
+    id: int = Field(..., ge=1, description="Unique identifier for the permission")
+    name: str = Field(..., min_length=1, max_length=50, description="Name of the permission")
+    description: Optional[str] = Field(None, max_length=255, description="Description of the permission")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "name": "read_users",
+                "description": "Permission to view user records"
+            }
+        }
+
+
+class Role(BaseModel):
+    """Represents a role that can be assigned to users."""
+    id: int = Field(..., ge=1, description="Unique identifier for the role")
+    name: str = Field(..., min_length=1, max_length=50, description="Name of the role")
+    description: Optional[str] = Field(None, max_length=255, description="Description of the role")
+    permissions: List[Permission] = Field(default_factory=list, description="List of permissions assigned to this role")
+
+    @validator('name')
+    def name_must_be_valid(cls, v):
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Role name must contain only alphanumeric characters and underscores')
+        return v
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "name": "admin",
+                "description": "Administrator role with full access",
+                "permissions": [
+                    {"id": 1, "name": "read_users", "description": "Permission to view user records"},
+                    {"id": 2, "name": "edit_users", "description": "Permission to modify user records"}
+                ]
+            }
+        }
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int = Field(..., ge=1, description="Unique identifier for the user")
+    username: str = Field(..., min_length=3, max_length=32, pattern=r'^[a-zA-Z0-9_]+$', 
+                         description="Username (alphanumeric and underscores only)")
+    email: EmailStr = Field(..., description="User's email address")
+    full_name: Optional[str] = Field(None, max_length=100, description="User's full name")
+    role_id: int = Field(..., ge=1, description="ID of the user's role")
+    is_active: bool = Field(default=True, description="Whether the user account is active")
+    created_at: Optional[datetime] = Field(None, description="Timestamp when the user was created")
+    updated_at: Optional[datetime] = Field(None, description="Timestamp when the user was last updated")
+
+    @validator('username')
+    def username_not_reserved(cls, v):
+        reserved_usernames = ['admin', 'root', 'system', 'guest']
+        if v.lower() in reserved_usernames:
+            raise ValueError(f'Username "{v}" is reserved and cannot be used')
+        return v
+
+    def to_dict(self) -> dict:
+        """Serialize the user model to a dictionary."""
+        return self.dict(exclude_none=True)
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "username": "johndoe",
+                "email": "john.doe@example.com",
+                "full_name": "John Doe",
+                "role_id": 1,
+                "is_active": True,
+                "created_at": "2023-01-15T10:30:00",
+                "updated_at": "2023-06-20T14:45:00"
+            }
+        }
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database endpoint.
+
+    Args:
+        database_url: URL of the database API endpoint to fetch users from.
+
+    Returns:
+        List of User objects fetched from the database.
+
+    Raises:
+        httpx.HTTPError: If the HTTP request fails for any reason.
+        ValueError: If the response cannot be parsed as expected.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Validate the response structure
+            if not isinstance(data, list):
+                raise ValueError("Expected a list of users in the response")
+            
+            return [User(**user_data) for user_data in data]
+            
+    except httpx.HTTPError as e:
+        raise httpx.HTTPError(f"Failed to fetch users: {str(e)}") from e
+    except ValueError as e:
+        raise ValueError(f"Invalid user data in response: {str(e)}") from e
+```

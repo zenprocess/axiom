@@ -1,0 +1,247 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by a column value with progress reporting.
+
+This tool reads a CSV file, filters rows where a specified column matches
+a given value, and outputs the filtered results to stdout or a file.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+from pydantic import BaseModel
+
+# Configure structlog
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+)
+logger = structlog.get_logger()
+
+
+class FilterResult(BaseModel):
+    """Represents a filtered row result."""
+    row: dict
+    match_value: str
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value with progress reporting."
+    )
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Path to input CSV file"
+    )
+    parser.add_argument(
+        "-c", "--column",
+        required=True,
+        help="Column name to filter on"
+    )
+    parser.add_argument(
+        "-v", "--value",
+        required=True,
+        help="Value to match in the specified column"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=None,
+        help="Output file path (default: stdout)"
+    )
+    parser.add_argument(
+        "-d", "--delimiter",
+        default=",",
+        help="CSV delimiter (default: ',')"
+    )
+    return parser.parse_args()
+
+
+async def read_csv_with_progress(
+    file_path: Path, 
+    column: str, 
+    value: str,
+    delimiter: str
+) -> List[FilterResult]:
+    """
+    Read CSV file with progress reporting and filter rows by column value.
+
+    Args:
+        file_path: Path to the CSV file
+        column: Column name to filter on
+        value: Value to match in the specified column
+        delimiter: CSV delimiter character
+
+    Returns:
+        List of FilterResult objects matching the criteria
+    """
+    results: List[FilterResult] = []
+    
+    try:
+        with open(file_path, "r", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile, delimiter=delimiter)
+            
+            # Get total rows for progress calculation
+            # Read all lines first to count them
+            lines = csvfile.readlines()
+            total_rows = len(lines) - (1 if lines and lines[0].strip() else 0)
+            
+            # Reset file pointer to beginning
+            csvfile.seek(0)
+            reader = csv.DictReader(csvfile, delimiter=delimiter)
+            
+            # Process rows with progress reporting
+            processed = 0
+            for row in reader:
+                # Update progress every 10% or 100 rows (whichever is larger)
+                if processed % max(100, total_rows // 10) == 0:
+                    progress = min(100, int(processed / total_rows * 100)) if total_rows > 0 else 0
+                    logger.info("Processing progress", processed=processed, total=total_rows, progress=progress)
+                
+                # Check if row matches filter criteria
+                if row.get(column) == value:
+                    results.append(FilterResult(row=row, match_value=value))
+                
+                processed += 1
+            
+            # Final progress update
+            logger.info("Processing complete", processed=processed, total=total_rows)
+            
+    except FileNotFoundError:
+        logger.error("File not found", file_path=str(file_path))
+        raise
+    except PermissionError:
+        logger.error("Permission denied", file_path=str(file_path))
+        raise
+    except csv.Error as e:
+        logger.error("CSV parsing error", error=str(e))
+        raise
+    except Exception as e:
+        logger.error("Unexpected error reading file", error=str(e))
+        raise
+    
+    return results
+
+
+async def write_results(
+    results: List[FilterResult], 
+    output_path: Optional[Path] = None,
+    delimiter: str = ","
+) -> None:
+    """
+    Write filtered results to output.
+
+    Args:
+        results: List of FilterResult objects to write
+        output_path: Path to output file (None for stdout)
+        delimiter: CSV delimiter for output
+    """
+    try:
+        if output_path:
+            with open(output_path, "w", newline="", encoding="utf-8") as outfile:
+                if results:
+                    writer = csv.DictWriter(
+                        outfile, 
+                        fieldnames=results[0].row.keys(),
+                        delimiter=delimiter
+                    )
+                    writer.writeheader()
+                    for result in results:
+                        writer.writerow(result.row)
+                logger.info("Results written to file", output_file=str(output_path))
+        else:
+            # Output to stdout
+            if results:
+                fieldnames = results[0].row.keys()
+                writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames, delimiter=delimiter)
+                writer.writeheader()
+                for result in results:
+                    writer.writerow(result.row)
+            logger.info("Results written to stdout")
+            
+    except PermissionError:
+        logger.error("Permission denied writing output", output_path=str(output_path) if output_path else "stdout")
+        raise
+    except Exception as e:
+        logger.error("Unexpected error writing output", error=str(e))
+        raise
+
+
+async def main() -> int:
+    """
+    Main entry point for the CLI tool.
+
+    Returns:
+        Exit code (0 for success, non-zero for failure)
+    """
+    try:
+        args = parse_args()
+        
+        # Validate input file exists
+        if not args.input_file.exists():
+            logger.error("Input file does not exist", file_path=str(args.input_file))
+            return 1
+        
+        # Validate column exists in file
+        with open(args.input_file, "r", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile, delimiter=args.delimiter)
+            if args.column not in reader.fieldnames:
+                logger.error(
+                    "Column not found in CSV", 
+                    column=args.column, 
+                    available_columns=", ".join(reader.fieldnames or [])
+                )
+                return 1
+        
+        # Process the CSV file
+        results = await read_csv_with_progress(
+            args.input_file,
+            args.column,
+            args.value,
+            args.delimiter
+        )
+        
+        # Write results
+        await write_results(results, args.output, args.delimiter)
+        
+        # Log summary
+        logger.info(
+            "Filtering complete", 
+            total_rows_processed=len(results),
+            matching_value=args.value,
+            column=args.column
+        )
+        
+        return 0
+        
+    except (FileNotFoundError, PermissionError) as e:
+        logger.error("File operation failed", error=str(e))
+        return 1
+    except Exception as e:
+        logger.error("Unexpected error", error=str(e))
+        return 2
+
+
+if __name__ == "__main__":
+    import asyncio
+    import logging
+    
+    # Configure logging level based on environment
+    log_level = logging.INFO
+    if "DEBUG" in __import__("os").environ:
+        log_level = logging.DEBUG
+    
+    # Reconfigure structlog with the appropriate level
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(log_level),
+    )
+    
+    exit_code = asyncio.run(main())
+    sys.exit(exit_code)
+```

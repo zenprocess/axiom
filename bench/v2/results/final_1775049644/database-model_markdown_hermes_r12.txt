@@ -1,0 +1,152 @@
+```python
+"""User management system data models and database utilities."""
+
+from typing import List, Optional
+from pydantic import BaseModel, EmailStr, validator, root_validator
+import structlog
+import httpx
+
+log = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission that can be assigned to roles."""
+    name: str
+    description: str = ""
+    
+    @validator('name')
+    def name_must_not_be_empty(cls, v):
+        if not v.strip():
+            raise ValueError('Permission name cannot be empty')
+        return v.strip()
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "name": "read_users",
+                "description": "Ability to read user information"
+            }
+        }
+
+
+class Role(BaseModel):
+    """Represents a role that can be assigned to users."""
+    id: int
+    name: str
+    permissions: List[Permission] = []
+    
+    @validator('name')
+    def name_must_not_be_empty(cls, v):
+        if not v.strip():
+            raise ValueError('Role name cannot be empty')
+        return v.strip()
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "name": "admin",
+                "permissions": [
+                    {"name": "read_users", "description": "Ability to read user information"},
+                    {"name": "edit_users", "description": "Ability to modify user information"}
+                ]
+            }
+        }
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    username: str
+    email: EmailStr
+    role: Role
+    is_active: bool = True
+    created_at: Optional[str] = None
+    last_login: Optional[str] = None
+    
+    @validator('username')
+    def username_must_not_be_empty(cls, v):
+        if not v.strip():
+            raise ValueError('Username cannot be empty')
+        if len(v) < 3:
+            raise ValueError('Username must be at least 3 characters long')
+        return v.strip()
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 123,
+                "username": "alice",
+                "email": "alice@example.com",
+                "role": {
+                    "id": 1,
+                    "name": "admin",
+                    "permissions": [
+                        {"name": "read_users", "description": "Ability to read user information"}
+                    ]
+                },
+                "is_active": True
+            }
+        }
+
+
+class UserList(BaseModel):
+    """Container for a list of users."""
+    users: List[User]
+    total_count: int
+
+
+async def fetch_users(database_url: str) -> UserList:
+    """
+    Fetch users from a database API endpoint.
+    
+    Args:
+        database_url: The URL of the database API endpoint
+        
+    Returns:
+        UserList containing the fetched users and total count
+        
+    Raises:
+        httpx.HTTPStatusError: If the response status code is not successful
+        httpx.RequestError: If there's a network error
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Handle both direct list and paginated response
+            if isinstance(data, list):
+                users = [User(**user_data) for user_data in data]
+                total_count = len(users)
+            else:
+                users = [User(**user_data) for user_data in data.get("users", [])]
+                total_count = data.get("total_count", len(users))
+            
+            log.info("users_fetched", count=len(users), database_url=database_url)
+            return UserList(users=users, total_count=total_count)
+            
+    except httpx.HTTPStatusError as exc:
+        log.error(
+            "http_status_error", 
+            status_code=exc.response.status_code,
+            url=database_url,
+            error=str(exc)
+        )
+        raise
+    except httpx.RequestError as exc:
+        log.error(
+            "network_error", 
+            url=database_url,
+            error=str(exc)
+        )
+        raise
+    except Exception as exc:
+        log.error(
+            "unexpected_error", 
+            url=database_url,
+            error=str(exc)
+        )
+        raise
+```

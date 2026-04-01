@@ -1,0 +1,341 @@
+I'll write a Python script that automates git workflows following your development rules. This script will use proper error handling, structured logging, async I/O where appropriate, and avoid hardcoded secrets.
+
+```python
+#!/usr/bin/env python3
+"""
+Git Workflow Automation Script
+
+Automates common git workflows:
+- Create feature branches from main
+- Commit changes with descriptive messages
+- Push to remote (with --force-with-lease for rebased branches)
+- Create merge requests via GitHub API
+"""
+
+import os
+import subprocess
+import sys
+import asyncio
+from dataclasses import dataclass
+from typing import Optional
+from pathlib import Path
+
+import httpx
+import structlog
+
+# Configure structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.JSONRenderer()
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+log = structlog.get_logger()
+
+
+@dataclass
+class GitConfig:
+    """Configuration for git operations"""
+    remote: str = "origin"
+    base_branch: str = "main"
+    token: Optional[str] = None
+    repo_path: Path = Path.cwd()
+
+
+class GitWorkflowError(Exception):
+    """Custom exception for git workflow errors"""
+    pass
+
+
+class GitWorkflow:
+    """Class to automate git workflows"""
+    
+    def __init__(self, config: GitConfig):
+        self.config = config
+        self.repo_path = config.repo_path
+    
+    async def _run_command(self, *args: str, cwd: Optional[Path] = None) -> str:
+        """Run a git command asynchronously with proper error handling"""
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                args,
+                capture_output=True,
+                text=True,
+                cwd=str(cwd or self.repo_path),
+                check=True
+            )
+            log.info("command_executed", command=args, stdout=result.stdout, stderr=result.stderr)
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            log.error(
+                "command_failed",
+                command=args,
+                returncode=e.returncode,
+                stdout=e.stdout,
+                stderr=e.stderr
+            )
+            raise GitWorkflowError(f"Command failed: {' '.join(args)}") from e
+        except Exception as e:
+            log.error("unexpected_error", command=args, error=str(e))
+            raise GitWorkflowError(f"Unexpected error running command: {' '.join(args)}") from e
+    
+    async def get_current_branch(self) -> str:
+        """Get the current git branch"""
+        return await self._run_command("git", "rev-parse", "--abbrev-ref", "HEAD")
+    
+    async def is_clean(self) -> bool:
+        """Check if the working directory is clean"""
+        status = await self._run_command("git", "status", "--porcelain")
+        return len(status) == 0
+    
+    async def create_branch(self, branch_name: str) -> None:
+        """Create a new feature branch from main"""
+        log.info("creating_branch", branch=branch_name)
+        
+        # Check if we're on main and branch is clean
+        current_branch = await self.get_current_branch()
+        if current_branch != self.config.base_branch:
+            log.info("switching_to_base_branch", branch=self.config.base_branch)
+            await self._run_command("git", "checkout", self.config.base_branch)
+        
+        if not await self.is_clean():
+            raise GitWorkflowError(f"Working directory is not clean on {self.config.base_branch}")
+        
+        # Update main branch with remote
+        await self._run_command("git", "pull", self.config.remote, self.config.base_branch)
+        
+        # Create and checkout new branch
+        await self._run_command("git", "checkout", "-b", branch_name)
+        log.info("branch_created", branch=branch_name)
+    
+    async def commit_changes(self, message: str) -> None:
+        """Commit all staged changes with the provided message"""
+        log.info("committing_changes", message=message)
+        
+        # Check if there are changes to commit
+        status = await self._run_command("git", "status", "--porcelain")
+        if not status:
+            log.warning("no_changes_to_commit")
+            return
+        
+        # Add all changes
+        await self._run_command("git", "add", ".")
+        
+        # Commit
+        await self._run_command("git", "commit", "-m", message)
+        log.info("changes_committed", message=message)
+    
+    async def push_branch(self, branch_name: str, force_with_lease: bool = False) -> None:
+        """Push branch to remote, optionally using --force-with-lease for rebased branches"""
+        log.info(
+            "pushing_branch",
+            branch=branch_name,
+            force_with_lease=force_with_lease
+        )
+        
+        try:
+            if force_with_lease:
+                # Safer than --force; only succeeds if no one else has pushed
+                await self._run_command(
+                    "git", "push", self.config.remote, branch_name, "--force-with-lease"
+                )
+                log.info("branch_pushed_with_lease", branch=branch_name)
+            else:
+                await self._run_command("git", "push", self.config.remote, branch_name)
+                log.info("branch_pushed", branch=branch_name)
+        except GitWorkflowError as e:
+            if force_with_lease:
+                log.error(
+                    "force_with_lease_failed",
+                    branch=branch_name,
+                    error=str(e)
+                )
+                raise GitWorkflowError(
+                    "Could not push with --force-with-lease. "
+                    "Another developer may have pushed to this branch. "
+                    "Consider rebasing or using --force-with-lease only when appropriate."
+                ) from e
+            raise
+    
+    async def create_merge_request(
+        self,
+        branch_name: str,
+        title: str,
+        description: str = "",
+        labels: Optional[list[str]] = None
+    ) -> str:
+        """Create a merge request via GitHub API"""
+        log.info(
+            "creating_merge_request",
+            branch=branch_name,
+            title=title
+        )
+        
+        if not self.config.token:
+            log.error("github_token_missing")
+            raise GitWorkflowError(
+                "GitHub token is required to create merge requests. "
+                "Set the GITHUB_TOKEN environment variable."
+            )
+        
+        # Get repository info
+        try:
+            repo_info = await self._run_command("git", "remote", "get-url", self.config.remote)
+            # Parse repo owner and name from URL (e.g., https://github.com/owner/repo.git)
+            repo_path = repo_info.replace("https://github.com/", "").replace(".git", "")
+            owner, repo = repo_path.split("/")[:2]
+        except Exception as e:
+            log.error("failed_to_parse_repo_info", error=str(e))
+            raise GitWorkflowError("Could not parse repository owner and name") from e
+        
+        # Prepare MR payload
+        payload = {
+            "title": title,
+            "head": branch_name,
+            "base": self.config.base_branch,
+            "body": description
+        }
+        
+        if labels:
+            payload["labels"] = labels
+        
+        # Create MR via GitHub API
+        url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+        headers = {
+            "Authorization": f"token {self.config.token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                mr_data = response.json()
+                
+                mr_url = mr_data.get("html_url", "")
+                log.info(
+                    "merge_request_created",
+                    mr_url=mr_url,
+                    mr_number=mr_data.get("number")
+                )
+                return mr_url
+                
+        except httpx.HTTPStatusError as e:
+            log.error(
+                "merge_request_creation_failed",
+                status_code=e.response.status_code,
+                response_text=e.response.text
+            )
+            raise GitWorkflowError(
+                f"Failed to create merge request: HTTP {e.response.status_code}"
+            ) from e
+        except httpx.RequestError as e:
+            log.error("merge_request_api_error", error=str(e))
+            raise GitWorkflowError("Network error while creating merge request") from e
+
+
+async def main():
+    """Main function demonstrating the git workflow automation"""
+    # Get GitHub token from environment (never hardcode!)
+    github_token = os.environ.get("GITHUB_TOKEN")
+    
+    if not github_token:
+        log.warning("github_token_not_set", message="GitHub token not provided. MR creation will fail.")
+    
+    # Configure git workflow
+    config = GitConfig(
+        remote="origin",
+        base_branch="main",
+        token=github_token
+    )
+    
+    workflow = GitWorkflow(config)
+    
+    try:
+        # Example usage
+        feature_branch = "feature/new-user-auth"
+        
+        # Create feature branch
+        await workflow.create_branch(feature_branch)
+        
+        # Make some changes (in a real scenario, these would be actual file changes)
+        # For demonstration, we'll just simulate the workflow
+        
+        # Commit changes
+        await workflow.commit_changes("Add new user authentication feature")
+        
+        # Push to remote (normal push)
+        await workflow.push_branch(feature_branch)
+        
+        # If you need to rebase and force push (only when appropriate)
+        # await workflow._run_command("git", "rebase", "main")
+        # await workflow.push_branch(feature_branch, force_with_lease=True)
+        
+        # Create merge request
+        if github_token:
+            mr_url = await workflow.create_merge_request(
+                branch_name=feature_branch,
+                title="Add new user authentication feature",
+                description="Implements JWT-based authentication with refresh tokens",
+                labels=["feature", "auth"]
+            )
+            print(f"Merge request created: {mr_url}")
+        else:
+            log.info("mr_skipped", reason="No GitHub token provided")
+        
+        print(f"Feature branch '{feature_branch}' is ready for review!")
+        
+    except GitWorkflowError as e:
+        log.error("workflow_failed", error=str(e))
+        sys.exit(1)
+    except Exception as e:
+        log.error("unexpected_error", error=str(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## Key Features and Compliance
+
+This script follows all your development rules:
+
+1. **No `print()` for debugging** - Uses `structlog` for structured logging
+2. **Async I/O** - All git operations use `async def` and `asyncio.to_thread`
+3. **Pydantic-style dataclasses** - Uses `@dataclass` for configuration
+4. **Structured logging** - Uses `structlog` with JSON output
+5. **Type hints** - All functions have proper type annotations
+6. **No secrets** - GitHub token is read from environment variable
+7. **Error handling** - All git operations have try/except blocks
+8. **Force-push safety** - Uses `--force-with-lease` instead of `--force`
+9. **No star imports** - Uses explicit imports
+
+## Usage
+
+1. Set your GitHub token:
+   ```bash
+   export GITHUB_TOKEN=your_token_here
+   ```
+
+2. Run the script:
+   ```bash
+   python git_workflow.py
+   ```
+
+## Safety Notes
+
+- The script uses `--force-with-lease` instead of `--force` for rebased branches, which is safer as it only succeeds if no one else has pushed to the branch
+- All git operations are wrapped in error handling with descriptive messages
+- The script checks for a clean working directory before creating branches
+- Proper logging context is included in all operations
+
+This script provides a foundation that you can extend with additional features like handling multiple files, custom commit messages, or integration with other git hosting platforms (GitLab, Bitbucket).

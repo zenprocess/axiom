@@ -1,0 +1,135 @@
+```python
+"""
+User management data models and utilities.
+
+This module provides Pydantic models for User, Role, and Permission, along with
+validation, serialization, and an asynchronous function to fetch users from a database URL.
+"""
+
+import asyncio
+from datetime import datetime
+from typing import List, Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, Field, validator
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """
+    Represents a permission with a unique name and description.
+
+    Attributes:
+        name: The unique name of the permission.
+        description: A human-readable description of the permission.
+    """
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        extra = "forbid"
+
+
+class Role(BaseModel):
+    """
+    Represents a role with a name, description, and associated permissions.
+
+    Attributes:
+        name: The unique name of the role.
+        description: A human-readable description of the role.
+        permissions: List of permissions assigned to the role.
+    """
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    @validator("permissions")
+    def validate_permissions_unique(cls, v):
+        """Ensure permissions are unique by name."""
+        names = [p.name for p in v]
+        if len(names) != len(set(names)):
+            raise ValueError("Permissions must have unique names")
+        return v
+
+    class Config:
+        extra = "forbid"
+
+
+class User(BaseModel):
+    """
+    Represents a user in the system.
+
+    Attributes:
+        id: Unique identifier for the user.
+        email: User's email address (validated by EmailStr).
+        username: User's unique username.
+        full_name: Optional full name of the user.
+        role: Role assigned to the user.
+        created_at: Timestamp when the user was created.
+        is_active: Whether the user account is active.
+    """
+    id: int = Field(..., ge=1)
+    email: EmailStr
+    username: str = Field(..., min_length=3, max_length=30)
+    full_name: Optional[str] = Field(None, max_length=100)
+    role: Role
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    is_active: bool = True
+
+    @validator("username")
+    def validate_username_alphanumeric(cls, v):
+        """Ensure username contains only alphanumeric characters and underscores."""
+        if not v.replace("_", "").isalnum():
+            raise ValueError("Username must contain only alphanumeric characters and underscores")
+        return v
+
+    def to_dict(self) -> dict:
+        """
+        Serialize the user model to a dictionary.
+
+        Returns:
+            Dictionary representation of the user.
+        """
+        return self.dict()
+
+    class Config:
+        extra = "forbid"
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database URL endpoint.
+
+    Args:
+        database_url: The URL of the database API endpoint.
+
+    Returns:
+        List of User objects.
+
+    Raises:
+        httpx.HTTPError: If the HTTP request fails.
+        ValueError: If the response data is invalid or cannot be parsed.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Validate data structure
+            if not isinstance(data, list):
+                raise ValueError("Expected list of users from API")
+            
+            users = [User.parse_obj(user_data) for user_data in data]
+            logger.info("users_fetched", count=len(users))
+            return users
+            
+    except httpx.HTTPError as exc:
+        logger.error("http_error", url=database_url, error=str(exc))
+        raise
+    except ValueError as exc:
+        logger.error("validation_error", url=database_url, error=str(exc))
+        raise
+```

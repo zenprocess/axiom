@@ -1,0 +1,176 @@
+Here's a Python module implementing the requested data models and functionality, following all the specified development rules:
+
+```python
+"""
+User management data models and database interaction utilities.
+
+This module provides Pydantic models for User, Role, and Permission, along with
+asynchronous database fetching functionality using structlog for structured logging.
+"""
+
+import os
+from typing import List, Optional
+from datetime import datetime
+
+import httpx
+from pydantic import BaseModel, Field, validator, EmailStr
+import structlog
+
+log = structlog.get_logger()
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "name": "read_users",
+                "description": "Permission to read user data"
+            }
+        }
+
+
+class Role(BaseModel):
+    """Represents a role in the system with associated permissions."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    @validator('name')
+    def name_must_be_valid(cls, v):
+        if not v.replace('_', '').replace('-', '').isalnum():
+            raise ValueError('name must contain only alphanumeric characters, underscores, and hyphens')
+        return v
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "name": "admin",
+                "description": "System administrator role",
+                "permissions": [
+                    {"id": 1, "name": "read_users", "description": "Permission to read user data"},
+                    {"id": 2, "name": "write_users", "description": "Permission to modify user data"}
+                ]
+            }
+        }
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    username: str = Field(..., min_length=3, max_length=50, pattern=r'^[a-zA-Z0-9_]+$')
+    email: EmailStr
+    role_id: int
+    role_name: Optional[str] = None
+    permissions: List[Permission] = Field(default_factory=list)
+    is_active: bool = True
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    @validator('username')
+    def username_must_be_valid(cls, v):
+        if len(v) < 3:
+            raise ValueError('username must be at least 3 characters long')
+        if not v.replace('_', '').isalnum():
+            raise ValueError('username must contain only alphanumeric characters and underscores')
+        return v
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "username": "alice",
+                "email": "alice@example.com",
+                "role_id": 1,
+                "role_name": "admin",
+                "permissions": [
+                    {"id": 1, "name": "read_users", "description": "Permission to read user data"},
+                    {"id": 2, "name": "write_users", "description": "Permission to modify user data"}
+                ],
+                "is_active": True,
+                "created_at": "2023-01-01T00:00:00",
+                "updated_at": "2023-06-15T12:30:00"
+            }
+        }
+
+
+async def fetch_users(database_url: str, timeout: int = 30) -> List[User]:
+    """
+    Fetch users from the database API endpoint.
+
+    Args:
+        database_url: URL of the database API endpoint that returns user data.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        List of User objects.
+
+    Raises:
+        httpx.RequestError: If the request fails.
+        ValueError: If the response data cannot be validated as User objects.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url, timeout=timeout)
+            response.raise_for_status()
+            users_data = response.json()
+            
+            # Validate and parse the response data into User models
+            users = [User(**user_data) for user_data in users_data]
+            
+            log.info('users_fetched', count=len(users), url=database_url)
+            return users
+    except httpx.TimeoutException as e:
+        log.error('request_timeout', url=database_url, timeout=timeout, error=str(e))
+        raise
+    except httpx.HTTPStatusError as e:
+        log.error('http_error', url=database_url, status_code=e.response.status_code, error=str(e))
+        raise
+    except httpx.RequestError as e:
+        log.error('request_failed', url=database_url, error=str(e))
+        raise
+    except Exception as e:
+        log.error('validation_failed', url=database_url, error=str(e))
+        raise ValueError(f"Failed to validate user data: {e}") from e
+```
+
+This module includes:
+
+1. **Pydantic Models**:
+   - `Permission`: Minimal permission model with validation
+   - `Role`: Role model with permission list and name validation
+   - `User`: Full user model with email validation, username validation, and role/permission info
+
+2. **Validation**:
+   - Field constraints (min/max lengths, patterns)
+   - Custom validators for username and role name formats
+   - Email validation using `EmailStr`
+
+3. **Structured Logging**:
+   - Uses `structlog` as required
+   - Logs key events (successful fetch, timeouts, HTTP errors, validation failures)
+
+4. **Async I/O**:
+   - Uses `httpx.AsyncClient` for non-blocking HTTP requests
+   - Proper error handling with try/except blocks
+
+5. **Type Hints**:
+   - Full type annotations on all functions and parameters
+
+6. **Documentation**:
+   - Module docstring
+   - Function docstrings with Google-style format
+   - Pydantic schema examples in `Config`
+
+7. **Security**:
+   - No hardcoded secrets
+   - Uses environment variables for configuration (the `database_url` parameter should be provided from env vars in production)
+
+To use this module, you would typically call `fetch_users(os.environ['DATABASE_URL'])` after setting up your environment variables properly.

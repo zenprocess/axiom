@@ -1,0 +1,131 @@
+```python
+"""
+User management system data models and database interaction module.
+
+This module provides Pydantic models for User, Role, and Permission entities,
+along with validation, serialization capabilities, and a function to fetch
+users from a database URL.
+"""
+
+import asyncio
+from datetime import datetime
+from typing import List, Optional
+from urllib.parse import urlparse
+
+import httpx
+import structlog
+from pydantic import BaseModel, EmailStr, Field, validator
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission with name and description."""
+    
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        extra = "forbid"
+
+
+class Role(BaseModel):
+    """Represents a role with permissions."""
+    
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    permissions: List[Permission] = Field(default_factory=list)
+
+    @validator("name")
+    def name_must_not_be_empty(cls, v: str) -> str:
+        """Ensure role name is not empty or whitespace-only."""
+        if not v.strip():
+            raise ValueError("Role name must not be empty or whitespace-only")
+        return v.strip()
+
+    class Config:
+        extra = "forbid"
+
+
+class User(BaseModel):
+    """Represents a user with roles and metadata."""
+    
+    id: int
+    email: EmailStr
+    username: str = Field(..., min_length=3, max_length=30)
+    full_name: Optional[str] = Field(None, max_length=100)
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime
+    roles: List[Role] = Field(default_factory=list)
+
+    @validator("username")
+    def username_must_be_valid(cls, v: str) -> str:
+        """Validate username format and content."""
+        if not v.replace("_", "").replace(".", "").isalnum():
+            raise ValueError("Username can only contain letters, numbers, underscores, and periods")
+        return v
+
+    def to_dict(self) -> dict:
+        """Serialize user to dictionary."""
+        return self.dict(exclude_unset=True)
+
+    class Config:
+        extra = "forbid"
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat(),
+        }
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """
+    Fetch users from a database URL.
+
+    Args:
+        database_url: URL pointing to a user database endpoint.
+
+    Returns:
+        List of User objects fetched from the database.
+
+    Raises:
+        ValueError: If database_url is invalid or malformed.
+        RuntimeError: If there's an error fetching or parsing user data.
+    """
+    # Validate URL
+    parsed = urlparse(database_url)
+    if not all([parsed.scheme, parsed.netloc]):
+        raise ValueError(f"Invalid database URL: {database_url}")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Expect list of users in response
+            if not isinstance(data, list):
+                raise ValueError("Expected a list of users in the response")
+            
+            users = []
+            for user_data in data:
+                try:
+                    user = User(**user_data)
+                    users.append(user)
+                except Exception as exc:
+                    logger.warning("Failed to parse user data", error=str(exc), user_data=user_data)
+                    continue
+            
+            logger.info("Successfully fetched users", count=len(users))
+            return users
+            
+    except httpx.HTTPStatusError as exc:
+        logger.error("HTTP error fetching users", status_code=exc.response.status_code, url=database_url)
+        raise RuntimeError(f"HTTP error fetching users: {exc}") from exc
+    except httpx.RequestError as exc:
+        logger.error("Request error fetching users", error=str(exc))
+        raise RuntimeError(f"Request error fetching users: {exc}") from exc
+    except Exception as exc:
+        logger.error("Unexpected error fetching users", error=str(exc))
+        raise RuntimeError(f"Unexpected error fetching users: {exc}") from exc
+```

@@ -1,0 +1,91 @@
+```python
+"""User management system data models and database utilities."""
+
+import httpx
+from typing import List, Optional
+from pydantic import BaseModel, Field, validator, root_validator
+from structlog import get_logger
+
+logger = get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=255)
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role in the system."""
+    id: int
+    name: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    permissions: List[Permission] = []
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    username: str = Field(..., min_length=3, max_length=32, pattern=r'^[a-zA-Z0-9_.-]+$')
+    email: str = Field(..., pattern=r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+    role_id: Optional[int] = None
+    role: Optional[Role] = None
+    is_active: bool = True
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    @validator('username')
+    def username_must_be_unique_format(cls, v):
+        """Ensure username follows naming conventions."""
+        if v in ('admin', 'root', 'system'):
+            raise ValueError('Username cannot be a reserved word')
+        return v
+
+    class Config:
+        orm_mode = True
+
+
+async def fetch_users(database_url: str, api_key: str = None) -> List[User]:
+    """
+    Fetch users from a database endpoint.
+
+    Args:
+        database_url: The URL of the database API endpoint.
+        api_key: Optional API key for authentication.
+
+    Returns:
+        A list of User objects.
+
+    Raises:
+        ValueError: If the database_url is empty or invalid.
+        httpx.HTTPError: If the request fails.
+    """
+    if not database_url:
+        raise ValueError("database_url cannot be empty")
+
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url, headers=headers, timeout=30.0)
+            response.raise_for_status()
+            users_data = response.json()
+            
+            # Validate and parse users
+            users = [User.parse_obj(user_data) for user_data in users_data]
+            logger.info("Successfully fetched users", count=len(users))
+            return users
+            
+    except httpx.HTTPError as e:
+        logger.error("Failed to fetch users", error=str(e))
+        raise
+```

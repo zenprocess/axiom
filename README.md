@@ -81,6 +81,20 @@ Never use `git push --force`. Use `--force-with-lease` instead.
 
 `allow` | `forbid` | `prefer` | `discourage` | `inform`
 
+## MCP Integration
+
+Axiom content is accessible via [Model Context Protocol](https://modelcontextprotocol.io) resource URIs. Any Axiom-compatible MCP server can serve compiled rules, CLAUDE.md, and policy evaluations using the `axiom://` URI scheme:
+
+```
+axiom://rules                        — all compiled rules
+axiom://rules/{category}             — rules for a specific category
+axiom://claude-md                    — compiled CLAUDE.md
+axiom://policy/{action}/{resource}   — policy evaluation result
+axiom://meta/coverage                — rule coverage report
+```
+
+See [spec.md, section 16](spec.md#16-mcp-resource-uris) for the full URI scheme and MCP tool definition examples.
+
 ## Documentation
 
 - [Specification](spec.md) — normative format definition

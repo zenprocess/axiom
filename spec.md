@@ -370,6 +370,73 @@ Axiom files use the `.axiom` extension. Compiled per-agent rule sets are convent
 
 `text/x-axiom` (provisional).
 
-## 16. Versioning
+## 16. MCP Resource URIs
+
+Axiom content is accessible over the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) via a standard URI scheme. Any Axiom-compatible MCP server MAY serve these resources; [Sieeve](https://github.com/zenprocess/sieeve) is the reference implementation.
+
+The URI scheme is part of this standard. Server implementations are not.
+
+### 16.1 URI Scheme
+
+| URI | Description |
+|-----|-------------|
+| `axiom://rules` | All compiled rules (concatenated across categories) |
+| `axiom://rules/{category}` | Rules for a specific category (`governance`, `coding`, `security`, `testing`, `workflow`) |
+| `axiom://claude-md` | Compiled CLAUDE.md |
+| `axiom://claude-md/{agent_role}` | Compiled CLAUDE.md filtered for agent role |
+| `axiom://policy/{action}/{resource}` | Policy evaluation result for action on resource |
+| `axiom://meta/coverage` | Coverage report (which agents see which rules) |
+| `axiom://meta/conflicts` | Conflict report (opposing effects on same trigger) |
+| `axiom://meta/freshness` | Rule freshness report (last triggered timestamps) |
+
+### 16.2 Content Types
+
+| URI pattern | Content-Type |
+|-------------|-------------|
+| `axiom://rules`, `axiom://rules/{category}`, `axiom://claude-md`, `axiom://claude-md/{agent_role}` | `text/x-axiom` |
+| `axiom://policy/**`, `axiom://meta/**` | `text/plain` |
+
+### 16.3 Example MCP Tool Definition
+
+An MCP server exposing Axiom resources declares them as standard MCP resources:
+
+```json
+{
+  "resources": [
+    {
+      "uri": "axiom://rules",
+      "name": "All Axiom rules",
+      "description": "Compiled rules across all categories in TOON format",
+      "mimeType": "text/x-axiom"
+    },
+    {
+      "uri": "axiom://rules/{category}",
+      "name": "Axiom rules by category",
+      "description": "Compiled rules for a single category (governance, coding, security, testing, workflow)",
+      "mimeType": "text/x-axiom"
+    },
+    {
+      "uri": "axiom://claude-md",
+      "name": "Compiled CLAUDE.md",
+      "description": "Project CLAUDE.md compiled to Axiom TOON format",
+      "mimeType": "text/x-axiom"
+    },
+    {
+      "uri": "axiom://policy/{action}/{resource}",
+      "name": "Policy evaluation",
+      "description": "Evaluate whether an action is allowed on a resource",
+      "mimeType": "text/plain"
+    },
+    {
+      "uri": "axiom://meta/coverage",
+      "name": "Rule coverage report",
+      "description": "Which agents see which rules",
+      "mimeType": "text/plain"
+    }
+  ]
+}
+```
+
+## 17. Versioning
 
 This specification is versioned using semantic versioning. The current version is `0.3.0`. The version is not embedded in the file format; it is tracked by the specification document.

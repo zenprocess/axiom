@@ -1,0 +1,31 @@
+Looks like file write needs approval. Once you approve, the script will be written.
+
+Here's a summary of what it does:
+
+**Four steps:**
+1. `build_image` — `docker build` with `VERSION` build-arg and git commit/date labels; tags both `:<version>` and `:latest`
+2. `push_image` — pushes both tags to the registry
+3. `create_git_tag` — creates annotated git tag `v<version>` and pushes it (idempotent)
+4. `deploy_to_production` — SSHs into `DEPLOY_HOST` and does `docker-compose up -d` with `IMAGE_TAG` env var
+
+**Rollback:**
+- Before each deploy, saves the current `:latest` tag to `.last_deployed_tag`
+- `./deploy.sh rollback` restores the previous version
+- `./deploy.sh rollback 0.5.1` restores a specific version
+
+**Config via env vars** (no hardcoded secrets):
+| Variable | Default | Purpose |
+|---|---|---|
+| `REGISTRY` | `ghcr.io/zenprocess` | Container registry |
+| `DEPLOY_HOST` | _(unset)_ | SSH target for prod |
+| `DEPLOY_DIR` | `/opt/axiom` | Remote working dir |
+
+**Usage:**
+```bash
+./deploy.sh               # deploy version from pyproject.toml
+./deploy.sh 0.7.0         # deploy specific version
+./deploy.sh rollback      # rollback to previous
+./deploy.sh rollback 0.5.1  # rollback to specific version
+```
+
+You'll need to add a `Dockerfile` and a `docker-compose.yml` with `IMAGE_TAG` variable support (`image: ${FULL_IMAGE}:${IMAGE_TAG:-latest}`).

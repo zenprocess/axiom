@@ -1,0 +1,84 @@
+It looks like write permission was denied. Here's the module — you can save it wherever you'd like:
+
+```python
+"""Fetch user data from a REST API with structured error handling."""
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+logger = structlog.get_logger()
+
+BASE_URL = "https://api.example.com"
+
+
+class Address(BaseModel):
+    """User's physical address."""
+
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    """User profile returned by the API."""
+
+    id: int
+    name: str
+    email: str
+    address: Address | None = None
+
+
+class ApiError(Exception):
+    """Raised when the API returns a non-success status."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(f"API error {status_code}: {detail}")
+
+
+async def fetch_user(client: httpx.AsyncClient, user_id: int) -> User:
+    """Fetch a single user by ID from the REST API."""
+    url = f"{BASE_URL}/users/{user_id}"
+    try:
+        response = await client.get(url)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise ApiError(
+            status_code=exc.response.status_code,
+            detail=exc.response.text,
+        ) from exc
+    except httpx.RequestError as exc:
+        raise ApiError(
+            status_code=0,
+            detail=f"Connection failed: {exc}",
+        ) from exc
+
+    return User.model_validate(response.json())
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            user = await fetch_user(client, user_id=42)
+            logger.info("fetched_user", user_id=user.id, name=user.name, email=user.email)
+        except ApiError:
+            logger.exception("failed_to_fetch_user", user_id=42)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design choices:
+
+- **`async def`** for all I/O (`fetch_user`, `main`) using `httpx.AsyncClient`
+- **Pydantic models** (`User`, `Address`) for validated, typed response data
+- **`ApiError`** wraps both HTTP errors and connection failures with status code + detail
+- **`structlog`** for structured logging instead of `print`/`logging`
+- **Type hints** on every signature

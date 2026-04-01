@@ -1,0 +1,104 @@
+It looks like write permissions weren't granted. Here's the complete module you can save as `user_client.py`:
+
+```python
+"""Client module for fetching user data from the REST API."""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger(__name__)
+
+BASE_URL = "https://api.example.com"
+
+
+class Address(BaseModel):
+    street: str
+    city: str
+    zipcode: str
+
+
+class User(BaseModel):
+    id: int
+    name: str
+    email: str
+    username: str
+    phone: Optional[str] = None
+    address: Optional[Address] = None
+    website: Optional[str] = None
+
+
+class UserNotFoundError(Exception):
+    """Raised when a user cannot be found by the given ID."""
+
+
+async def fetch_user(user_id: int, client: httpx.AsyncClient) -> User:
+    """Fetch a single user by ID from the REST API.
+
+    Args:
+        user_id: The numeric ID of the user to fetch.
+        client: An active httpx.AsyncClient instance.
+
+    Returns:
+        A User model populated with the response data.
+
+    Raises:
+        UserNotFoundError: If the server returns 404.
+        httpx.HTTPStatusError: For other non-2xx responses.
+        httpx.RequestError: For network-level failures.
+    """
+    url = f"{BASE_URL}/users/{user_id}"
+    try:
+        response = await client.get(url)
+        if response.status_code == 404:
+            raise UserNotFoundError(f"User {user_id} not found")
+        response.raise_for_status()
+        return User.model_validate(response.json())
+    except UserNotFoundError:
+        log.warning("user_not_found", user_id=user_id)
+        raise
+    except httpx.HTTPStatusError as exc:
+        log.error(
+            "api_http_error",
+            user_id=user_id,
+            status_code=exc.response.status_code,
+            url=str(exc.request.url),
+        )
+        raise
+    except httpx.RequestError as exc:
+        log.error("api_request_error", user_id=user_id, error=str(exc))
+        raise
+
+
+async def main() -> None:
+    """Entry point: fetch user #42 and log the result."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            user = await fetch_user(42, client)
+            log.info("user_fetched", user_id=user.id, name=user.name, email=user.email)
+        except UserNotFoundError:
+            log.warning("skipping_user", reason="not_found", user_id=42)
+        except (httpx.HTTPStatusError, httpx.RequestError):
+            log.error("fetch_failed", user_id=42)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Key design decisions per your coding standards:**
+
+| Rule | Applied |
+|---|---|
+| `async-io` | `fetch_user` and `main` are both `async def` |
+| `structlog-only` | `structlog.get_logger()` — no `print()` or `logging` |
+| `pydantic-models` | `User` and `Address` extend `BaseModel`; parsed with `model_validate()` |
+| `type-hints` | All signatures typed, including `Optional[...]` fields |
+| `error-handling` | `try/except` covers 404, HTTP errors, and network errors separately |
+| `no-secrets` | `BASE_URL` is a plain URL, no credentials embedded |
+| `docstrings` | All public functions documented |
+
+**Dependencies:** `httpx`, `structlog`, `pydantic` — all installable via `pip install httpx structlog pydantic`.

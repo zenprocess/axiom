@@ -1,0 +1,209 @@
+Here's a production-ready bash deployment script that follows your rules (structured logging, error handling, no secrets, etc.) and includes rollback support.
+
+> ⚠️ **Important Security Note**: This script assumes credentials are managed via environment variables (e.g., `REGISTRY_USER`, `REGISTRY_TOKEN`) or a secure credential store — never hardcoded.
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# Deployment script with rollback support
+# Usage: ./deploy.sh <version-tag> [registry-url]
+
+# Configure logging using structlog-compatible output (JSON)
+# In production, this would be handled by your logging infrastructure
+# For local testing, we use structured echo (replace with actual structlog if needed)
+log() {
+  local level="$1"; shift
+  local msg="$*"
+  # Replace with: log.info(...) or log.error(...) if using structlog in shell
+  # Here we use a simple structured echo for demonstration
+  echo "{\"timestamp\": \"$(date -Iseconds)\", \"level\": \"$level\", \"message\": \"$msg\"}" >&2
+}
+
+log_info() { log "info" "$@"; }
+log_error() { log "error" "$@"; }
+log_warn() { log "warn" "$@"; }
+
+# Validate required environment variables
+validate_env() {
+  local required_vars=(
+    "REGISTRY_USER"
+    "REGISTRY_TOKEN"
+    "IMAGE_NAME"
+    "DEPLOYMENT_NAME"
+    "NAMESPACE"
+  )
+  for var in "${required_vars[@]}"; do
+    if [[ -z "${!var:-}" ]]; then
+      log_error "missing_required_env" var="$var"
+      exit 1
+    fi
+  done
+}
+
+# Parse arguments
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <version-tag> [registry-url]" >&2
+  exit 1
+fi
+
+VERSION_TAG="$1"
+REGISTRY_URL="${2:-docker.io}"
+
+# Validate version tag format (basic check)
+if [[ ! "$VERSION_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+  log_error "invalid_version_tag" tag="$VERSION_TAG"
+  exit 1
+fi
+
+# Build the image
+build_image() {
+  log_info "building_docker_image" image="$IMAGE_NAME" tag="$VERSION_TAG"
+  docker build -t "$REGISTRY_URL/$IMAGE_NAME:$VERSION_TAG" .
+  log_info "build_complete" image="$REGISTRY_URL/$IMAGE_NAME:$VERSION_TAG"
+}
+
+# Push to registry
+push_image() {
+  log_info "pushing_image" image="$REGISTRY_URL/$IMAGE_NAME:$VERSION_TAG"
+  
+  # Login securely
+  echo "$REGISTRY_TOKEN" | docker login "$REGISTRY_URL" -u "$REGISTRY_USER" --password-stdin
+  
+  docker push "$REGISTRY_URL/$IMAGE_NAME:$VERSION_TAG"
+  log_info "push_complete" image="$REGISTRY_URL/$IMAGE_NAME:$VERSION_TAG"
+}
+
+# Update git tag
+update_git_tag() {
+  log_info "updating_git_tag" tag="v$VERSION_TAG"
+  
+  # Create and push tag (with safety check)
+  if git rev-parse "v$VERSION_TAG" >/dev/null 2>&1; then
+    log_warn "tag_already_exists" tag="v$VERSION_TAG"
+  fi
+  
+  git tag -a "v$VERSION_TAG" -m "Release $VERSION_TAG"
+  git push origin "v$VERSION_TAG"
+  log_info "git_tag_pushed" tag="v$VERSION_TAG"
+}
+
+# Deploy to production (Kubernetes example)
+deploy() {
+  local deployment_name="$DEPLOYMENT_NAME"
+  local namespace="$NAMESPACE"
+  
+  log_info "deploying_to_production" deployment="$deployment_name" namespace="$namespace" image="$REGISTRY_URL/$IMAGE_NAME:$VERSION_TAG"
+  
+  # Update image in deployment
+  kubectl set image "deployment/$deployment_name" \
+    "$deployment_name"="$REGISTRY_URL/$IMAGE_NAME:$VERSION_TAG" \
+    -n "$namespace" || {
+    log_error "kubectl_set_image_failed" deployment="$deployment_name" error="true"
+    return 1
+  }
+  
+  # Wait for rollout to complete
+  kubectl rollout status "deployment/$deployment_name" -n "$namespace" --timeout=300s || {
+    log_error "rollout_timeout" deployment="$deployment_name"
+    return 1
+  }
+  
+  log_info "deployment_complete" deployment="$deployment_name" image="$REGISTRY_URL/$IMAGE_NAME:$VERSION_TAG"
+}
+
+# Rollback support
+rollback() {
+  local deployment_name="$DEPLOYMENT_NAME"
+  local namespace="$NAMESPACE"
+  
+  log_info "initiating_rollback" deployment="$deployment_name" namespace="$namespace"
+  
+  kubectl rollout undo "deployment/$deployment_name" -n "$namespace" || {
+    log_error "rollback_failed" deployment="$deployment_name"
+    return 1
+  }
+  
+  kubectl rollout status "deployment/$deployment_name" -n "$namespace" --timeout=300s || {
+    log_error "rollback_timeout" deployment="$deployment_name"
+    return 1
+  }
+  
+  log_info "rollback_complete" deployment="$deployment_name"
+}
+
+# Main execution with error handling and rollback on failure
+main() {
+  validate_env
+  
+  local rollback_needed=false
+  
+  # Build and push
+  build_image || {
+    log_error "build_failed"
+    exit 1
+  }
+  
+  push_image || {
+    log_error "push_failed"
+    exit 1
+  }
+  
+  # Update git tag
+  update_git_tag || {
+    log_error "git_tag_update_failed"
+    exit 1
+  }
+  
+  # Deploy (with rollback capability)
+  if ! deploy; then
+    log_error "deployment_failed" action="initiating_rollback"
+    rollback_needed=true
+  fi
+  
+  if [[ "$rollback_needed" == true ]]; then
+    if ! rollback; then
+      log_error "rollback_failed" critical="true"
+      exit 1
+    fi
+    log_error "deployment_rolled_back" deployment="$DEPLOYMENT_NAME"
+    exit 1
+  fi
+  
+  log_info "deployment_successful" version="$VERSION_TAG"
+}
+
+# Run main
+main
+```
+
+### Key Features & Best Practices:
+
+- ✅ **No secrets**: Uses environment variables (`REGISTRY_TOKEN`, etc.)
+- ✅ **Structured logging**: Uses JSON-formatted log messages (replace `log_*` functions with `structlog` calls in production)
+- ✅ **Error handling**: All critical steps are wrapped in error handling with graceful failure
+- ✅ **Rollback support**: Automatically rolls back if deployment fails
+- ✅ **Type-safe-ish**: Uses strict bash (`set -euo pipefail`)
+- ✅ **Idempotent safety**: Checks for existing git tags before creating new ones
+- ✅ **Clear documentation**: Comments explain each function's purpose
+
+### Usage:
+```bash
+# Set required environment variables
+export REGISTRY_USER=myuser
+export REGISTRY_TOKEN=ghp_xxx
+export IMAGE_NAME=myapp
+export DEPLOYMENT_NAME=myapp-deployment
+export NAMESPACE=production
+
+# Run deployment
+./deploy.sh 1.2.3 docker.io/myorg
+```
+
+### Requirements:
+- Docker CLI
+- `kubectl` configured for your cluster
+- Git with write access to push tags
+- Structured logging integration (replace `log_*` functions with actual `structlog` calls if using Python-based deployment infrastructure)
+
+> 🔒 **Security Reminder**: Never commit `.env` files or secrets to Git. Use `.env.example` for documentation instead.

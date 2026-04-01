@@ -1,0 +1,194 @@
+It looks like you've denied write permission. Here's the script — you can save it as `deploy.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Configuration (override via environment) ─────────────────────────────────
+REGISTRY="${REGISTRY:?Set REGISTRY (e.g. ghcr.io/myorg/axiom)}"
+APP_NAME="${APP_NAME:-axiom}"
+DOCKERFILE="${DOCKERFILE:-Dockerfile}"
+DEPLOY_TARGET="${DEPLOY_TARGET:?Set DEPLOY_TARGET (e.g. user@prod-server)}"
+DEPLOY_DIR="${DEPLOY_DIR:-/opt/${APP_NAME}}"
+COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
+
+# ── Derived ──────────────────────────────────────────────────────────────────
+GIT_SHA="$(git rev-parse --short HEAD)"
+TIMESTAMP="$(date -u +%Y%m%d%H%M%S)"
+TAG="${TAG:-${TIMESTAMP}-${GIT_SHA}}"
+IMAGE="${REGISTRY}:${TAG}"
+IMAGE_LATEST="${REGISTRY}:latest"
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+log()  { printf '[deploy] %s\n' "$*" >&2; }
+die()  { log "ERROR: $*"; exit 1; }
+
+usage() {
+    cat <<'EOF'
+Usage: ./deploy.sh <command>
+
+Commands:
+  deploy     Build, push, tag, and deploy to production
+  rollback   Roll back to a previous deployment tag
+  list-tags  List available deployment tags
+
+Environment variables:
+  REGISTRY       Container registry path       (required)
+  DEPLOY_TARGET  SSH destination for production (required)
+  APP_NAME       Application name              (default: axiom)
+  DOCKERFILE     Path to Dockerfile            (default: Dockerfile)
+  DEPLOY_DIR     Remote deployment directory    (default: /opt/$APP_NAME)
+  COMPOSE_FILE   Docker Compose file name       (default: docker-compose.yml)
+  TAG            Override image tag             (default: <timestamp>-<git-sha>)
+EOF
+    exit 0
+}
+
+# ── Preflight checks ────────────────────────────────────────────────────────
+preflight() {
+    command -v docker >/dev/null || die "docker not found"
+    command -v git    >/dev/null || die "git not found"
+    command -v ssh    >/dev/null || die "ssh not found"
+
+    [ -f "$DOCKERFILE" ] || die "Dockerfile not found at ${DOCKERFILE}"
+
+    if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+        log "WARNING: working tree has uncommitted changes"
+    fi
+}
+
+# ── Step 1: Build ────────────────────────────────────────────────────────────
+build() {
+    log "Building image ${IMAGE} ..."
+    docker build -t "$IMAGE" -t "$IMAGE_LATEST" -f "$DOCKERFILE" .
+    log "Build complete."
+}
+
+# ── Step 2: Push ─────────────────────────────────────────────────────────────
+push() {
+    log "Pushing ${IMAGE} ..."
+    docker push "$IMAGE"
+    docker push "$IMAGE_LATEST"
+    log "Push complete."
+}
+
+# ── Step 3: Git tag ──────────────────────────────────────────────────────────
+tag() {
+    local git_tag="deploy/${TAG}"
+    log "Creating git tag ${git_tag} ..."
+    git tag -a "$git_tag" -m "Production deploy ${TAG}"
+    git push origin "$git_tag"
+    log "Tagged."
+}
+
+# ── Step 4: Deploy ───────────────────────────────────────────────────────────
+deploy_remote() {
+    log "Deploying ${IMAGE} to ${DEPLOY_TARGET}:${DEPLOY_DIR} ..."
+    ssh "$DEPLOY_TARGET" bash -s <<REMOTE
+set -euo pipefail
+cd "${DEPLOY_DIR}"
+
+# Save current image for automatic rollback on failure
+if docker compose -f "${COMPOSE_FILE}" config --images 2>/dev/null | head -1 > .previous-image; then
+    echo "[deploy-remote] Saved previous image for rollback"
+fi
+
+export IMAGE="${IMAGE}"
+docker compose -f "${COMPOSE_FILE}" pull
+docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
+
+# Health check — wait up to 30s
+for i in \$(seq 1 30); do
+    if docker compose -f "${COMPOSE_FILE}" ps --format json 2>/dev/null \
+       | grep -q '"Health":"healthy"'; then
+        echo "[deploy-remote] Health check passed"
+        exit 0
+    fi
+    if docker compose -f "${COMPOSE_FILE}" ps --status running --quiet 2>/dev/null \
+       | grep -q .; then
+        if [ "\$i" -ge 5 ]; then
+            echo "[deploy-remote] Container running (no healthcheck), proceeding"
+            exit 0
+        fi
+    fi
+    sleep 1
+done
+
+echo "[deploy-remote] ERROR: health check failed after 30s" >&2
+echo "[deploy-remote] Auto-rolling back ..."
+if [ -f .previous-image ]; then
+    export IMAGE="\$(cat .previous-image)"
+    docker compose -f "${COMPOSE_FILE}" pull
+    docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
+fi
+exit 1
+REMOTE
+    log "Deploy complete: ${IMAGE}"
+}
+
+# ── Rollback ─────────────────────────────────────────────────────────────────
+rollback() {
+    local target_tag="${TAG:-}"
+
+    # If TAG wasn't explicitly set, prompt interactively
+    if [ -z "$target_tag" ] || [ "$target_tag" = "${TIMESTAMP}-${GIT_SHA}" ]; then
+        log "Available deployment tags (most recent first):"
+        git tag -l 'deploy/*' --sort=-creatordate | head -20
+        echo ""
+        read -rp "Enter tag to roll back to (e.g. deploy/20260401120000-abc1234): " target_tag
+    fi
+
+    git rev-parse "$target_tag" >/dev/null 2>&1 || die "Tag '${target_tag}' not found"
+
+    local image_tag="${target_tag#deploy/}"
+    local rollback_image="${REGISTRY}:${image_tag}"
+
+    log "Rolling back to ${rollback_image} ..."
+    ssh "$DEPLOY_TARGET" bash -s <<REMOTE
+set -euo pipefail
+cd "${DEPLOY_DIR}"
+export IMAGE="${rollback_image}"
+docker compose -f "${COMPOSE_FILE}" pull
+docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
+echo "[deploy-remote] Rolled back to ${rollback_image}"
+REMOTE
+    log "Rollback complete."
+}
+
+# ── List tags ────────────────────────────────────────────────────────────────
+list_tags() {
+    git tag -l 'deploy/*' --sort=-creatordate
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+main() {
+    local cmd="${1:-}"
+    case "$cmd" in
+        deploy)    preflight; build; push; tag; deploy_remote ;;
+        rollback)  rollback ;;
+        list-tags) list_tags ;;
+        -h|--help|help|"") usage ;;
+        *) die "Unknown command: ${cmd}. Run './deploy.sh help' for usage." ;;
+    esac
+}
+
+main "$@"
+```
+
+**How it works:**
+
+| Command | What it does |
+|---|---|
+| `./deploy.sh deploy` | Builds image, pushes to registry, creates `deploy/<tag>` git tag, SSHs to prod and does `docker compose up -d` with a 30s health check |
+| `./deploy.sh rollback` | Lists `deploy/*` tags, prompts you to pick one, pulls that image on prod and restarts |
+| `./deploy.sh list-tags` | Shows all deployment tags sorted by date |
+
+**Key features:**
+
+- **Automatic rollback on failed deploy** — if the health check fails within 30s, it restores the previous image automatically
+- **Manual rollback** — `./deploy.sh rollback` or `TAG=deploy/20260401-abc1234 ./deploy.sh rollback`
+- **All config via env vars** — no secrets in code, just set `REGISTRY` and `DEPLOY_TARGET`
+- **Image tags** are `<timestamp>-<git-sha>` for traceability, with git tags under `deploy/` namespace
+- **Preflight checks** — verifies tools exist, Dockerfile is present, warns about uncommitted changes
+
+Make it executable with `chmod +x deploy.sh`. Your `docker-compose.yml` on the remote should reference `${IMAGE}` for the service image.

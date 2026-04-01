@@ -1,0 +1,15 @@
+Here's what the module contains — approve to write it:
+
+**Data models** (`Address`, `User`) — Pydantic `BaseModel` with typed fields.
+
+**`UserClient` class** — async `get_user(user_id)` method using `httpx.AsyncClient`:
+- Wraps the HTTP call in `try/except httpx.RequestError` for network failures.
+- Raises `UserNotFoundError` on 404, `UserAPIError` on any other non-200 or parse failure.
+- All logging via `structlog`.
+
+**`main()`** — async, fetches user 42, handles both custom exception types.
+
+**Dependencies needed:**
+```bash
+pip install httpx pydantic structlog
+```

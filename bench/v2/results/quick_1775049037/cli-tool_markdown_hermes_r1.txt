@@ -1,0 +1,325 @@
+```python
+#!/usr/bin/env python3
+"""
+CSV Filter CLI Tool
+
+A command-line tool to filter rows from a CSV file based on a column value.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+
+# Configure structlog for structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.dev.ConsoleRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=False,
+)
+log = structlog.get_logger()
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter rows from a CSV file based on a column value.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    
+    parser.add_argument(
+        "input_file",
+        type=str,
+        help="Path to the input CSV file",
+    )
+    
+    parser.add_argument(
+        "-c",
+        "--column",
+        type=str,
+        required=True,
+        help="Column name to filter on",
+    )
+    
+    parser.add_argument(
+        "-v",
+        "--value",
+        type=str,
+        required=True,
+        help="Value to match in the specified column",
+    )
+    
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default="-",
+        help="Output file path (default: stdout)",
+    )
+    
+    parser.add_argument(
+        "-d",
+        "--delimiter",
+        type=str,
+        default=",",
+        help="CSV delimiter (default: comma)",
+    )
+    
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output",
+    )
+    
+    return parser.parse_args()
+
+
+def read_csv_file(
+    file_path: str, 
+    delimiter: str,
+    quiet: bool = False
+) -> tuple[List[dict], Optional[str]]:
+    """
+    Read a CSV file and return its contents as a list of dictionaries.
+    
+    Args:
+        file_path: Path to the CSV file
+        delimiter: CSV delimiter character
+        quiet: If True, suppress progress output
+        
+    Returns:
+        Tuple of (list of row dictionaries, error message if any)
+    """
+    try:
+        path = Path(file_path)
+        if not path.exists():
+            error = f"Error: Input file '{file_path}' does not exist"
+            log.error("file_not_found", file_path=file_path)
+            return [], error
+            
+        if not path.is_file():
+            error = f"Error: '{file_path}' is not a file"
+            log.error("not_a_file", file_path=file_path)
+            return [], error
+            
+        # Read the CSV file
+        rows = []
+        try:
+            with open(path, "r", newline="", encoding="utf-8") as csvfile:
+                reader = csv.DictReader(csvfile, delimiter=delimiter)
+                fieldnames = reader.fieldnames
+                
+                if fieldnames is None:
+                    error = "Error: CSV file appears to be empty"
+                    log.error("empty_csv", file_path=file_path)
+                    return [], error
+                
+                total_rows = sum(1 for _ in open(path, "r", encoding="utf-8")) - 1
+                log.info("reading_csv", file_path=file_path, total_rows=total_rows)
+                
+                row_count = 0
+                for row in reader:
+                    rows.append(row)
+                    row_count += 1
+                    
+                    # Progress output (only if not quiet)
+                    if not quiet and row_count % 1000 == 0:
+                        log.info("progress", processed_rows=row_count)
+                        
+        except csv.Error as e:
+            error = f"Error: Invalid CSV format - {str(e)}"
+            log.error("csv_parse_error", file_path=file_path, error=str(e))
+            return [], error
+        except UnicodeDecodeError as e:
+            error = f"Error: File encoding issue - {str(e)}"
+            log.error("encoding_error", file_path=file_path, error=str(e))
+            return [], error
+            
+        log.info("read_complete", total_rows=len(rows))
+        return rows, None
+        
+    except IOError as e:
+        error = f"Error: Could not read file '{file_path}' - {str(e)}"
+        log.error("io_error", file_path=file_path, error=str(e))
+        return [], error
+
+
+def filter_rows(
+    rows: List[dict], 
+    column: str, 
+    value: str, 
+    quiet: bool = False
+) -> tuple[List[dict], Optional[str]]:
+    """
+    Filter rows based on a column value.
+    
+    Args:
+        rows: List of row dictionaries
+        column: Column name to filter on
+        value: Value to match in the specified column
+        quiet: If True, suppress progress output
+        
+    Returns:
+        Tuple of (filtered list of row dictionaries, error message if any)
+    """
+    if not rows:
+        return [], None
+    
+    # Check if column exists
+    if column not in rows[0]:
+        error = f"Error: Column '{column}' not found in CSV file"
+        log.error("column_not_found", column=column, available_columns=list(rows[0].keys()))
+        return [], error
+    
+    # Filter rows
+    filtered_rows = []
+    total_rows = len(rows)
+    
+    log.info("filtering_rows", column=column, value=value, total_rows=total_rows)
+    
+    for i, row in enumerate(rows):
+        if row[column] == value:
+            filtered_rows.append(row)
+            
+        # Progress output (only if not quiet)
+        if not quiet and (i + 1) % 1000 == 0:
+            log.info("filtering_progress", processed=i + 1, matched=len(filtered_rows))
+    
+    log.info(
+        "filtering_complete", 
+        total_rows=total_rows, 
+        matched=len(filtered_rows)
+    )
+    
+    return filtered_rows, None
+
+
+def write_csv(
+    rows: List[dict], 
+    output_path: str, 
+    quiet: bool = False
+) -> Optional[str]:
+    """
+    Write filtered rows to output (file or stdout).
+    
+    Args:
+        rows: List of row dictionaries to write
+        output_path: Output file path (or "-" for stdout)
+        quiet: If True, suppress progress output
+        
+    Returns:
+        Error message if any, None otherwise
+    """
+    if not rows:
+        log.warning("no_rows_to_write")
+        return None
+    
+    try:
+        if output_path == "-":
+            # Write to stdout
+            fieldnames = list(rows[0].keys())
+            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            log.info("writing_output", output="stdout", row_count=len(rows))
+            
+            for i, row in enumerate(rows):
+                writer.writerow(row)
+                
+                # Progress output (only if not quiet)
+                if not quiet and (i + 1) % 1000 == 0:
+                    log.info("writing_progress", written=i + 1)
+            
+            log.info("write_complete", output="stdout", row_count=len(rows))
+            
+        else:
+            # Write to file
+            fieldnames = list(rows[0].keys())
+            output_file = Path(output_path)
+            
+            log.info("writing_output", output=output_path, row_count=len(rows))
+            
+            with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                for i, row in enumerate(rows):
+                    writer.writerow(row)
+                    
+                    # Progress output (only if not quiet)
+                    if not quiet and (i + 1) % 1000 == 0:
+                        log.info("writing_progress", written=i + 1)
+            
+            log.info("write_complete", output=output_path, row_count=len(rows))
+            
+        return None
+        
+    except IOError as e:
+        error = f"Error: Could not write to output '{output_path}' - {str(e)}"
+        log.error("io_error", output_path=output_path, error=str(e))
+        return error
+
+
+def main() -> int:
+    """
+    Main entry point for the CSV filter CLI tool.
+    
+    Returns:
+        Exit code (0 for success, non-zero for error)
+    """
+    try:
+        args = parse_args()
+        
+        # Read the CSV file
+        rows, error = read_csv_file(args.input_file, args.delimiter, args.quiet)
+        if error:
+            print(error, file=sys.stderr)
+            return 1
+        
+        # Filter the rows
+        filtered_rows, error = filter_rows(rows, args.column, args.value, args.quiet)
+        if error:
+            print(error, file=sys.stderr)
+            return 1
+        
+        # Write the output
+        error = write_csv(filtered_rows, args.output, args.quiet)
+        if error:
+            print(error, file=sys.stderr)
+            return 1
+        
+        # Final summary
+        if not args.quiet:
+            log.info(
+                "filtering_done",
+                input_file=args.input_file,
+                column=args.column,
+                value=args.value,
+                matched_rows=len(filtered_rows),
+                output=args.output if args.output != "-" else "stdout"
+            )
+        
+        return 0
+        
+    except KeyboardInterrupt:
+        log.warning("interrupted", message="Operation cancelled by user")
+        return 130
+    except Exception as e:
+        log.error("unexpected_error", error=str(e))
+        print(f"Unexpected error: {str(e)}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

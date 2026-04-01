@@ -1,0 +1,205 @@
+It seems file write permissions aren't granted. Here's the complete script — you can save it manually:
+
+---
+
+**`Dockerfile`** (create at project root):
+
+```dockerfile
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+RUN pip install --no-cache-dir hatchling
+COPY pyproject.toml README.md .
+COPY . .
+RUN pip install --no-cache-dir --prefix=/install .
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /install /usr/local
+COPY . .
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+CMD ["python", "-m", "axiom"]
+```
+
+---
+
+**`deploy.sh`**:
+
+```bash
+#!/usr/bin/env bash
+# deploy.sh — Build, tag, push, and deploy axiom-rdl
+#
+# Usage:
+#   ./deploy.sh [--env <prod|staging>] [--tag <version>] [--rollback <tag>]
+#
+# Required env vars:
+#   REGISTRY      — e.g. ghcr.io/zenprocess
+#   DEPLOY_HOST   — SSH target, e.g. user@prod.example.com
+#   DEPLOY_DIR    — Remote dir containing docker-compose.yml
+#
+# Optional:
+#   IMAGE_NAME    — defaults to axiom-rdl
+#   SSH_KEY       — defaults to ~/.ssh/id_rsa
+
+set -euo pipefail
+
+IMAGE_NAME="${IMAGE_NAME:-axiom-rdl}"
+REGISTRY="${REGISTRY:?REGISTRY env var is required}"
+DEPLOY_HOST="${DEPLOY_HOST:?DEPLOY_HOST env var is required}"
+DEPLOY_DIR="${DEPLOY_DIR:?DEPLOY_DIR env var is required}"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
+ENV="${ENV:-prod}"
+ROLLBACK_TAG=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --env)       ENV="$2";          shift 2 ;;
+        --tag)       FORCED_TAG="$2";   shift 2 ;;
+        --rollback)  ROLLBACK_TAG="$2"; shift 2 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}"
+
+log()  { echo "[$(date '+%H:%M:%S')] $*"; }
+die()  { echo "[ERROR] $*" >&2; exit 1; }
+
+ssh_run() { ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$DEPLOY_HOST" "$@"; }
+require_tool() { command -v "$1" >/dev/null 2>&1 || die "$1 is not installed"; }
+
+# ── Rollback path ────────────────────────────────────────────────────────────
+if [[ -n "$ROLLBACK_TAG" ]]; then
+    log "Rolling back to ${FULL_IMAGE}:${ROLLBACK_TAG}..."
+    ssh_run "
+        cd ${DEPLOY_DIR} &&
+        IMAGE_TAG=${ROLLBACK_TAG} docker compose pull &&
+        IMAGE_TAG=${ROLLBACK_TAG} docker compose up -d --remove-orphans
+    "
+    log "Rollback complete → ${ROLLBACK_TAG}"
+    exit 0
+fi
+
+# ── Pre-flight ───────────────────────────────────────────────────────────────
+require_tool docker
+require_tool git
+[[ -f Dockerfile ]] || die "Dockerfile not found in $(pwd)"
+git diff --quiet || log "Warning: uncommitted changes present"
+
+# ── Version tag ──────────────────────────────────────────────────────────────
+if [[ -n "${FORCED_TAG:-}" ]]; then
+    TAG="$FORCED_TAG"
+else
+    TAG=$(grep '^version' pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    [[ -n "$TAG" ]] || die "Could not parse version from pyproject.toml"
+fi
+
+GIT_SHA=$(git rev-parse --short HEAD)
+TIMESTAMP=$(date '+%Y%m%d%H%M%S')
+BUILD_TAG="${TAG}-${GIT_SHA}"
+
+log "Deploying ${IMAGE_NAME} v${TAG} (${GIT_SHA}) to ${ENV}"
+
+# ── 1. Build ─────────────────────────────────────────────────────────────────
+log "Building ${FULL_IMAGE}:${BUILD_TAG}..."
+docker build \
+    --build-arg BUILD_DATE="${TIMESTAMP}" \
+    --build-arg VERSION="${TAG}" \
+    --build-arg GIT_SHA="${GIT_SHA}" \
+    --label "org.opencontainers.image.version=${TAG}" \
+    --label "org.opencontainers.image.revision=${GIT_SHA}" \
+    --label "org.opencontainers.image.created=${TIMESTAMP}" \
+    -t "${FULL_IMAGE}:${BUILD_TAG}" \
+    -t "${FULL_IMAGE}:${TAG}" \
+    -t "${FULL_IMAGE}:latest" \
+    .
+
+# ── 2. Push ──────────────────────────────────────────────────────────────────
+log "Pushing to ${REGISTRY}..."
+docker push "${FULL_IMAGE}:${BUILD_TAG}"
+docker push "${FULL_IMAGE}:${TAG}"
+docker push "${FULL_IMAGE}:latest"
+
+# ── 3. Git tag ───────────────────────────────────────────────────────────────
+GIT_TAG="v${TAG}"
+if git rev-parse "$GIT_TAG" >/dev/null 2>&1; then
+    log "Tag ${GIT_TAG} already exists — skipping"
+else
+    log "Creating git tag ${GIT_TAG}..."
+    git tag -a "$GIT_TAG" -m "Release ${TAG} deployed to ${ENV} at ${TIMESTAMP}"
+    git push origin "$GIT_TAG"
+fi
+
+# ── 4. Deploy ────────────────────────────────────────────────────────────────
+PREV_TAG=$(ssh_run "
+    cd ${DEPLOY_DIR} 2>/dev/null &&
+    docker compose ps -q | head -1 |
+      xargs -r docker inspect --format '{{index .Config.Image}}' 2>/dev/null |
+      sed 's/.*://' || echo 'unknown'
+")
+log "Previous tag was: ${PREV_TAG}"
+
+log "Deploying ${BUILD_TAG} to ${DEPLOY_HOST}..."
+ssh_run "
+    cd ${DEPLOY_DIR} &&
+    IMAGE_TAG=${BUILD_TAG} docker compose pull &&
+    IMAGE_TAG=${BUILD_TAG} docker compose up -d --remove-orphans
+"
+
+# ── 5. Health check ──────────────────────────────────────────────────────────
+log "Waiting for service health..."
+RETRIES=12; INTERVAL=5
+for i in $(seq 1 $RETRIES); do
+    STATUS=$(ssh_run "
+        cd ${DEPLOY_DIR} &&
+        docker compose ps --format json 2>/dev/null | python3 -c \"
+import sys, json
+lines = [l for l in sys.stdin.read().splitlines() if l.strip()]
+services = [json.loads(l) for l in lines]
+bad = [s['Name'] for s in services if s.get('Health','healthy') not in ('healthy','')]
+print('unhealthy:' + ','.join(bad) if bad else 'ok')
+\" 2>/dev/null || echo 'ok'
+    ")
+    [[ "$STATUS" == "ok" ]] && { log "Health check passed"; break; }
+    [[ $i -eq $RETRIES ]] && die "Health check failed. Rollback: ./deploy.sh --rollback ${PREV_TAG}"
+    log "  (${i}/${RETRIES}) ${STATUS} — retrying in ${INTERVAL}s..."; sleep $INTERVAL
+done
+
+log ""
+log "Deployment complete"
+log "  Image  : ${FULL_IMAGE}:${BUILD_TAG}"
+log "  Git tag: ${GIT_TAG}"
+log "  Env    : ${ENV}"
+log "  Rollback: ./deploy.sh --rollback ${PREV_TAG}"
+```
+
+---
+
+**Usage:**
+
+```bash
+chmod +x deploy.sh
+
+# Deploy (reads version from pyproject.toml → 0.6.0)
+REGISTRY=ghcr.io/zenprocess \
+DEPLOY_HOST=user@prod.example.com \
+DEPLOY_DIR=/opt/axiom \
+./deploy.sh
+
+# Override tag
+./deploy.sh --tag 0.7.0
+
+# Rollback
+./deploy.sh --rollback 0.5.2-abc1234
+```
+
+**What each step does:**
+
+| Step | Details |
+|------|---------|
+| **Build** | Multi-stage Docker build; tags as `version-sha`, `version`, and `latest` with OCI labels |
+| **Push** | Pushes all three tags to your registry |
+| **Git tag** | Creates an annotated `vX.Y.Z` tag and pushes it; skips if already exists |
+| **Deploy** | SSH into host, `docker compose pull` + `up -d` using the `IMAGE_TAG` env var |
+| **Health check** | Polls `docker compose ps` for unhealthy containers (12 × 5s = 60s window) |
+| **Rollback** | `--rollback <tag>` re-pulls and restarts the old tag immediately |

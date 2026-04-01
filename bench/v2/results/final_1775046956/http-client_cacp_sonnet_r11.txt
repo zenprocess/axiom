@@ -1,0 +1,110 @@
+It seems write permission wasn't granted. Here's the complete module — you can save it as `user_client.py`:
+
+```python
+"""Module for fetching user data from a REST API."""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel, Field
+
+log = structlog.get_logger(__name__)
+
+API_BASE_URL = "https://api.example.com"
+
+
+class Address(BaseModel):
+    """User address data."""
+
+    street: str
+    city: str
+    zip_code: str = Field(alias="zipCode")
+
+    model_config = {"populate_by_name": True}
+
+
+class UserResponse(BaseModel):
+    """Response model for a single user from the API."""
+
+    id: int
+    name: str
+    email: str
+    address: Optional[Address] = None
+
+
+class UserFetchError(Exception):
+    """Raised when a user cannot be fetched from the API."""
+
+
+class UserClient:
+    """Client for the user REST API."""
+
+    def __init__(self, base_url: str = API_BASE_URL, timeout: float = 10.0) -> None:
+        """Initialize the client with a base URL and request timeout."""
+        self._base_url = base_url
+        self._timeout = timeout
+
+    async def get_user(self, user_id: int) -> UserResponse:
+        """Fetch a single user by ID.
+
+        Args:
+            user_id: The integer ID of the user to fetch.
+
+        Returns:
+            A UserResponse containing the user's data.
+
+        Raises:
+            UserFetchError: If the request fails or returns a non-200 status.
+        """
+        url = f"{self._base_url}/users/{user_id}"
+        log.info("fetching_user", user_id=user_id, url=url)
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            log.error(
+                "user_fetch_http_error",
+                user_id=user_id,
+                status_code=exc.response.status_code,
+            )
+            raise UserFetchError(
+                f"HTTP {exc.response.status_code} fetching user {user_id}"
+            ) from exc
+        except httpx.RequestError as exc:
+            log.error("user_fetch_request_error", user_id=user_id, error=str(exc))
+            raise UserFetchError(
+                f"Request error fetching user {user_id}: {exc}"
+            ) from exc
+
+        user = UserResponse.model_validate(response.json())
+        log.info("user_fetched", user_id=user_id, email=user.email)
+        return user
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    try:
+        user = await client.get_user(42)
+        log.info("result", id=user.id, name=user.name, email=user.email)
+    except UserFetchError as exc:
+        log.error("failed_to_fetch_user", error=str(exc))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design decisions per your coding standards:
+
+- **`structlog`** for all logging — no `print()` or `logging` module
+- **`async def get_user`** — all I/O is async via `httpx.AsyncClient`
+- **`UserResponse` / `Address`** — Pydantic `BaseModel` instead of raw dicts; `Address` handles the `zipCode` → `zip_code` alias
+- **Two `except` branches** — separates HTTP errors (4xx/5xx) from network/transport errors
+- **`UserFetchError`** — typed exception so callers can catch specifically without swallowing everything
+- **No hardcoded secrets** — `API_BASE_URL` is a non-secret base URL constant; auth headers would be injected via constructor params
+- **Full type hints** on every signature

@@ -1,0 +1,119 @@
+```python
+"""
+User data fetching module.
+
+This module provides functionality to fetch user data from a REST API.
+"""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+# Initialize structlog for logging
+logger = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data model representing a user from the API."""
+
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    address: Optional[dict] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+    company: Optional[dict] = None
+
+
+class UserFetcherError(Exception):
+    """Custom exception for user fetching errors."""
+
+    pass
+
+
+class UserFetcher:
+    """Fetcher class for retrieving user data from the REST API."""
+
+    BASE_URL = "https://api.example.com/users"
+
+    def __init__(self, client: Optional[httpx.AsyncClient] = None) -> None:
+        """
+        Initialize the UserFetcher.
+
+        Args:
+            client: Optional httpx.AsyncClient instance. If None, one will be created.
+        """
+        self._client = client
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """
+        Get or create an httpx.AsyncClient instance.
+
+        Returns:
+            An httpx.AsyncClient instance.
+        """
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def fetch_user(self, user_id: int) -> User:
+        """
+        Fetch user data from the API.
+
+        Args:
+            user_id: The ID of the user to fetch.
+
+        Returns:
+            A User object containing the user's data.
+
+        Raises:
+            UserFetcherError: If the API request fails or returns invalid data.
+        """
+        try:
+            client = await self._get_client()
+            response = await client.get(f"{self.BASE_URL}/{user_id}")
+
+            # Raise an exception for 4xx and 5xx responses
+            response.raise_for_status()
+
+            # Parse and validate response data
+            user_data = response.json()
+            return User(**user_data)
+
+        except httpx.HTTPStatusError as exc:
+            logger.error("HTTP error occurred", status_code=exc.response.status_code, error=str(exc))
+            raise UserFetcherError(f"HTTP error occurred: {exc}") from exc
+        except httpx.RequestError as exc:
+            logger.error("Request error occurred", error=str(exc))
+            raise UserFetcherError(f"Request error occurred: {exc}") from exc
+        except Exception as exc:
+            logger.error("Unexpected error occurred", error=str(exc))
+            raise UserFetcherError(f"Unexpected error occurred: {exc}") from exc
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client."""
+        if self._client is not None:
+            await self._client.aclose()
+
+
+async def main() -> None:
+    """Main function to fetch user #42 from the API."""
+    fetcher = UserFetcher()
+    try:
+        user = await fetcher.fetch_user(42)
+        logger.info("User fetched successfully", user_id=user.id, name=user.name)
+        # In production, you might return or process the user data here
+    except UserFetcherError as exc:
+        logger.error("Failed to fetch user", user_id=42, error=str(exc))
+        raise
+    finally:
+        await fetcher.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```

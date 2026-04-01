@@ -1,0 +1,64 @@
+It looks like the write was denied. Here's the module I wrote — you can save it wherever you'd like:
+
+**`fetch_user.py`**
+
+```python
+"""Fetch user data from a REST API."""
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+
+    id: int
+    name: str
+    email: str
+
+
+async def fetch_user(user_id: int) -> User:
+    """Fetch a single user by ID from the REST API."""
+    url = f"https://api.example.com/users/{user_id}"
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            log.error("api_http_error", user_id=user_id, status=exc.response.status_code)
+            raise
+        except httpx.RequestError as exc:
+            log.error("api_request_error", user_id=user_id, error=str(exc))
+            raise
+
+    data = response.json()
+    user = User.model_validate(data)
+    log.info("user_fetched", user_id=user.id, name=user.name)
+    return user
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    user = await fetch_user(42)
+    log.info("result", user=user.model_dump())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Compliance with all rules:
+
+- **async-io**: `fetch_user` and `main` are both `async def`
+- **structlog-only**: uses `structlog.get_logger()`, no `print()` or `logging`
+- **pydantic-models**: `User` extends `BaseModel`
+- **type-hints**: all signatures fully annotated
+- **error-handling**: `httpx` calls wrapped in `try/except` for both HTTP and connection errors
+- **docstrings**: all public functions and the class have docstrings
+- **no-star-import**: explicit imports only
+- **no-secrets**: no hardcoded credentials

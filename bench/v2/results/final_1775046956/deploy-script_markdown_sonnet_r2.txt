@@ -1,0 +1,140 @@
+The write was blocked. Here's the script — you can save it yourself as `deploy.sh`:
+
+```bash
+#!/usr/bin/env bash
+# deploy.sh — Build, tag, push, and deploy axiom-rdl
+# Usage:
+#   ./deploy.sh [VERSION]          # deploy (default: version from pyproject.toml)
+#   ./deploy.sh rollback [VERSION] # roll back to a previous image tag
+#
+# Required env vars:
+#   REGISTRY      — e.g. ghcr.io/zenprocess
+#   DEPLOY_HOST   — e.g. user@prod.example.com
+#   DEPLOY_DIR    — e.g. /opt/axiom
+# Optional:
+#   IMAGE_NAME    — defaults to "axiom-rdl"
+#   COMPOSE_FILE  — defaults to "docker-compose.yml"
+
+set -euo pipefail
+
+REGISTRY="${REGISTRY:?REGISTRY env var is required}"
+DEPLOY_HOST="${DEPLOY_HOST:?DEPLOY_HOST env var is required}"
+DEPLOY_DIR="${DEPLOY_DIR:?DEPLOY_DIR env var is required}"
+IMAGE_NAME="${IMAGE_NAME:-axiom-rdl}"
+COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYPROJECT="$SCRIPT_DIR/pyproject.toml"
+
+log() { echo "[$(date -u +%H:%M:%S)] $*"; }
+die() { echo "[$(date -u +%H:%M:%S)] ERROR: $*" >&2; exit 1; }
+
+require() { for cmd in "$@"; do command -v "$cmd" &>/dev/null || die "Required: $cmd"; done; }
+
+get_version() { grep -E '^version\s*=' "$PYPROJECT" | head -1 | sed 's/.*=\s*"\(.*\)"/\1/'; }
+full_image()  { echo "${REGISTRY}/${IMAGE_NAME}:${1}"; }
+
+rollback() {
+  local version="${1:-}"
+  if [[ -z "$version" ]]; then
+    version=$(docker image ls --format "{{.Tag}}" "${REGISTRY}/${IMAGE_NAME}" \
+      | grep -v latest | sort -V | tail -2 | head -1) \
+      || die "Could not determine previous version — pass one explicitly."
+    [[ -n "$version" ]] || die "No previous version found locally."
+  fi
+
+  local image; image="$(full_image "$version")"
+  log "Rolling back to $image"
+  ssh "$DEPLOY_HOST" bash -s -- "$DEPLOY_DIR" "$image" "$COMPOSE_FILE" <<'REMOTE'
+    set -euo pipefail
+    cd "$1"; export AXIOM_IMAGE="$2"
+    docker compose -f "$3" pull
+    docker compose -f "$3" up -d --no-build
+    docker compose -f "$3" ps
+REMOTE
+  log "Rollback complete."
+}
+
+deploy() {
+  local version="${1:-$(get_version)}"
+  [[ -n "$version" ]] || die "Could not read version from $PYPROJECT"
+
+  local image; image="$(full_image "$version")"
+  local image_latest; image_latest="$(full_image latest)"
+
+  log "Deploying axiom-rdl $version → $image"
+
+  # 1. require clean tree
+  [[ -z "$(git -C "$SCRIPT_DIR" status --porcelain)" ]] \
+    || die "Dirty working tree — commit or stash before deploying."
+
+  # 2. build
+  log "Building…"
+  docker build \
+    --label "git.commit=$(git -C "$SCRIPT_DIR" rev-parse HEAD)" \
+    --label "git.branch=$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD)" \
+    --label "build.version=$version" \
+    -t "$image" -t "$image_latest" \
+    "$SCRIPT_DIR"
+
+  # 3. push
+  log "Pushing to registry…"
+  docker push "$image"
+  docker push "$image_latest"
+
+  # 4. git tag
+  local tag="v${version}"
+  if git -C "$SCRIPT_DIR" rev-parse "$tag" &>/dev/null; then
+    log "Tag $tag already exists — skipping."
+  else
+    git -C "$SCRIPT_DIR" tag -a "$tag" -m "Release $tag"
+    git -C "$SCRIPT_DIR" push origin "$tag"
+    log "Tagged $tag"
+  fi
+
+  # 5. remote deploy + health check
+  log "Deploying to $DEPLOY_HOST…"
+  ssh "$DEPLOY_HOST" bash -s -- "$DEPLOY_DIR" "$image" "$COMPOSE_FILE" <<'REMOTE'
+    set -euo pipefail
+    cd "$1"; export AXIOM_IMAGE="$2"
+    docker compose -f "$3" pull
+    docker compose -f "$3" up -d --no-build --remove-orphans
+
+    for i in $(seq 1 6); do
+      sleep 5
+      status=$(docker compose -f "$3" ps --format json 2>/dev/null \
+        | python3 -c "
+import sys, json
+rows = [json.loads(l) for l in sys.stdin.read().strip().splitlines() if l]
+bad = [r.get('Name','?') for r in rows if r.get('Health','') not in ('healthy','')]
+print('UNHEALTHY:' + ','.join(bad) if bad else 'OK')
+" 2>/dev/null || echo "OK")
+      echo "Health $i/6: $status"
+      [[ "$status" == "OK" ]] && break
+      [[ $i -eq 6 ]] && { echo "Health check failed — run: $0 rollback"; exit 1; }
+    done
+    docker compose -f "$3" ps
+REMOTE
+
+  log "Done. To roll back: $0 rollback $version"
+}
+
+require docker git ssh
+
+case "${1:-deploy}" in
+  rollback) rollback "${2:-}" ;;
+  deploy|"") deploy "${2:-}" ;;
+  *) die "Unknown command '$1'. Use: deploy [VERSION] | rollback [VERSION]" ;;
+esac
+```
+
+**Key design decisions:**
+
+- **Version source**: reads from `pyproject.toml` automatically, no manual arg needed
+- **Dirty tree guard**: refuses to deploy uncommitted changes (step 1)
+- **Git tag**: idempotent — skips if the tag already exists
+- **Rollback**: either pass a version explicitly, or it picks the second-most-recent local tag
+- **Health check**: polls `docker compose ps` for up to 30s before declaring success; exits non-zero on failure so CI catches it
+- **No secrets in script**: all credentials via env vars (`REGISTRY`, `DEPLOY_HOST`, etc.)
+
+You'll also need a `Dockerfile` in the project root — this project doesn't have one yet. Want me to write one for the `axiom-rdl` Python package?

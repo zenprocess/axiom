@@ -1,0 +1,105 @@
+```python
+"""Module for fetching user data from a REST API."""
+
+import os
+from typing import Optional
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data model representing a user from the API."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    address: Optional[dict] = None
+
+
+class UserNotFoundError(Exception):
+    """Exception raised when a user is not found."""
+    pass
+
+
+class APIError(Exception):
+    """Exception raised for API-related errors."""
+    pass
+
+
+async def fetch_user(user_id: int) -> User:
+    """
+    Fetch a user by ID from the REST API.
+    
+    Args:
+        user_id: The ID of the user to fetch.
+        
+    Returns:
+        User: The fetched user data.
+        
+    Raises:
+        UserNotFoundError: If the user does not exist (404 status).
+        APIError: For other API errors (non-200 status codes or network issues).
+    """
+    api_url = os.environ.get("API_BASE_URL", "https://api.example.com")
+    url = f"{api_url}/users/{user_id}"
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=30.0)
+            
+            if response.status_code == 404:
+                raise UserNotFoundError(f"User with ID {user_id} not found")
+            elif not response.is_success:
+                raise APIError(
+                    f"API returned status {response.status_code} for user {user_id}"
+                )
+                
+            user_data = response.json()
+            return User(**user_data)
+            
+    except httpx.TimeoutException as e:
+        log.error("api_timeout", url=url, error=str(e))
+        raise APIError(f"Request timed out for user {user_id}") from e
+    except httpx.RequestError as e:
+        log.error("api_request_error", url=url, error=str(e))
+        raise APIError(f"Request failed for user {user_id}") from e
+
+
+async def main() -> User:
+    """
+    Main function to fetch user #42.
+    
+    Returns:
+        User: The fetched user data for user #42.
+        
+    Raises:
+        UserNotFoundError: If user #42 does not exist.
+        APIError: For other API errors.
+    """
+    user_id = 42
+    log.info("fetching_user", user_id=user_id)
+    
+    try:
+        user = await fetch_user(user_id)
+        log.info("user_fetched_successfully", user_id=user.id, name=user.name)
+        return user
+    except UserNotFoundError as e:
+        log.error("user_not_found", user_id=user_id, error=str(e))
+        raise
+    except APIError as e:
+        log.error("api_error", user_id=user_id, error=str(e))
+        raise
+
+
+if __name__ == "__main__":
+    import asyncio
+    try:
+        user = asyncio.run(main())
+        print(f"User #42: {user.name} ({user.email})")
+    except (UserNotFoundError, APIError) as e:
+        print(f"Error: {e}")
+        exit(1)
+```

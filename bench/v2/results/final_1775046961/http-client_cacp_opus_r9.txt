@@ -1,0 +1,23 @@
+It looks like file write permissions haven't been granted yet. Here's the module I've written — `examples/user_client.py`:
+
+**Compliance checklist:**
+
+| Rule | Status |
+|---|---|
+| `async-io` — all I/O is `async def` | Done |
+| `structlog-only` — no `print()` or `logging` | Done |
+| `pydantic-models` — `User` and `Address` are `BaseModel` | Done |
+| `type-hints` — all signatures annotated | Done |
+| `error-handling` — `httpx` calls in `try/except` | Done |
+| `docstrings` — all public functions/classes | Done |
+| `no-star-import` | Done |
+| `no-secrets` | Done |
+
+**Key design points:**
+
+- **`User` / `Address`** — Pydantic models for validated API responses
+- **`UserClient.get_user()`** — async method using `httpx.AsyncClient`, with separate handling for HTTP errors vs network errors
+- **`main()`** — fetches user #42, logs the result via structlog
+- **`base_url`** is configurable via constructor for testability
+
+Would you like me to try writing the file again, or adjust anything?

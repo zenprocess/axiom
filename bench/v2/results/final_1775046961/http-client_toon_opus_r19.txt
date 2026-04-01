@@ -1,0 +1,80 @@
+It looks like write permission was denied. Here's the module I'd create at `examples/user_client.py`:
+
+```python
+"""Client for fetching user data from the example REST API."""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+BASE_URL = "https://api.example.com"
+
+
+class Address(BaseModel):
+    """User's address."""
+    street: str
+    city: str
+    state: str
+    zipcode: str
+
+
+class User(BaseModel):
+    """User returned by the API."""
+    id: int
+    name: str
+    email: str
+    address: Optional[Address] = None
+
+
+class UserClient:
+    """Async client for the /users endpoint."""
+
+    def __init__(self, base_url: str = BASE_URL) -> None:
+        self._base_url = base_url
+
+    async def fetch_user(self, user_id: int) -> User:
+        """Fetch a single user by ID."""
+        url = f"{self._base_url}/users/{user_id}"
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(url, timeout=10.0)
+                resp.raise_for_status()
+            except httpx.TimeoutException:
+                log.error("request_timeout", url=url)
+                raise
+            except httpx.HTTPStatusError as exc:
+                log.error("http_error", url=url, status=exc.response.status_code)
+                raise
+            except httpx.RequestError as exc:
+                log.error("request_failed", url=url, detail=str(exc))
+                raise
+
+        return User.model_validate(resp.json())
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    client = UserClient()
+    user = await client.fetch_user(42)
+    log.info("user_fetched", user_id=user.id, name=user.name, email=user.email)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design choices per your project rules:
+
+- **`async def fetch_user`** — async I/O as required
+- **`structlog`** — no `logging` or `print()`
+- **Pydantic `BaseModel`** — `User` and `Address` models instead of raw dicts
+- **Full type hints** on all signatures
+- **`try/except` around `httpx` calls** — covers timeout, HTTP status errors, and connection failures
+- **`model_validate(resp.json())`** — validates the API response against the schema
+
+Would you like me to try writing the file again, or place it somewhere else?

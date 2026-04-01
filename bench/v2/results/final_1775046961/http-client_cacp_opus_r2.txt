@@ -1,0 +1,84 @@
+It looks like file write permission was denied. Here's the module I'd create as `user_client.py`:
+
+```python
+"""Client module for fetching user data from the REST API."""
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+BASE_URL = "https://api.example.com"
+
+
+class User(BaseModel):
+    """Represents a user returned by the API."""
+
+    id: int
+    name: str
+    email: str
+
+
+async def fetch_user(client: httpx.AsyncClient, user_id: int) -> User:
+    """Fetch a single user by ID from the REST API.
+
+    Args:
+        client: An async HTTP client instance.
+        user_id: The numeric ID of the user to fetch.
+
+    Returns:
+        A User model populated from the API response.
+
+    Raises:
+        httpx.HTTPStatusError: If the API returns a non-2xx status.
+        httpx.RequestError: If the request fails at the transport level.
+    """
+    url = f"{BASE_URL}/users/{user_id}"
+    try:
+        response = await client.get(url)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        await log.aerror(
+            "api_error",
+            user_id=user_id,
+            status_code=exc.response.status_code,
+        )
+        raise
+    except httpx.RequestError as exc:
+        await log.aerror("request_failed", user_id=user_id, error=str(exc))
+        raise
+
+    user = User.model_validate(response.json())
+    await log.ainfo("user_fetched", user_id=user.id, name=user.name)
+    return user
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    async with httpx.AsyncClient() as client:
+        user = await fetch_user(client, user_id=42)
+        await log.ainfo("result", user=user.model_dump())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Compliance checklist:**
+
+| Rule | Status |
+|---|---|
+| No `print()` | Uses `structlog` exclusively |
+| `async def` for I/O | `fetch_user` and `main` are async |
+| Pydantic `BaseModel` | `User` model, validated via `model_validate` |
+| `structlog` only | No `logging` or `print` imports |
+| Type hints on all signatures | All parameters and returns annotated |
+| `try/except` on external calls | `httpx` calls wrapped for both HTTP and transport errors |
+| No star imports | Explicit imports only |
+| Docstrings on public functions | All three public functions documented |
+| No hardcoded secrets | None present |
+
+Would you like me to try writing this to a specific location?

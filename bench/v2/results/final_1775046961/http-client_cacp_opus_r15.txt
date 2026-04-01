@@ -1,0 +1,15 @@
+Here's the module I'd like to write to `user_fetcher.py`. Could you approve the write? Here's what it includes:
+
+- **`User` (Pydantic BaseModel)** — data model with `id`, `name`, `email`, `username`
+- **`UserFetchError`** — custom exception for API failures
+- **`fetch_user`** — async function using `httpx.AsyncClient`, with `try/except` around the HTTP call catching both `HTTPStatusError` and `RequestError`
+- **`main`** — async entrypoint that fetches user #42 and logs the result
+
+Compliance with all coding standards:
+- `async def` for all I/O functions
+- `structlog` for logging (no `print()`, no `logging`)
+- Pydantic `BaseModel` for the response model
+- Full type hints on all signatures
+- `try/except` wrapping the external API call
+- Docstrings on all public functions/classes
+- No star imports, no hardcoded secrets

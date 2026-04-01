@@ -1,0 +1,88 @@
+Here's the module — you'll need to approve the file write. In the meantime, here's the full code:
+
+```python
+"""Module for fetching user data from the REST API."""
+
+import asyncio
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger(__name__)
+
+API_BASE_URL = "https://api.example.com"
+
+
+class Address(BaseModel):
+    """User address information."""
+    street: str
+    city: str
+    state: str
+    zip_code: str
+
+
+class User(BaseModel):
+    """User data returned by the API."""
+    id: int
+    name: str
+    email: str
+    address: Address | None = None
+
+
+async def fetch_user(user_id: int, client: httpx.AsyncClient) -> User:
+    """Fetch a single user by ID from the REST API.
+
+    Args:
+        user_id: The numeric ID of the user to fetch.
+        client: An active httpx.AsyncClient instance.
+
+    Returns:
+        A User instance populated with the API response data.
+
+    Raises:
+        httpx.HTTPStatusError: If the API returns a 4xx or 5xx status.
+        httpx.RequestError: If the request fails due to network issues.
+    """
+    url = f"{API_BASE_URL}/users/{user_id}"
+    log.info("fetching_user", user_id=user_id, url=url)
+
+    try:
+        response = await client.get(url)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        log.error(
+            "api_http_error",
+            user_id=user_id,
+            status_code=exc.response.status_code,
+            detail=exc.response.text,
+        )
+        raise
+    except httpx.RequestError as exc:
+        log.error("api_request_error", user_id=user_id, error=str(exc))
+        raise
+
+    user = User.model_validate(response.json())
+    log.info("user_fetched", user_id=user.id, name=user.name)
+    return user
+
+
+async def main() -> None:
+    """Fetch user #42 and log the result."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        user = await fetch_user(42, client)
+        log.info("result", user=user.model_dump())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key design decisions per your rules:
+
+- **`async def`** for all I/O (`fetch_user`, `main`) — `httpx.AsyncClient` for non-blocking HTTP
+- **Pydantic `BaseModel`** for `User` and `Address` — validated via `model_validate()`
+- **`structlog`** exclusively — no `print()` or `logging`
+- **`try/except`** splits `HTTPStatusError` (bad status codes) from `RequestError` (network failures), both logged with structured context before re-raising
+- **Full type hints** on all signatures
+- `client` is injected into `fetch_user` rather than created inside it, making the function easily testable

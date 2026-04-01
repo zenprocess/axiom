@@ -1,0 +1,98 @@
+```python
+"""User management data models and database utilities."""
+
+from __future__ import annotations
+
+from typing import List, Optional
+from pydantic import BaseModel, EmailStr, validator, root_validator
+import httpx
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+class Permission(BaseModel):
+    """Represents a permission in the system."""
+    id: int
+    name: str
+    description: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class Role(BaseModel):
+    """Represents a role with associated permissions."""
+    id: int
+    name: str
+    description: Optional[str] = None
+    permissions: List[Permission] = []
+
+    class Config:
+        orm_mode = True
+
+
+class User(BaseModel):
+    """Represents a user in the system."""
+    id: int
+    username: str
+    email: EmailStr
+    full_name: Optional[str] = None
+    is_active: bool = True
+    is_admin: bool = False
+    role_id: Optional[int] = None
+    role: Optional[Role] = None
+
+    class Config:
+        orm_mode = True
+
+    @validator('username')
+    def username_must_be_valid(cls, v: str) -> str:
+        """Validate username is not empty and meets requirements."""
+        if not v or len(v) < 3:
+            raise ValueError('Username must be at least 3 characters')
+        if not v.replace('_', '').isalnum():
+            raise ValueError('Username can only contain alphanumeric characters and underscores')
+        return v.strip()
+
+    @root_validator
+    def admin_must_have_role(cls, values: dict) -> dict:
+        """Ensure admin users have a role assigned."""
+        if values.get('is_admin') and not values.get('role_id') and not values.get('role'):
+            raise ValueError('Admin users must have a role assigned')
+        return values
+
+
+async def fetch_users(database_url: str) -> List[User]:
+    """Fetch users from the database API endpoint.
+    
+    Args:
+        database_url: URL of the database API endpoint that returns users
+        
+    Returns:
+        List of User objects
+        
+    Raises:
+        RuntimeError: If the API call fails
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(database_url)
+            response.raise_for_status()
+            users_data = response.json()
+            
+            # Parse into Pydantic models
+            users = [User(**user_data) for user_data in users_data]
+            logger.info("fetched_users", count=len(users), url=database_url)
+            return users
+            
+    except httpx.HTTPStatusError as exc:
+        logger.error("http_error", status_code=exc.response.status_code, url=database_url)
+        raise RuntimeError(f"HTTP error fetching users: {exc}") from exc
+    except httpx.RequestError as exc:
+        logger.error("request_error", url=database_url)
+        raise RuntimeError(f"Request error fetching users: {exc}") from exc
+    except Exception as exc:
+        logger.error("unexpected_error", url=database_url, error=str(exc))
+        raise RuntimeError(f"Unexpected error fetching users: {exc}") from exc
+```

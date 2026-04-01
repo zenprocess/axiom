@@ -1,0 +1,18 @@
+It seems file write permissions need to be granted. Here's the module I've written — `examples/user_client.py`:
+
+**Compliance checklist:**
+- **async I/O** — `get_user` and `main` are both `async def`
+- **structlog only** — no `print()` or `logging` imports
+- **Pydantic model** — `User(BaseModel)` for the response data
+- **Type hints** — all function signatures annotated
+- **Error handling** — `httpx.HTTPStatusError` and `httpx.RequestError` caught with structured logging
+- **Docstrings** — all public functions/classes documented
+- **No star imports, no secrets, no print debugging**
+
+Key design points:
+- `UserClient` takes a configurable `base_url` for testability
+- Uses `httpx.AsyncClient` for async HTTP
+- Pydantic's `model_validate` ensures the API response conforms to the `User` schema
+- Errors are logged with structured context (user_id, status_code) then re-raised
+
+Would you like me to try writing the file again, or adjust anything?

@@ -1,0 +1,296 @@
+It seems the write permission hasn't been granted. Could you approve the file write? Alternatively, I can paste the full code here for you to save manually.
+
+Here's the complete `minitest.py`:
+
+```python
+"""
+minitest — a minimal Python test framework.
+
+Features: assertions, fixtures, test discovery, and a runner with output.
+
+Usage:
+    import minitest as t
+
+    @t.fixture
+    def db():
+        conn = {"connected": True}
+        yield conn
+        conn["connected"] = False  # teardown
+
+    def test_addition(db):
+        t.assert_equal(1 + 1, 2)
+        t.assert_true(db["connected"])
+
+    if __name__ == "__main__":
+        t.run()
+"""
+
+from __future__ import annotations
+
+import inspect
+import sys
+import time
+import traceback
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from typing import Any
+
+
+# --- Exceptions ---
+
+class TestFailure(AssertionError):
+    """Raised when an assertion fails."""
+
+class TestError(RuntimeError):
+    """Raised when a test raises an unexpected exception."""
+
+
+# --- Assertions ---
+
+def assert_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert actual == expected."""
+    if actual != expected:
+        detail = f"{actual!r} != {expected!r}"
+        raise TestFailure(f"{msg}: {detail}" if msg else detail)
+
+def assert_not_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    if actual == expected:
+        raise TestFailure(f"expected values to differ, both are {actual!r}")
+
+def assert_true(value: Any, msg: str = "") -> None:
+    if not value:
+        raise TestFailure(msg or f"expected truthy, got {value!r}")
+
+def assert_false(value: Any, msg: str = "") -> None:
+    if value:
+        raise TestFailure(msg or f"expected falsy, got {value!r}")
+
+def assert_is(actual: Any, expected: Any, msg: str = "") -> None:
+    if actual is not expected:
+        raise TestFailure(msg or f"{actual!r} is not {expected!r}")
+
+def assert_is_none(value: Any, msg: str = "") -> None:
+    assert_is(value, None, msg or f"expected None, got {value!r}")
+
+def assert_in(item: Any, container: Any, msg: str = "") -> None:
+    if item not in container:
+        raise TestFailure(msg or f"{item!r} not in {container!r}")
+
+def assert_not_in(item: Any, container: Any, msg: str = "") -> None:
+    if item in container:
+        raise TestFailure(msg or f"{item!r} unexpectedly in {container!r}")
+
+@contextmanager
+def assert_raises(exc_type: type[BaseException], msg: str = "") -> Generator[None, None, None]:
+    """Assert the body raises exc_type.
+
+        with assert_raises(ValueError):
+            int("oops")
+    """
+    try:
+        yield
+    except exc_type:
+        return
+    except Exception as exc:
+        detail = f"expected {exc_type.__name__}, got {type(exc).__name__}: {exc}"
+        raise TestFailure(f"{msg}: {detail}" if msg else detail) from exc
+    else:
+        raise TestFailure(msg or f"expected {exc_type.__name__} to be raised")
+
+
+# --- Fixtures ---
+
+_FIXTURES: dict[str, Callable[[], Any]] = {}
+
+def fixture(fn: Callable[[], Any]) -> Callable[[], Any]:
+    """Register a fixture. Generator fixtures support setup/teardown via yield."""
+    _FIXTURES[fn.__name__] = fn
+    return fn
+
+def _resolve_fixture(name: str) -> tuple[Any, Callable[[], None] | None]:
+    if name not in _FIXTURES:
+        raise LookupError(f"Unknown fixture: {name!r}")
+    result = _FIXTURES[name]()
+    if inspect.isgenerator(result):
+        value = next(result)
+        def teardown() -> None:
+            try:
+                next(result)
+            except StopIteration:
+                pass
+        return value, teardown
+    return result, None
+
+
+# --- Result ---
+
+class TestResult:
+    __slots__ = ("name", "status", "duration", "message", "tb")
+
+    def __init__(self, name: str, status: str, duration: float,
+                 message: str = "", tb: str = "") -> None:
+        self.name = name
+        self.status = status  # "pass" | "fail" | "error"
+        self.duration = duration
+        self.message = message
+        self.tb = tb
+
+
+# --- Collection & execution ---
+
+def _collect(module: Any) -> list[Callable[..., Any]]:
+    return [obj for name, obj in inspect.getmembers(module, inspect.isfunction)
+            if name.startswith("test_")]
+
+def _run_one(fn: Callable[..., Any]) -> TestResult:
+    params = list(inspect.signature(fn).parameters.keys())
+    fixture_values: list[Any] = []
+    teardowns: list[Callable[[], None]] = []
+
+    try:
+        for param in params:
+            value, teardown = _resolve_fixture(param)
+            fixture_values.append(value)
+            if teardown:
+                teardowns.append(teardown)
+    except LookupError as exc:
+        return TestResult(fn.__name__, "error", 0.0, str(exc))
+
+    start = time.perf_counter()
+    try:
+        fn(*fixture_values)
+        status, message, tb = "pass", "", ""
+    except TestFailure as exc:
+        status, message, tb = "fail", str(exc), ""
+    except Exception as exc:
+        status = "error"
+        message = f"{type(exc).__name__}: {exc}"
+        tb = traceback.format_exc()
+    finally:
+        for teardown in reversed(teardowns):
+            try:
+                teardown()
+            except Exception:
+                pass
+    return TestResult(fn.__name__, status, time.perf_counter() - start, message, tb)
+
+
+# --- Colors ---
+
+_ICONS: dict[str, str] = {"pass": ".", "fail": "F", "error": "E"}
+_COLORS: dict[str, str] = {"pass": "\033[32m", "fail": "\033[31m",
+                            "error": "\033[33m", "reset": "\033[0m"}
+_USE_COLOR: bool = sys.stdout.isatty()
+
+def _color(status: str, text: str) -> str:
+    if not _USE_COLOR or status not in _COLORS:
+        return text
+    return f"{_COLORS[status]}{text}{_COLORS['reset']}"
+
+
+# --- Public runner ---
+
+def run(module: Any = None, *, verbose: bool = False, exit_on_fail: bool = False) -> bool:
+    """Discover and run all test_* functions in *module* (defaults to caller's module).
+
+    Args:
+        verbose: One line per test instead of a dot.
+        exit_on_fail: sys.exit(1) on failure.
+
+    Returns:
+        True if all tests passed.
+    """
+    if module is None:
+        frame = inspect.stack()[1]
+        module = inspect.getmodule(frame[0])
+
+    tests = _collect(module)
+    if not tests:
+        print("No tests found.")
+        return True
+
+    print(f"Collecting {len(tests)} test(s) from {getattr(module, '__name__', '?')}\n")
+
+    results: list[TestResult] = []
+    for fn in tests:
+        result = _run_one(fn)
+        results.append(result)
+        if verbose:
+            icon = _ICONS.get(result.status, "?")
+            print(f"  {_color(result.status, icon)} {result.name}  ({result.duration * 1000:.1f}ms)")
+            if result.message:
+                print(f"    {result.message}")
+            if result.tb:
+                for line in result.tb.splitlines():
+                    print(f"    {line}")
+        else:
+            print(_color(result.status, _ICONS.get(result.status, "?")), end="", flush=True)
+
+    if not verbose:
+        print()
+
+    passed  = sum(1 for r in results if r.status == "pass")
+    failed  = sum(1 for r in results if r.status == "fail")
+    errored = sum(1 for r in results if r.status == "error")
+    total_ms = sum(r.duration for r in results) * 1000
+
+    print(f"\n{'─' * 50}")
+    print(f"Results: {passed} passed, {failed} failed, {errored} error(s)  ({total_ms:.1f}ms)")
+
+    failures = [r for r in results if r.status in ("fail", "error")]
+    if failures:
+        print()
+        for r in failures:
+            label = "FAIL" if r.status == "fail" else "ERROR"
+            print(_color(r.status, f"[{label}] {r.name}"))
+            print(f"  {r.message}")
+            if r.tb:
+                for line in r.tb.splitlines():
+                    print(f"  {line}")
+
+    success = failed == 0 and errored == 0
+    if exit_on_fail and not success:
+        sys.exit(1)
+    return success
+```
+
+---
+
+**Key design decisions:**
+
+| Feature | How it works |
+|---|---|
+| **Assertions** | `assert_equal`, `assert_true`, `assert_in`, `assert_raises` (context manager), etc. — all raise `TestFailure` |
+| **Fixtures** | `@fixture` decorator; generator fixtures `yield` to separate setup from teardown; teardowns run in reverse order |
+| **Discovery** | `inspect.getmembers` collects any function named `test_*` from a module |
+| **Injection** | Fixture names are matched to test function parameter names automatically |
+| **Runner output** | Compact dot mode by default; `verbose=True` for one-line-per-test with timings; ANSI color when TTY |
+
+**Example usage:**
+
+```python
+import minitest as t
+
+@t.fixture
+def counter():
+    state = {"n": 0}
+    yield state
+    # teardown runs after test
+
+def test_math():
+    t.assert_equal(2 + 2, 4)
+
+def test_raises():
+    with t.assert_raises(ZeroDivisionError):
+        _ = 1 / 0
+
+def test_fixture_injected(counter):
+    counter["n"] += 1
+    t.assert_equal(counter["n"], 1)
+
+def test_intentional_fail():
+    t.assert_equal("a", "b")  # will fail
+
+if __name__ == "__main__":
+    t.run(verbose=True)
+```

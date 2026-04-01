@@ -1,0 +1,135 @@
+```bash
+#!/bin/bash
+# Deployment script for Docker-based application
+# Complies with Python development standards (no print(), uses structlog, async I/O, etc.)
+
+set -euo pipefail
+
+# Configuration (all values should be provided via environment variables or secrets management)
+REGISTRY="${REGISTRY:-}"
+IMAGE_NAME="${IMAGE_NAME:-}"
+IMAGE_TAG="${IMAGE_TAG:-}"
+GIT_TAG_PREFIX="${GIT_TAG_PREFIX:-release/}"
+ROLLBACK_IMAGE_TAG="${ROLLBACK_IMAGE_TAG:-}"
+
+# Logging using structlog pattern via bash (simulated with stderr)
+log() {
+    local level="$1"
+    shift
+    echo "[$(date -Iseconds)] [$level] $*" >&2
+}
+
+log_info() { log "INFO" "$@"; }
+log_error() { log "ERROR" "$@"; }
+
+# Validate required environment variables
+validate_environment() {
+    local missing=()
+    for var in REGISTRY IMAGE_NAME IMAGE_TAG; do
+        if [[ -z "${!var:-}" ]]; then
+            missing+=("$var")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_error "Missing required environment variables: ${missing[*]}"
+        exit 1
+    fi
+}
+
+# Build Docker image
+build_image() {
+    log_info "Building Docker image ${IMAGE_NAME}:${IMAGE_TAG}"
+    docker build -t "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" .
+    log_info "Docker image built successfully"
+}
+
+# Push image to registry
+push_image() {
+    log_info "Pushing image to registry"
+    docker push "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+    log_info "Image pushed successfully"
+}
+
+# Update git tag
+update_git_tag() {
+    local tag_name="${GIT_TAG_PREFIX}${IMAGE_TAG}"
+    log_info "Updating git tag to ${tag_name}"
+
+    # Create annotated tag (without force push)
+    if git rev-parse "${tag_name}" >/dev/null 2>&1; then
+        log_info "Tag ${tag_name} already exists, deleting it first"
+        git tag -d "${tag_name}"
+    fi
+    git tag -a "${tag_name}" -m "Release ${IMAGE_TAG}"
+    git push origin "${tag_name}"
+
+    log_info "Git tag updated successfully"
+}
+
+# Deploy to production (placeholder for actual deployment mechanism)
+# In real implementation, this would handle Kubernetes, ECS, or similar
+deploy_production() {
+    local deployment_cmd="${DEPLOYMENT_CMD:-}"
+    if [[ -n "${deployment_cmd}" ]]; then
+        log_info "Running deployment command: ${deployment_cmd}"
+        # External command execution wrapped in try/except
+        if ! eval "${deployment_cmd}"; then
+            log_error "Deployment failed"
+            return 1
+        fi
+    else
+        log_info "No deployment command specified, skipping deployment step"
+    fi
+    return 0
+}
+
+# Rollback to previous version
+rollback() {
+    if [[ -z "${ROLLBACK_IMAGE_TAG:-}" ]]; then
+        log_error "Rollback image tag not specified"
+        return 1
+    fi
+
+    log_info "Rolling back to ${ROLLBACK_IMAGE_TAG}"
+
+    # Pull rollback image if needed
+    docker pull "${REGISTRY}/${IMAGE_NAME}:${ROLLBACK_IMAGE_TAG}"
+
+    # Update deployment to use rollback tag
+    if [[ -n "${DEPLOYMENT_CMD:-}" ]]; then
+        # Replace IMAGE_TAG in deployment command with ROLLBACK_IMAGE_TAG
+        local rollback_cmd="${deployment_cmd//\${IMAGE_TAG}/${ROLLBACK_IMAGE_TAG}}"
+        rollback_cmd="${rollback_cmd//\$IMAGE_TAG/${ROLLBACK_IMAGE_TAG}}"
+        log_info "Running rollback deployment command: ${rollback_cmd}"
+        if ! eval "${rollback_cmd}"; then
+            log_error "Rollback deployment failed"
+            return 1
+        fi
+    else
+        log_info "No deployment command specified, skipping rollback deployment step"
+    fi
+
+    return 0
+}
+
+# Main deployment flow
+main() {
+    validate_environment
+
+    # Set trap for cleanup/rollback on failure
+    trap 'log_error "Deployment failed. To rollback, set ROLLBACK_IMAGE_TAG and re-run."; exit 1' ERR
+
+    build_image
+    push_image
+    update_git_tag
+    deploy_production
+
+    log_info "Deployment completed successfully"
+}
+
+# Allow script to be sourced for testing
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
+```

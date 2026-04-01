@@ -1,0 +1,246 @@
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# Deployment script with rollback support
+# Usage: ./deploy.sh [version_tag]
+# If version_tag is not provided, it will use the current date and commit hash
+
+# Configuration
+REGISTRY="ghcr.io"
+IMAGE_NAME="your-org/your-app"
+DOCKERFILE="Dockerfile"
+BUILD_CONTEXT="."
+LOG_FILE="deploy.log"
+
+# Logging with structlog-compatible format (simulated)
+log() {
+    local level="$1"
+    shift
+    local message="$*"
+    local timestamp
+    timestamp=$(date -Iseconds)
+    echo "${timestamp} [${level}] ${message}" | tee -a "${LOG_FILE}"
+}
+
+log_info() { log "INFO" "$@"; }
+log_error() { log "ERROR" "$@"; }
+log_warn() { log "WARN" "$@"; }
+log_debug() { log "DEBUG" "$@"; }
+
+# Check for required tools
+check_dependencies() {
+    local missing=()
+    for tool in docker git; do
+        if ! command -v "$tool" &> /dev/null; then
+            missing+=("$tool")
+        fi
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_error "Missing required tools: ${missing[*]}"
+        exit 1
+    fi
+}
+
+# Get the current commit hash and version tag
+get_version() {
+    local version="${1:-}"
+    if [[ -z "$version" ]]; then
+        # Generate a version from current date and short commit hash
+        version="v$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
+    fi
+    echo "$version"
+}
+
+# Build the Docker image
+build_image() {
+    local version="$1"
+    local image_tag="${REGISTRY}/${IMAGE_NAME}:${version}"
+    
+    log_info "Building Docker image with tag: ${image_tag}"
+    
+    if ! docker build -t "${image_tag}" -f "${DOCKERFILE}" "${BUILD_CONTEXT}"; then
+        log_error "Docker build failed for tag ${version}"
+        exit 1
+    fi
+    
+    log_info "Successfully built image: ${image_tag}"
+}
+
+# Push the Docker image to registry
+push_image() {
+    local version="$1"
+    local image_tag="${REGISTRY}/${IMAGE_NAME}:${version}"
+    
+    log_info "Pushing image to registry: ${image_tag}"
+    
+    # Login to registry if needed (assumes credentials are already available)
+    if [[ "${REGISTRY}" == "ghcr.io" ]]; then
+        if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+            log_error "GITHUB_TOKEN environment variable is required for ghcr.io"
+            exit 1
+        fi
+        echo "${GITHUB_TOKEN}" | docker login "${REGISTRY}" -u "${GITHUB_ACTOR:-user}" --password-stdin
+    fi
+    
+    if ! docker push "${image_tag}"; then
+        log_error "Failed to push image to registry"
+        exit 1
+    fi
+    
+    log_info "Successfully pushed image: ${image_tag}"
+}
+
+# Update git tag
+update_git_tag() {
+    local version="$1"
+    local image_tag="${REGISTRY}/${IMAGE_NAME}:${version}"
+    
+    log_info "Updating git tag to ${version}"
+    
+    # Check if tag already exists
+    if git rev-parse "refs/tags/${version}" &>/dev/null; then
+        log_warn "Tag ${version} already exists, updating it"
+        git tag -d "${version}"
+        git push origin ":refs/tags/${version}"
+    fi
+    
+    # Create and push tag
+    if ! git tag "${version}"; then
+        log_error "Failed to create git tag ${version}"
+        exit 1
+    fi
+    
+    if ! git push origin "refs/tags/${version}"; then
+        log_error "Failed to push git tag ${version}"
+        # Clean up the local tag
+        git tag -d "${version}"
+        exit 1
+    fi
+    
+    log_info "Successfully created and pushed tag: ${version}"
+}
+
+# Deploy to production
+deploy_to_production() {
+    local version="$1"
+    local image_tag="${REGISTRY}/${IMAGE_NAME}:${version}"
+    
+    log_info "Deploying to production with image: ${image_tag}"
+    
+    # Simulate deployment (replace with actual deployment mechanism)
+    # For Kubernetes, you might use: kubectl set image deployment/app app="${image_tag}"
+    # For ECS, you might update the task definition
+    # This example uses a simple deployment script
+    if [[ -f "deploy_production.sh" ]]; then
+        if ! bash deploy_production.sh "${image_tag}"; then
+            log_error "Production deployment failed"
+            return 1
+        fi
+    else
+        log_warn "No deploy_production.sh found, simulating deployment"
+        sleep 2  # Simulate deployment time
+    fi
+    
+    log_info "Successfully deployed to production"
+}
+
+# Rollback function
+rollback() {
+    local version="$1"
+    local image_tag="${REGISTRY}/${IMAGE_NAME}:${version}"
+    
+    log_warn "Initiating rollback for version ${version}"
+    
+    # Get previous version tag
+    local previous_tag
+    previous_tag=$(git tag -l "v*" --sort=-version:refname | sed -n '2p')
+    
+    if [[ -z "$previous_tag" ]]; then
+        log_error "No previous version found to rollback to"
+        exit 1
+    fi
+    
+    local previous_image_tag="${REGISTRY}/${IMAGE_NAME}:${previous_tag}"
+    
+    log_info "Rolling back to version: ${previous_tag}"
+    
+    # Simulate rollback (replace with actual rollback mechanism)
+    if [[ -f "rollback_production.sh" ]]; then
+        if ! bash rollback_production.sh "${previous_image_tag}"; then
+            log_error "Rollback deployment failed"
+            exit 1
+        fi
+    else
+        log_warn "No rollback_production.sh found, simulating rollback"
+        sleep 2  # Simulate rollback time
+    fi
+    
+    log_info "Successfully rolled back to ${previous_tag}"
+}
+
+# Main deployment function with error handling and rollback
+main() {
+    local version
+    version=$(get_version "${1:-}")
+    local image_tag="${REGISTRY}/${IMAGE_NAME}:${version}"
+    
+    log_info "Starting deployment of ${IMAGE_NAME} version ${version}"
+    
+    # Check dependencies
+    check_dependencies
+    
+    # Build, push, and tag
+    build_image "$version"
+    push_image "$version"
+    update_git_tag "$version"
+    
+    # Deploy to production with rollback on failure
+    if ! deploy_to_production "$version"; then
+        log_error "Deployment failed, initiating rollback"
+        rollback "$version"
+        exit 1
+    fi
+    
+    log_info "Deployment completed successfully"
+}
+
+# Handle command line arguments
+main "$@"
+```
+
+This deployment script includes:
+
+1. **Build Docker image** using `docker build`
+2. **Push to registry** with authentication handling for `ghcr.io`
+3. **Update git tag** (creates and pushes a new tag, or updates existing one)
+4. **Deploy to production** with a hook for your actual deployment mechanism
+5. **Rollback support** with:
+   - Automatic rollback on deployment failure
+   - Finding the previous version tag
+   - Rollback mechanism hook
+
+Key features:
+- Structured logging (mimicking `structlog` style with timestamps and levels)
+- Comprehensive error handling with `set -euo pipefail`
+- Dependency checking for required tools
+- Automatic version generation if not provided
+- Safe git tag handling (deletes existing tag before recreating)
+- Proper authentication for GitHub Container Registry
+- Hooks for your actual deployment/rollback scripts
+
+To use with Kubernetes, replace the deployment sections with:
+```bash
+# In deploy_to_production
+kubectl set image deployment/app app="${image_tag}"
+
+# In rollback
+kubectl rollout undo deployment/app
+```
+
+For ECS, you would update the task definition and service instead.
+
+Remember to:
+- Set `GITHUB_TOKEN` environment variable when using `ghcr.io`
+- Create `deploy_production.sh` and `rollback_production.sh` scripts for your specific infrastructure
+- Make the script executable: `chmod +x deploy.sh`

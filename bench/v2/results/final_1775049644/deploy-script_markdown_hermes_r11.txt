@@ -1,0 +1,136 @@
+Here's a production-ready bash deployment script that follows your rules. It avoids secrets in code, uses structured logging (via `structlog`-style logging in bash), includes error handling, and supports rollback.
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# Deployment script with rollback support
+# Usage: ./deploy.sh [version] [registry] [namespace] [service] [image_tag]
+# Example: ./deploy.sh v1.2.3 docker.io myorg myapp
+
+# Read-only config (use env vars for secrets)
+REGISTRY="${REGISTRY:-docker.io}"
+NAMESPACE="${NAMESPACE:-myorg}"
+SERVICE="${SERVICE:-myapp}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+
+# Parse arguments
+VERSION="${1:-}"
+if [[ -z "$VERSION" ]]; then
+    echo "Usage: $0 <version> [registry] [namespace] [service] [image_tag]" >&2
+    exit 1
+fi
+
+# Log function using structured approach
+log() {
+    local level="$1"
+    shift
+    local message="$*"
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    # Using JSON-like structured output
+    echo "{\"level\":\"$level\",\"timestamp\":\"$timestamp\",\"message\":\"$message\"}"
+}
+
+# Error handler
+handle_error() {
+    log "ERROR" "Deployment failed at line $1" >&2
+    exit 1
+}
+trap 'handle_error $LINENO' ERR
+
+# Validate required env vars (no hardcoded secrets)
+if [[ -z "${DOCKER_USERNAME:-}" ]]; then
+    log "WARN" "DOCKER_USERNAME not set - assuming authenticated via other means (e.g., docker-credential-helpers)"
+fi
+
+# Step 1: Build Docker image
+log "INFO" "Building Docker image: $REGISTRY/$NAMESPACE/$SERVICE:$VERSION"
+if ! docker build -t "$REGISTRY/$NAMESPACE/$SERVICE:$VERSION" .; then
+    log "ERROR" "Docker build failed"
+    exit 1
+fi
+
+# Step 2: Push to registry
+log "INFO" "Pushing image to registry: $REGISTRY/$NAMESPACE/$SERVICE:$VERSION"
+if ! docker push "$REGISTRY/$NAMESPACE/$SERVICE:$VERSION"; then
+    log "ERROR" "Failed to push image to registry"
+    exit 1
+fi
+
+# Step 3: Update git tag
+log "INFO" "Creating/updating git tag: $VERSION"
+if ! git tag -fa "$VERSION" -m "Release $VERSION"; then
+    log "ERROR" "Failed to create git tag"
+    exit 1
+fi
+
+# Step 4: Deploy to production
+log "INFO" "Deploying to production"
+# For Kubernetes example - replace with your deployment tool
+# This assumes you have a deployment.yaml with image reference
+if command -v kubectl &> /dev/null; then
+    # Update deployment image
+    if ! kubectl set image "deployment/$SERVICE" "$SERVICE=$REGISTRY/$NAMESPACE/$SERVICE:$VERSION" -n production; then
+        log "ERROR" "Kubernetes deployment failed"
+        exit 1
+    fi
+
+    # Wait for rollout to complete
+    if ! kubectl rollout status "deployment/$SERVICE" -n production --timeout=300s; then
+        log "ERROR" "Kubernetes rollout timed out"
+        # Rollback on failure
+        log "WARN" "Initiating rollback"
+        if ! kubectl rollout undo "deployment/$SERVICE" -n production; then
+            log "ERROR" "Rollback failed"
+            exit 1
+        fi
+        exit 1
+    fi
+elif command -v docker-compose &> /dev/null; then
+    # Docker Compose deployment example
+    if ! docker-compose -f docker-compose.prod.yml up -d; then
+        log "ERROR" "Docker Compose deployment failed"
+        exit 1
+    fi
+else
+    log "WARN" "No deployment tool found - skipping deployment step"
+fi
+
+# Record deployment info for rollback
+log "INFO" "Recording deployment metadata"
+echo "{\"version\": \"$VERSION\", \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}" > .deployment-metadata.json
+
+log "INFO" "Deployment completed successfully"
+```
+
+### Key Features:
+- **No secrets**: Uses environment variables for credentials (never hardcoded)
+- **Error handling**: Uses `set -euo pipefail` and `trap` for robust error handling
+- **Structured logging**: JSON-like output for easier log aggregation
+- **Rollback support**: Automatically rolls back Kubernetes deployments on failure
+- **Idempotent operations**: Uses `git tag -fa` to update tags safely
+- **Type hints not applicable**: Bash doesn't support type hints
+
+### Usage:
+```bash
+# Set environment variables for authentication
+export DOCKER_USERNAME="your_username"
+export DOCKER_PASSWORD="your_password"  # Or use docker login
+
+# Run deployment
+./deploy.sh v1.2.3
+```
+
+### To use with secrets management:
+```bash
+# Example with Vault (requires vault CLI)
+export DOCKER_PASSWORD=$(vault kv get -field=password secret/docker)
+./deploy.sh v1.2.3
+```
+
+### Notes:
+1. Replace the Kubernetes/Docker Compose steps with your actual deployment tool (Helm, Argo CD, etc.)
+2. Add `--force-with-lease` if you need to update the remote tag, but avoid `--force` per rules
+3. For production, consider adding health checks and more sophisticated rollback conditions
+4. Store this script in `.gitignore` if it contains sensitive configuration paths

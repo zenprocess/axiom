@@ -1,0 +1,194 @@
+Looks like write permission wasn't granted. Here's the complete script — you can create both files yourself:
+
+---
+
+**`Dockerfile`** (multi-stage, non-root):
+```dockerfile
+FROM python:3.12-slim AS builder
+WORKDIR /app
+RUN pip install --no-cache-dir hatchling
+COPY pyproject.toml README.md LICENSE ./
+COPY axiom/ ./axiom/
+RUN pip install --no-cache-dir --prefix=/install .
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /install /usr/local
+COPY axiom/ ./axiom/
+RUN useradd --no-create-home --shell /bin/false appuser
+USER appuser
+ENTRYPOINT ["python", "-m", "axiom"]
+```
+
+---
+
+**`deploy.sh`:**
+```bash
+#!/usr/bin/env bash
+# Usage:
+#   ./deploy.sh [VERSION]          # deploy (default: version from pyproject.toml)
+#   ./deploy.sh rollback [VERSION] # roll back (default: previous git tag)
+#
+# Required env vars:
+#   REGISTRY     — e.g. ghcr.io/zenprocess
+#   DEPLOY_HOST  — SSH target, e.g. user@prod.example.com
+#   DEPLOY_DIR   — Remote path containing docker-compose.yml
+#
+# Optional:
+#   IMAGE_NAME   — defaults to axiom-rdl
+#   SSH_KEY      — defaults to ~/.ssh/id_rsa
+#   COMPOSE_FILE — defaults to docker-compose.yml
+
+set -euo pipefail
+
+IMAGE_NAME="${IMAGE_NAME:-axiom-rdl}"
+REGISTRY="${REGISTRY:?REGISTRY must be set}"
+DEPLOY_HOST="${DEPLOY_HOST:?DEPLOY_HOST must be set}"
+DEPLOY_DIR="${DEPLOY_DIR:?DEPLOY_DIR must be set}"
+SSH_KEY="${SSH_KEY:-${HOME}/.ssh/id_rsa}"
+COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
+
+FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}"
+
+log()     { echo "[$(date '+%H:%M:%S')] $*"; }
+die()     { echo "[ERROR] $*" >&2; exit 1; }
+ssh_prod(){ ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${DEPLOY_HOST}" "$@"; }
+
+version_from_pyproject() {
+    grep -m1 '^version' pyproject.toml | sed 's/.*= *"\(.*\)"/\1/'
+}
+
+previous_git_tag() {
+    git tag --sort=-version:refname | grep -E '^v[0-9]' | sed -n '2p'
+}
+
+cmd_deploy() {
+    local version="${1:-$(version_from_pyproject)}"
+    [[ -n "${version}" ]] || die "Could not determine version"
+
+    local tag="v${version#v}"
+    local image_versioned="${FULL_IMAGE}:${tag}"
+    local image_latest="${FULL_IMAGE}:latest"
+
+    log "=== Deploying axiom-rdl ${tag} ==="
+
+    # 1. Guard — dirty tree means uncommitted code would be tagged
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        die "Working tree is dirty. Commit or stash changes first."
+    fi
+
+    # 2. Build
+    log "Building ${image_versioned} ..."
+    docker build \
+        --label "git.commit=$(git rev-parse HEAD)" \
+        --label "git.tag=${tag}" \
+        --label "build.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        -t "${image_versioned}" \
+        -t "${image_latest}" .
+
+    # 3. Push
+    log "Pushing to registry ..."
+    docker push "${image_versioned}"
+    docker push "${image_latest}"
+
+    # 4. Git tag
+    if git rev-parse "${tag}" >/dev/null 2>&1; then
+        log "Tag ${tag} already exists — skipping"
+    else
+        log "Creating and pushing git tag ${tag} ..."
+        git tag -a "${tag}" -m "Release ${tag}"
+        git push origin "${tag}"
+    fi
+
+    # 5. Remote deploy via SSH
+    log "Deploying on ${DEPLOY_HOST} ..."
+    ssh_prod bash -s -- "${FULL_IMAGE}" "${tag}" "${DEPLOY_DIR}" "${COMPOSE_FILE}" <<'REMOTE'
+        set -euo pipefail
+        FULL_IMAGE="$1" tag="$2" dir="$3" cf="$4"
+        cd "${dir}"
+
+        # Save current image for rollback
+        current=$(docker inspect --format '{{index .Config.Image}}' \
+            "$(docker compose -f "${cf}" ps -q)" 2>/dev/null || true)
+        [[ -n "${current}" ]] && echo "${current}" > .previous_image
+
+        docker pull "${FULL_IMAGE}:${tag}"
+        IMAGE_TAG="${tag}" docker compose -f "${cf}" up -d --no-build
+
+        # Health check (60 s timeout)
+        for i in $(seq 1 12); do
+            health=$(docker compose -f "${cf}" ps --format json \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('Health',''))" 2>/dev/null || true)
+            [[ "${health}" == "healthy" || -z "${health}" ]] && { echo "Service up."; exit 0; }
+            [[ "${i}" -eq 12 ]] && { echo "Health check timed out." >&2; exit 1; }
+            sleep 5
+        done
+REMOTE
+
+    log "=== Deploy complete: ${tag} ==="
+}
+
+cmd_rollback() {
+    local target="${1:-}"
+    if [[ -z "${target}" ]]; then
+        target="$(previous_git_tag)"
+        [[ -n "${target}" ]] || die "No previous git tag found"
+        log "Rolling back to previous tag: ${target}"
+    fi
+
+    local tag="v${target#v}"
+    local image_versioned="${FULL_IMAGE}:${tag}"
+
+    log "=== Rolling back to ${tag} ==="
+
+    docker manifest inspect "${image_versioned}" >/dev/null 2>&1 \
+        || die "Image ${image_versioned} not found in registry"
+
+    ssh_prod bash -s -- "${FULL_IMAGE}" "${tag}" "${DEPLOY_DIR}" "${COMPOSE_FILE}" <<'REMOTE'
+        set -euo pipefail
+        FULL_IMAGE="$1" tag="$2" dir="$3" cf="$4"
+        cd "${dir}"
+        docker pull "${FULL_IMAGE}:${tag}"
+        IMAGE_TAG="${tag}" docker compose -f "${cf}" up -d --no-build
+        echo "Rollback to ${tag} complete."
+REMOTE
+
+    log "=== Rollback complete: ${tag} ==="
+}
+
+subcommand="${1:-deploy}"; shift || true
+case "${subcommand}" in
+    rollback) cmd_rollback "$@" ;;
+    deploy)   cmd_deploy   "$@" ;;
+    *) die "Unknown command '${subcommand}'. Use: deploy [VERSION] | rollback [VERSION]" ;;
+esac
+```
+
+---
+
+**Key design decisions:**
+
+| Feature | Approach |
+|---|---|
+| Version source | Auto-read from `pyproject.toml`; overridable via arg |
+| Dirty tree guard | Fails fast before build if uncommitted changes exist |
+| Image tags | Both `:vX.Y.Z` and `:latest` pushed |
+| Git tag | Idempotent — skips if tag already exists, then pushes |
+| Rollback target | Explicit version arg, or auto-resolves to previous `v*` tag |
+| Rollback safety | Verifies image exists in registry before touching production |
+| Health check | 60 s poll loop on the remote host post-restart |
+| Previous image | Saved to `.previous_image` on remote for auditability |
+
+**Usage:**
+```bash
+# Set env vars once (e.g. in .env or CI secrets)
+export REGISTRY=ghcr.io/zenprocess
+export DEPLOY_HOST=user@prod.example.com
+export DEPLOY_DIR=/opt/axiom
+
+chmod +x deploy.sh
+./deploy.sh               # deploys version from pyproject.toml (0.6.0)
+./deploy.sh 0.7.0         # deploys specific version
+./deploy.sh rollback      # rolls back to previous git tag
+./deploy.sh rollback 0.5.0  # rolls back to specific version
+```

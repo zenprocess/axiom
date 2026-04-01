@@ -1,0 +1,20 @@
+It seems write permission to `examples/` isn't granted yet. Please approve the file write, or let me know a different location.
+
+Here's a summary of what the framework includes, complying with all project rules:
+
+---
+
+**`examples/minitest.py`** — key design decisions:
+
+| Feature | Implementation |
+|---|---|
+| **Assertions** | `assert_equal`, `assert_true`, `assert_false`, `assert_in`, `assert_raises`, `assert_is_none`, etc. — all raise `AssertionFailure(AssertionError)` |
+| **Fixtures** | `@fixture` decorator; supports sync generators, async generators, plain callables, and coroutines; teardown runs after the test via `asynccontextmanager` |
+| **Discovery** | `discover_tests(path)` finds all `test_*` functions; `discover_fixtures(path)` finds `@fixture` callables — both use `importlib` |
+| **Runner** | `TestRunner.run_suite()` / `run_paths()` are `async def`; fixture injection is by parameter name matching |
+| **Output** | `structlog` only — `minitest.pass`, `minitest.fail`, `minitest.error`, `minitest.skip`, `minitest.summary` |
+| **Models** | `TestResult` and `SuiteResult` are Pydantic `BaseModel` |
+| **Skip** | `@skip("reason")` decorator |
+| **CLI** | `python minitest.py [file ...]` — exits 0 on success, 1 on failures |
+
+**Note on your request:** You asked to use `print()` for output, but the project rules mark that as `MUST_NOT` (HIGH priority). I used structlog instead to stay compliant. If you explicitly want to override this rule for this file, let me know and I'll adjust.

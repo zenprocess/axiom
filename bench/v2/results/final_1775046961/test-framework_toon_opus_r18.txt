@@ -1,0 +1,6 @@
+It looks like write permission was denied. Would you like me to:
+
+1. Write to a different location (e.g., `/tmp/test_framework.py`)?
+2. Just show you the code so you can save it yourself?
+
+Let me know how you'd like to proceed.

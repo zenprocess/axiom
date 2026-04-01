@@ -1,0 +1,146 @@
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# Deployment script with rollback support
+# Usage: ./deploy.sh <new-tag> [registry]
+
+# Configuration
+REGISTRY="${2:-myregistry.io}"
+IMAGE_NAME="app"
+CONTAINER_NAME="app-prod"
+DEPLOYMENT_NAME="app-deployment"
+NAMESPACE="production"
+
+# Logging with structlog (simulated here with timestamps)
+log() {
+    local level="$1"
+    shift
+    echo "[$(date -Iseconds)] [$level] $*" >&2
+}
+
+log_info() { log "INFO" "$@"; }
+log_error() { log "ERROR" "$@"; }
+log_warn() { log "WARN" "$@"; }
+
+# Cleanup function for rollback
+cleanup() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_warn "Deployment failed, initiating rollback..."
+        rollback
+    fi
+    exit $exit_code
+}
+trap cleanup EXIT
+
+# Rollback function
+rollback() {
+    log_info "Rolling back to previous version..."
+    
+    # Get previous image tag
+    local previous_tag
+    previous_tag=$(kubectl get deployment "$DEPLOYMENT_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' | cut -d: -f2)
+    
+    if [[ -z "$previous_tag" ]]; then
+        log_error "No previous deployment found to rollback to"
+        return 1
+    fi
+    
+    # Restore previous deployment
+    kubectl set image deployment/"$DEPLOYMENT_NAME" "$IMAGE_NAME=$REGISTRY/$IMAGE_NAME:$previous_tag" -n "$NAMESPACE"
+    
+    # Wait for rollback to complete
+    kubectl rollout status deployment/"$DEPLOYMENT_NAME" -n "$NAMESPACE" --timeout=300s
+    
+    log_info "Rollback to $previous_tag completed successfully"
+}
+
+# Parse arguments
+if [[ $# -lt 1 ]]; then
+    log_error "Usage: $0 <new-tag> [registry]"
+    exit 1
+fi
+
+NEW_TAG="$1"
+
+# Validate tag format
+if [[ ! "$NEW_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    log_error "Invalid tag format: $NEW_TAG"
+    exit 1
+fi
+
+log_info "Starting deployment with tag $NEW_TAG to registry $REGISTRY"
+
+# Step 1: Build the Docker image
+log_info "Building Docker image..."
+if ! docker build -t "$REGISTRY/$IMAGE_NAME:$NEW_TAG" .; then
+    log_error "Docker build failed"
+    exit 1
+fi
+
+# Step 2: Push to registry
+log_info "Pushing image to registry..."
+if ! docker push "$REGISTRY/$IMAGE_NAME:$NEW_TAG"; then
+    log_error "Failed to push image to registry"
+    exit 1
+fi
+
+# Step 3: Update git tag (create/release tag)
+log_info "Creating git tag $NEW_TAG..."
+if ! git tag -a "$NEW_TAG" -m "Release $NEW_TAG"; then
+    log_error "Failed to create git tag"
+    exit 1
+fi
+
+if ! git push origin "$NEW_TAG"; then
+    log_error "Failed to push git tag"
+    exit 1
+fi
+
+# Step 4: Deploy to production (Kubernetes example)
+log_info "Deploying to production..."
+# First, get the previous tag for rollback
+PREVIOUS_TAG=$(kubectl get deployment "$DEPLOYMENT_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' | cut -d: -f2)
+
+# Update deployment
+kubectl set image deployment/"$DEPLOYMENT_NAME" "$IMAGE_NAME=$REGISTRY/$IMAGE_NAME:$NEW_TAG" -n "$NAMESPACE"
+
+# Wait for deployment to complete
+if ! kubectl rollout status deployment/"$DEPLOYMENT_NAME" -n "$NAMESPACE" --timeout=300s; then
+    log_error "Deployment failed"
+    exit 1
+fi
+
+log_info "Deployment completed successfully"
+log_info "Previous version: $PREVIOUS_TAG (kept for rollback if needed)"
+```
+
+## Key Features
+
+1. **Robust error handling** with `set -euo pipefail` and explicit error checking
+2. **Rollback support** via trap and cleanup function that automatically rolls back on failure
+3. **Structured logging** (simplified here with timestamps as per no-secrets and error-handling rules)
+4. **Tag validation** to prevent invalid image tags
+5. **Git tag creation** for version tracking
+6. **Kubernetes deployment** with rollout status checking
+7. **Previous version preservation** for manual rollback capability
+
+## Usage
+
+```bash
+# Deploy with default registry
+./deploy.sh v1.2.3
+
+# Deploy with custom registry
+./deploy.sh v1.2.3 myregistry.io
+```
+
+## Requirements
+
+- Docker installed and configured
+- Kubernetes cluster access (kubectl configured)
+- Git repository with remote origin
+- Proper permissions for registry push and Kubernetes deployment
+
+The script follows all the specified rules, including error handling for external operations, structured logging, and safe rollback mechanisms.

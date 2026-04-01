@@ -1,0 +1,134 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by column value.
+
+Usage:
+    python csv_filter.py input.csv column_name column_value [--output output.csv]
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+# Configure structlog for structured logging
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+)
+
+logger = structlog.get_logger()
+
+
+def filter_csv(
+    input_path: Path, column_name: str, column_value: str, output_path: Optional[Path] = None
+) -> List[dict]:
+    """
+    Filter CSV rows by a column value.
+
+    Args:
+        input_path: Path to the input CSV file.
+        column_name: Name of the column to filter on.
+        column_value: Value to match in the specified column.
+        output_path: Optional path for output file. If None, output to stdout.
+
+    Returns:
+        List of filtered rows as dictionaries.
+    """
+    filtered_rows: List[dict] = []
+
+    try:
+        with open(input_path, "r", newline="", encoding="utf-8") as infile:
+            reader = csv.DictReader(infile)
+
+            # Check if column exists
+            if column_name not in reader.fieldnames:
+                logger.error("Column not found", column=column_name, available_columns=reader.fieldnames)
+                raise ValueError(f"Column '{column_name}' not found. Available columns: {reader.fieldnames}")
+
+            total_rows = 0
+            filtered_count = 0
+
+            # Process rows with progress
+            for row in reader:
+                total_rows += 1
+                if row.get(column_name) == column_value:
+                    filtered_rows.append(row)
+                    filtered_count += 1
+
+                # Log progress every 1000 rows
+                if total_rows % 1000 == 0:
+                    logger.info("Processing progress", rows_processed=total_rows, filtered_so_far=filtered_count)
+
+            logger.info("Filtering complete", total_rows=total_rows, filtered_rows=filtered_count)
+
+    except FileNotFoundError:
+        logger.error("Input file not found", path=str(input_path))
+        raise
+    except Exception as e:
+        logger.error("Error processing CSV", error=str(e))
+        raise
+
+    # Write output
+    if output_path:
+        try:
+            with open(output_path, "w", newline="", encoding="utf-8") as outfile:
+                if filtered_rows:
+                    writer = csv.DictWriter(outfile, fieldnames=filtered_rows[0].keys())
+                    writer.writeheader()
+                    writer.writerows(filtered_rows)
+                else:
+                    logger.warning("No matching rows found", column=column_name, value=column_value)
+        except Exception as e:
+            logger.error("Error writing output file", path=str(output_path), error=str(e))
+            raise
+    else:
+        # Output to stdout
+        writer = csv.DictWriter(sys.stdout, fieldnames=filtered_rows[0].keys() if filtered_rows else [])
+        writer.writeheader()
+        writer.writerows(filtered_rows)
+
+    return filtered_rows
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Example:
+    python csv_filter.py data.csv status active --output filtered.csv
+        """,
+    )
+    parser.add_argument("input", type=Path, help="Input CSV file path")
+    parser.add_argument("column", type=str, help="Column name to filter on")
+    parser.add_argument("value", type=str, help="Value to match in the column")
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="Output CSV file path (default: stdout)",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Main entry point."""
+    args = parse_args()
+
+    try:
+        filter_csv(args.input, args.column, args.value, args.output)
+    except Exception as e:
+        logger.error("Execution failed", error=str(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+```

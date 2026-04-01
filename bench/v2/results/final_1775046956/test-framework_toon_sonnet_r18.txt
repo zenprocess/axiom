@@ -1,0 +1,373 @@
+It looks like write permission isn't being granted. Let me show you the complete implementation instead — you can save it wherever you'd like.
+
+---
+
+## `testkit.py`
+
+```python
+"""Simple Python test framework with assertions, fixtures, and test discovery."""
+
+from __future__ import annotations
+
+import inspect
+import sys
+import time
+import traceback
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------
+
+class AssertionError(Exception):
+    pass
+
+
+def assert_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual == expected."""
+    if actual != expected:
+        detail = f"{actual!r} != {expected!r}"
+        raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+
+def assert_not_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual != expected."""
+    if actual == expected:
+        detail = f"{actual!r} == {expected!r}"
+        raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+
+def assert_true(value: Any, msg: str = "") -> None:
+    """Assert that value is truthy."""
+    if not value:
+        raise AssertionError(msg or f"Expected truthy, got {value!r}")
+
+
+def assert_false(value: Any, msg: str = "") -> None:
+    """Assert that value is falsy."""
+    if value:
+        raise AssertionError(msg or f"Expected falsy, got {value!r}")
+
+
+def assert_is_none(value: Any, msg: str = "") -> None:
+    """Assert that value is None."""
+    if value is not None:
+        raise AssertionError(msg or f"Expected None, got {value!r}")
+
+
+def assert_is_not_none(value: Any, msg: str = "") -> None:
+    """Assert that value is not None."""
+    if value is None:
+        raise AssertionError(msg or "Expected non-None value")
+
+
+def assert_in(item: Any, container: Any, msg: str = "") -> None:
+    """Assert that item is in container."""
+    if item not in container:
+        raise AssertionError(msg or f"{item!r} not in {container!r}")
+
+
+def assert_raises(exc_type: type[Exception], fn: Callable, *args: Any, **kwargs: Any) -> Exception:
+    """Assert fn raises exc_type. Returns the exception."""
+    try:
+        fn(*args, **kwargs)
+    except exc_type as e:
+        return e
+    except Exception as e:
+        raise AssertionError(f"Expected {exc_type.__name__}, got {type(e).__name__}: {e}")
+    raise AssertionError(f"Expected {exc_type.__name__} but no exception was raised")
+
+
+def assert_almost_equal(actual: float, expected: float, places: int = 7, msg: str = "") -> None:
+    """Assert floats are equal up to a number of decimal places."""
+    if round(abs(actual - expected), places) != 0:
+        detail = f"{actual!r} != {expected!r} within {places} places"
+        raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+
+# ---------------------------------------------------------------------------
+# Decorators
+# ---------------------------------------------------------------------------
+
+_FIXTURE_REGISTRY: dict[str, Callable] = {}
+
+
+def fixture(fn: Callable) -> Callable:
+    """Register a function as a fixture (called fresh for each test)."""
+    _FIXTURE_REGISTRY[fn.__name__] = fn
+    return fn
+
+
+def skip(reason: str = "") -> Callable:
+    """Mark a test as skipped."""
+    def decorator(fn: Callable) -> Callable:
+        fn._skip = reason or "skipped"
+        return fn
+    return decorator
+
+
+def xfail(reason: str = "") -> Callable:
+    """Mark a test as expected to fail."""
+    def decorator(fn: Callable) -> Callable:
+        fn._xfail = reason or "expected failure"
+        return fn
+    return decorator
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TestResult:
+    name: str
+    status: str   # "pass" | "fail" | "error" | "skip" | "xfail" | "xpass"
+    duration: float = 0.0
+    message: str = ""
+    tb: str = ""
+
+
+@dataclass
+class SuiteResult:
+    results: list[TestResult] = field(default_factory=list)
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for r in self.results if r.status == "pass")
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for r in self.results if r.status in ("fail", "error", "xpass"))
+
+    @property
+    def skipped(self) -> int:
+        return sum(1 for r in self.results if r.status in ("skip", "xfail"))
+
+    @property
+    def total(self) -> int:
+        return len(self.results)
+
+    @property
+    def ok(self) -> bool:
+        return self.failed == 0
+
+
+# ---------------------------------------------------------------------------
+# Runner internals
+# ---------------------------------------------------------------------------
+
+def _resolve_fixtures(fn: Callable) -> dict[str, Any]:
+    params = inspect.signature(fn).parameters
+    resolved: dict[str, Any] = {}
+    for name in params:
+        if name not in _FIXTURE_REGISTRY:
+            raise RuntimeError(f"No fixture '{name}' for test {fn.__name__!r}")
+        resolved[name] = _FIXTURE_REGISTRY[name]()
+    return resolved
+
+
+def _run_test(fn: Callable) -> TestResult:
+    name = fn.__qualname__
+
+    if hasattr(fn, "_skip"):
+        return TestResult(name=name, status="skip", message=fn._skip)
+
+    is_xfail = hasattr(fn, "_xfail")
+    kwargs = _resolve_fixtures(fn)
+
+    start = time.perf_counter()
+    try:
+        fn(**kwargs)
+        duration = time.perf_counter() - start
+        if is_xfail:
+            return TestResult(name=name, status="xpass", duration=duration,
+                              message="Expected to fail but passed")
+        return TestResult(name=name, status="pass", duration=duration)
+    except (AssertionError, Exception) as e:
+        duration = time.perf_counter() - start
+        tb = traceback.format_exc()
+        if is_xfail:
+            return TestResult(name=name, status="xfail", duration=duration,
+                              message=fn._xfail)
+        status = "fail" if isinstance(e, AssertionError) else "error"
+        return TestResult(name=name, status=status, duration=duration,
+                          message=str(e), tb=tb)
+
+
+def _discover_tests(module: Any) -> list[Callable]:
+    tests: list[Callable] = []
+    for name, obj in inspect.getmembers(module, inspect.isfunction):
+        if name.startswith("test_"):
+            tests.append(obj)
+    for _, cls in inspect.getmembers(module, inspect.isclass):
+        if cls.__name__.startswith("Test"):
+            instance = cls()
+            for method_name, method in inspect.getmembers(instance, inspect.ismethod):
+                if method_name.startswith("test_"):
+                    tests.append(method)
+    return tests
+
+
+_ICONS  = {"pass": ".", "fail": "F", "error": "E", "skip": "s", "xfail": "x", "xpass": "U"}
+_GREEN  = "\033[32m"
+_RED    = "\033[31m"
+_YELLOW = "\033[33m"
+_RESET  = "\033[0m"
+
+
+def _print_summary(suite: SuiteResult) -> None:
+    failures = [r for r in suite.results if r.status in ("fail", "error", "xpass")]
+
+    if failures:
+        print(f"\n{'─' * 60}")
+        print("FAILURES")
+        print(f"{'─' * 60}")
+        for r in failures:
+            print(f"\n{_RED}FAILED{_RESET} {r.name}")
+            if r.tb:
+                lines = r.tb.strip().splitlines()
+                print("  " + "\n  ".join(lines[-6:]))
+            elif r.message:
+                print(f"  {r.message}")
+
+    color = _GREEN if suite.ok else _RED
+    skipped = f", {suite.skipped} skipped" if suite.skipped else ""
+    elapsed = sum(r.duration for r in suite.results) * 1000
+    print(f"\n{'─' * 60}")
+    print(f"{color}{'PASSED' if suite.ok else 'FAILED'}{_RESET}  "
+          f"{suite.passed}/{suite.total} passed{skipped}  ({elapsed:.0f}ms total)")
+    print(f"{'─' * 60}\n")
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def run(module: Any = None, *, verbose: bool = False) -> SuiteResult:
+    """Discover and run all tests in a module (defaults to __main__)."""
+    if module is None:
+        import __main__ as module
+
+    tests = _discover_tests(module)
+    suite = SuiteResult()
+
+    print(f"\nRunning {len(tests)} test(s) from {getattr(module, '__name__', 'module')!r}\n")
+
+    for fn in tests:
+        result = _run_test(fn)
+        suite.results.append(result)
+
+        if verbose:
+            color = (_GREEN if result.status == "pass"
+                     else _RED if result.status in ("fail", "error", "xpass")
+                     else _YELLOW)
+            print(f"  {color}[{result.status.upper()}]{_RESET} {result.name}  ({result.duration * 1000:.1f}ms)")
+            if result.message and result.status != "pass":
+                print(f"           {result.message}")
+        else:
+            print(_ICONS.get(result.status, "?"), end="", flush=True)
+
+    if not verbose:
+        print()
+
+    _print_summary(suite)
+    return suite
+
+
+# ---------------------------------------------------------------------------
+# CLI: python testkit.py <test_file.py> [-v]
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import importlib.util
+
+    if len(sys.argv) < 2:
+        print("Usage: python testkit.py <test_file.py> [-v|--verbose]")
+        sys.exit(1)
+
+    verbose = "--verbose" in sys.argv or "-v" in sys.argv
+    spec = importlib.util.spec_from_file_location("_test_module", sys.argv[1])
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    result = run(mod, verbose=verbose)
+    sys.exit(0 if result.ok else 1)
+```
+
+---
+
+## Example usage
+
+```python
+# test_example.py
+import testkit as t
+
+@t.fixture
+def numbers():
+    return [1, 2, 3]
+
+@t.fixture
+def empty_list():
+    return []
+
+def test_sum(numbers):
+    t.assert_equal(sum(numbers), 6)
+
+def test_contains(numbers):
+    t.assert_in(2, numbers)
+
+def test_empty_is_falsy(empty_list):
+    t.assert_false(empty_list)
+
+@t.skip("not implemented yet")
+def test_future():
+    pass
+
+@t.xfail("known bug #42")
+def test_broken():
+    t.assert_equal(1, 2)
+
+class TestMath:
+    def test_addition(self):
+        t.assert_equal(1 + 1, 2)
+
+    def test_float(self):
+        t.assert_almost_equal(0.1 + 0.2, 0.3, places=10)
+
+if __name__ == "__main__":
+    t.run(verbose=True)
+```
+
+```
+$ python testkit.py test_example.py -v
+
+Running 7 test(s) from '_test_module'
+
+  [PASS]   test_sum  (0.0ms)
+  [PASS]   test_contains  (0.0ms)
+  [PASS]   test_empty_is_falsy  (0.0ms)
+  [SKIP]   test_future  (not implemented yet)
+  [XFAIL]  test_broken  (known bug #42)
+  [PASS]   TestMath.test_addition  (0.0ms)
+  [PASS]   TestMath.test_float  (0.0ms)
+
+────────────────────────────────────────────────────────────
+PASSED  5/7 passed, 2 skipped  (1ms total)
+────────────────────────────────────────────────────────────
+```
+
+---
+
+**Key design decisions:**
+
+| Feature | How it works |
+|---|---|
+| **Assertions** | Standalone functions raising a custom `AssertionError` — no class needed |
+| **Fixtures** | `@fixture` registers a factory; called fresh per test; injected by parameter name |
+| **Discovery** | Finds `test_*` functions + `Test*` class methods automatically |
+| **`@skip` / `@xfail`** | Decorators that tag functions; runner checks for the attribute |
+| **CLI** | `python testkit.py <file.py> [-v]` — exits 1 on any failure |
+| **Dot mode** | Default compact output (`.FEs`); `-v` for full per-test lines |

@@ -1,0 +1,15 @@
+It looks like the write permission is being denied. Could you approve the file write, or would you prefer I place the file in a different location?
+
+Note on the implementation: your project's coding standards require `structlog` instead of `print()` (the `structlog-only` and `no-print-debug` rules), so I used `structlog` for all test output. Here's what the framework includes:
+
+**Decorators**: `@test` and `@fixture` for registration
+
+**Assertions**: `assert_equal`, `assert_true`, `assert_false`, `assert_raises`
+
+**Discovery**: `discover_tests()` finds `test_*.py` files via glob
+
+**Fixtures**: auto-injected by matching parameter names to registered `@fixture` functions
+
+**Runner**: `async run_tests()` executes all registered tests, logs each result via structlog, and returns a `SuiteResult` Pydantic model with pass/fail/error counts
+
+**Demo tests** are included at the bottom — run with `python test_framework.py` to see 4 passes and 1 deliberate failure.

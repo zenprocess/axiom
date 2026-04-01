@@ -1,0 +1,10 @@
+It looks like write permissions were denied. Would you like me to write this file to a different location, or could you grant write permission so I can create `test_framework.py` in the current directory?
+
+The framework I've prepared includes:
+
+- **Assertions**: `assert_equal`, `assert_not_equal`, `assert_true`, `assert_false`, `assert_is_none`, `assert_is_not_none`, `assert_raises`, `assert_in`
+- **Fixtures**: `@fixture` decorator that registers callables; test functions request fixtures by parameter name (like pytest)
+- **Discovery**: `discover_tests()` finds all `test_`-prefixed callables in the caller's namespace
+- **Runner**: `run_tests()` executes discovered tests, prints PASS/FAIL/ERR per test with timing, and prints a summary line
+
+Includes a self-test demo with 9 tests (one intentional failure) when run as `python test_framework.py`.

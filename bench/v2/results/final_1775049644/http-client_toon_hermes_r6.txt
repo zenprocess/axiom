@@ -1,0 +1,87 @@
+```python
+"""Module for fetching user data from a REST API."""
+
+from typing import Optional
+from pydantic import BaseModel
+import httpx
+import structlog
+
+# Configure structlog for structured logging
+logger = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data model."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+
+
+class APIClient:
+    """Client for interacting with the user API."""
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        self.base_url = base_url
+        self.client = httpx.AsyncClient(timeout=10.0)
+
+    async def fetch_user(self, user_id: int) -> User:
+        """
+        Fetch user data by ID from the API.
+
+        Args:
+            user_id: The ID of the user to fetch.
+
+        Returns:
+            User: The fetched user data.
+
+        Raises:
+            httpx.HTTPError: If the HTTP request fails.
+            ValueError: If the user data is invalid or missing.
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        
+        try:
+            logger.info("Fetching user", user_id=user_id, url=url)
+            response = await self.client.get(url)
+            response.raise_for_status()
+            
+            user_data = response.json()
+            user = User(**user_data)
+            
+            logger.info("User fetched successfully", user_id=user_id, user_name=user.name)
+            return user
+            
+        except httpx.HTTPError as exc:
+            logger.error("HTTP error occurred", user_id=user_id, error=str(exc))
+            raise
+        except Exception as exc:
+            logger.error("Unexpected error occurred", user_id=user_id, error=str(exc))
+            raise ValueError(f"Failed to fetch user data: {exc}") from exc
+
+    async def close(self):
+        """Close the HTTP client."""
+        await self.client.aclose()
+
+
+async def main():
+    """Main function that fetches user #42."""
+    client = APIClient()
+    
+    try:
+        user = await client.fetch_user(42)
+        logger.info("User #42 fetched", user=user)
+        return user
+    except Exception as exc:
+        logger.error("Failed to fetch user #42", error=str(exc))
+        raise
+    finally:
+        await client.close()
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```

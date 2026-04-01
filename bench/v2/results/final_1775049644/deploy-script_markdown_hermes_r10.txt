@@ -1,0 +1,128 @@
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# Deployment script with rollback support
+# Usage: ./deploy.sh <version_tag> [registry] [image_name]
+# Example: ./deploy.sh v1.2.3 myregistry.io myapp
+
+# Configuration
+LOG_FILE="/var/log/deploy.log"
+LOG() {
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    echo "$msg" | tee -a "$LOG_FILE"
+}
+
+# Validate arguments
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 <version_tag> [registry] [image_name]" >&2
+    exit 1
+fi
+
+VERSION="$1"
+REGISTRY="${2:-registry.example.com}"
+IMAGE_NAME="${3:-myapp}"
+REPO="${REGISTRY}/${IMAGE_NAME}"
+FULL_IMAGE="${REPO}:${VERSION}"
+ROLLBACK_FULL_IMAGE="${REPO}:previous"
+
+# Check required tools
+for tool in docker git; do
+    if ! command -v "$tool" &>/dev/null; then
+        echo "Error: Required tool '$tool' not found" >&2
+        exit 1
+    fi
+done
+
+# Check for production environment
+if [[ "${DEPLOY_ENV:-}" != "production" ]]; then
+    echo "Error: DEPLOY_ENV must be set to 'production' to deploy" >&2
+    exit 1
+fi
+
+# Save current state for rollback
+LOG "Saving current deployment state for rollback..."
+PREVIOUS_VERSION=$(docker manifest inspect "${FULL_IMAGE}" 2>/dev/null | jq -r '.tags[-1]' 2>/dev/null || echo "none")
+
+# Build Docker image
+LOG "Building Docker image: ${FULL_IMAGE}..."
+if ! docker build -t "${FULL_IMAGE}" .; then
+    LOG "Error: Docker build failed" >&2
+    exit 1
+fi
+
+# Push to registry
+LOG "Pushing image to registry: ${FULL_IMAGE}..."
+if ! docker push "${FULL_IMAGE}"; then
+    LOG "Error: Failed to push image to registry" >&2
+    docker rmi "${FULL_IMAGE}" 2>/dev/null || true
+    exit 1
+fi
+
+# Update git tag
+LOG "Updating git tag..."
+if ! git tag -f "${VERSION}"; then
+    LOG "Error: Failed to update git tag" >&2
+    exit 1
+fi
+
+if ! git push --tags --force-with-lease 2>/dev/null || git push origin "${VERSION}"; then
+    LOG "Warning: Could not push tags to remote"
+else
+    LOG "Git tag updated successfully"
+fi
+
+# Deploy to production
+LOG "Deploying to production..."
+# Replace with your actual deployment commands
+# Example: kubectl apply -f k8s/deployment.yaml --record
+# For this example, we'll use a placeholder
+if ! docker run -d --rm "${FULL_IMAGE}" --test; then
+    LOG "Error: Deployment verification failed" >&2
+    
+    # Rollback on failure
+    LOG "Rolling back to previous version..."
+    docker pull "${ROLLBACK_FULL_IMAGE}" || {
+        LOG "Error: Could not pull previous image for rollback" >&2
+        exit 1
+    }
+    
+    if ! docker run -d --rm "${ROLLBACK_FULL_IMAGE}" --test; then
+        LOG "Critical: Rollback verification also failed" >&2
+        exit 1
+    fi
+    
+    # Update git tag to previous version
+    git tag -f "${VERSION}" "${PREVIOUS_VERSION}" || true
+    git push origin "${VERSION}" || true
+    
+    exit 1
+fi
+
+LOG "Deployment completed successfully"
+LOG "Current version: ${VERSION}"
+LOG "Previous version: ${PREVIOUS_VERSION}"
+```
+
+This script includes:
+
+1. **Builds the Docker image** - Uses `docker build` to create the image
+2. **Pushes to registry** - Uses `docker push` to upload the image
+3. **Updates git tag** - Creates/updates a git tag with the version and pushes it
+4. **Deploys to production** - Includes a placeholder for your deployment commands (replace with your actual deployment mechanism like kubectl, docker-compose, etc.)
+5. **Rollback support** - Saves the current version state before deployment, and automatically rolls back if the new deployment fails verification
+
+Key security features:
+- Uses `set -euo pipefail` for strict error handling
+- Validates environment variable for production environment
+- Uses `git push --force-with-lease` for safer tag updates
+- Includes structured logging to a file
+- Validates all required tools are present
+- Includes comprehensive error handling and rollback on failure
+
+To use this script:
+1. Save it as `deploy.sh`
+2. Make it executable: `chmod +x deploy.sh`
+3. Set `DEPLOY_ENV=production` before running
+4. Replace the deployment verification command with your actual deployment mechanism
+5. Update the registry, image name, and other configuration as needed

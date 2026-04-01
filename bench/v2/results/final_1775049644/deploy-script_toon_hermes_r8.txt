@@ -1,0 +1,264 @@
+Here's a robust, secure, and production-ready bash deployment script that follows your rules—especially avoiding hardcoded secrets, using proper error handling, and following best practices.
+
+✅ **Key features:**
+- No hardcoded secrets (uses environment variables)
+- Uses `git push` safely (no `--force`)
+- Proper error handling with `set -euo pipefail`
+- Rollback support via `git tag` and image tag history
+- Structured logging (via `echo` since bash doesn’t support `structlog`, but logs are clear and traceable)
+- Uses `docker buildx` for cross-platform builds (optional but recommended)
+- Validates required inputs
+
+⚠️ **Important security notes:**
+- All sensitive values (e.g., registry password, API keys) must be passed via environment variables or a secrets manager — **never** hardcoded.
+- Ensure CI/CD runner has proper RBAC for Docker, Git, and Kubernetes.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# === CONFIGURATION (set via env vars or .env) ===
+: "${REGISTRY:=ghcr.io}"
+: "${IMAGE_NAME:=myapp}"
+: "${IMAGE_TAG:=latest}"
+: "${DOCKERFILE:=Dockerfile}"
+: "${BUILD_CONTEXT:=.}"
+: "${KUBECONFIG:=~/.kube/config}"
+: "${DEPLOYMENT_NAME:=myapp-deployment}"
+: "${NAMESPACE:=production}"
+
+# Optional: For registry auth, use GITHUB_TOKEN or DOCKER_PASSWORD
+# Example: export GITHUB_TOKEN=ghp_xxx  # for GitHub Container Registry
+# Example: export DOCKER_PASSWORD=xxx   # for Docker Hub
+
+# === HELP ===
+usage() {
+  cat <<EOF
+Usage: $0 <command> [options]
+
+Commands:
+  deploy [tag]     Deploy to production. Optionally specify image tag (default: latest)
+  rollback [tag]   Rollback to previous image tag (requires git tag history)
+  help             Show this message
+
+Environment variables:
+  REGISTRY         Docker registry (default: ghcr.io)
+  IMAGE_NAME       Image name (e.g., myorg/myapp)
+  DOCKERFILE       Path to Dockerfile (default: Dockerfile)
+  BUILD_CONTEXT    Build context (default: .)
+  KUBECONFIG       Path to kubeconfig (default: ~/.kube/config)
+  DEPLOYMENT_NAME  Kubernetes deployment name (default: myapp-deployment)
+  NAMESPACE        Kubernetes namespace (default: production)
+
+Examples:
+  # Deploy with tag 'v1.2.3'
+  ./deploy.sh deploy v1.2.3
+
+  # Rollback to previous version
+  ./deploy.sh rollback
+
+EOF
+  exit 0
+}
+
+log() {
+  echo "[$(date -Iseconds)] $*"
+}
+
+error() {
+  echo "[ERROR] $*" >&2
+}
+
+die() {
+  error "$*"
+  exit 1
+}
+
+# === VALIDATE INPUTS ===
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+command="$1"
+shift || true
+
+case "$command" in
+  deploy)
+    if [[ $# -ge 1 ]]; then
+      IMAGE_TAG="$1"
+    fi
+    ;;
+  rollback)
+    ;;
+  help|--help|-h)
+    usage
+    ;;
+  *)
+    error "Unknown command: $command"
+    usage
+    ;;
+esac
+
+# === VALIDATE REQUIREMENTS ===
+for cmd in docker git kubectl; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    die "$cmd is required but not installed."
+  fi
+done
+
+# === HELPER FUNCTIONS ===
+# Ensure we're in a git repo
+git_repo_check() {
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    die "Not in a git repository. Run from project root."
+  fi
+}
+
+# Check registry auth
+check_registry_auth() {
+  if [[ "$REGISTRY" == "ghcr.io" ]]; then
+    if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+      die "GITHUB_TOKEN must be set for ghcr.io"
+    fi
+    echo "$GITHUB_TOKEN" | docker login "$REGISTRY" -u "$USER" --password-stdin || die "Docker login failed"
+  elif [[ "$REGISTRY" == "docker.io" ]]; then
+    if [[ -z "${DOCKER_PASSWORD:-}" ]]; then
+      die "DOCKER_PASSWORD must be set for Docker Hub"
+    fi
+    echo "$DOCKER_PASSWORD" | docker login -u "${DOCKER_USER:-}" --password-stdin || die "Docker login failed"
+  else
+    # Generic registry: assume docker login already done or no auth needed
+    log "Using existing docker login for $REGISTRY"
+  fi
+}
+
+# === BUILD & PUSH ===
+build_and_push() {
+  local tag="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+  log "Building Docker image: $tag"
+  docker buildx build \
+    --platform linux/amd64 \
+    --push \
+    -f "$DOCKERFILE" \
+    -t "$tag" \
+    "$BUILD_CONTEXT"
+  log "✅ Image built and pushed: $tag"
+}
+
+# === GIT TAGGING ===
+tag_and_push_git() {
+  local current_sha
+  current_sha="$(git rev-parse HEAD)"
+  local git_tag="v${IMAGE_TAG}"
+
+  # Validate tag format (basic check)
+  if [[ ! "$git_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$IMAGE_TAG" != "latest" ]]; then
+    log "⚠️  WARNING: Tag '$git_tag' doesn't follow semver (vX.Y.Z). Consider using semantic tags."
+  fi
+
+  # Create and push tag
+  log "Creating git tag: $git_tag"
+  git tag -a "$git_tag" -m "Deploy $IMAGE_TAG to production"
+  git push origin "$git_tag"
+  log "✅ Git tag pushed: $git_tag"
+}
+
+# === DEPLOY TO K8S ===
+deploy_to_k8s() {
+  local current_sha
+  current_sha="$(git rev-parse HEAD)"
+  log "Deploying to Kubernetes (namespace: $NAMESPACE, deployment: $DEPLOYMENT_NAME)"
+
+  # Use kubectl set image with full image path
+  kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" set image \
+    "deployment/$DEPLOYMENT_NAME" \
+    "$DEPLOYMENT_NAME"="$REGISTRY/$IMAGE_NAME:${IMAGE_TAG}"
+
+  # Wait for rollout (optional but recommended)
+  log "Waiting for rollout to complete..."
+  kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" rollout status \
+    "deployment/$DEPLOYMENT_NAME" \
+    --timeout=300s || die "Rollout failed"
+
+  log "✅ Deployment successful. SHA: $current_sha"
+}
+
+# === ROLLBACK ===
+rollback() {
+  git_repo_check
+
+  # Get previous git tag (if any)
+  local prev_tag
+  prev_tag="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+
+  if [[ -z "$prev_tag" ]]; then
+    die "No previous git tag found for rollback."
+  fi
+
+  log "Rolling back to tag: $prev_tag"
+
+  # Extract image version from tag (e.g., v1.2.3 → 1.2.3)
+  local image_version
+  image_version="${prev_tag#v}"
+
+  # Deploy previous image
+  kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" set image \
+    "deployment/$DEPLOYMENT_NAME" \
+    "$DEPLOYMENT_NAME"="$REGISTRY/$IMAGE_NAME:$image_version"
+
+  log "Waiting for rollback rollout..."
+  kubectl --kubeconfig="$KUBECONFIG" -n "$NAMESPACE" rollout status \
+    "deployment/$DEPLOYMENT_NAME" \
+    --timeout=300s || die "Rollback failed"
+
+  log "✅ Rollback to $prev_tag successful"
+}
+
+# === MAIN ===
+main() {
+  case "$command" in
+    deploy)
+      git_repo_check
+      check_registry_auth
+      build_and_push
+      tag_and_push_git
+      deploy_to_k8s
+      ;;
+    rollback)
+      git_repo_check
+      rollback
+      ;;
+  esac
+}
+
+main
+```
+
+---
+
+### ✅ Compliance with Rules:
+
+| Rule | Status |
+|------|--------|
+| **no-force-push** | ✅ Uses `git push origin tag` (no `--force`) |
+| **no-secrets** | ✅ No hardcoded secrets — uses env vars (`GITHUB_TOKEN`, `DOCKER_PASSWORD`) |
+| **no-print-debug** | ✅ Uses `log()` for structured output; no raw `print()` |
+| **structlog-only** | N/A — bash script; uses `echo` (acceptable for shell) |
+| **error-handling** | ✅ `set -euo pipefail`, `try`-like via `|| die`, and `kubectl` error checks |
+| **type-hints** | N/A — bash doesn’t support type hints |
+| **pydantic-models** | N/A — not Python |
+| **docstrings** | ✅ `usage()` function documents all inputs |
+| **no-star-import** | N/A — not Python |
+
+---
+
+### 🔐 Usage Checklist:
+1. **Set secrets in CI/CD environment** (e.g., GitHub Secrets):
+   ```bash
+   GITHUB_TOKEN=ghp_xxx
+   ```
+2. **Ensure `kubectl` is configured** (e.g., via `KUBECONFIG` or `~/.kube/config`)
+3. **Tag format**: Prefer `v1.2.3` for `IMAGE_TAG` (semver).
+4. **For rollback**: Must have at least one previous successful deploy with a git tag.
+
+Let me know if you'd like a **GitHub Actions workflow** to integrate this script!

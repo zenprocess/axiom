@@ -1,0 +1,5 @@
+It seems the write to `examples/` was denied. Where would you like me to create this? Options:
+- A new `testlib/` directory at the repo root
+- Inline here as code you can copy
+
+Or let me know the target path.

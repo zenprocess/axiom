@@ -1,0 +1,170 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by column value.
+
+Usage:
+    python csv_filter.py input.csv --column status --value active --output filtered.csv
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+log = structlog.get_logger()
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Filter CSV rows by column value',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument('input_file', type=str, help='Input CSV file path')
+    parser.add_argument('--column', required=True, help='Column name to filter on')
+    parser.add_argument('--value', required=True, help='Value to match in the column')
+    parser.add_argument('--output', '-o', type=str, help='Output CSV file path (default: stdout)')
+    parser.add_argument('--delimiter', '-d', default=',', help='CSV delimiter (default: ,)')
+    parser.add_argument('--quotechar', default='"', help='Quote character (default: ")')
+    parser.add_argument('--encoding', default='utf-8', help='File encoding (default: utf-8)')
+    
+    return parser.parse_args()
+
+
+def read_csv_file(file_path: Path, delimiter: str, quotechar: str, encoding: str) -> List[dict]:
+    """Read CSV file and return list of rows as dictionaries."""
+    rows = []
+    try:
+        with open(file_path, 'r', encoding=encoding, newline='') as csvfile:
+            reader = csv.DictReader(csvfile, delimiter=delimiter, quotechar=quotechar)
+            fieldnames = reader.fieldnames
+            
+            if fieldnames is None:
+                log.error("empty_header", file_path=str(file_path))
+                raise ValueError(f"Empty header in CSV file: {file_path}")
+            
+            total_rows = 0
+            for row in reader:
+                total_rows += 1
+                if total_rows % 1000 == 0:
+                    log.info("progress", processed=total_rows)
+                rows.append(row)
+            
+            log.info("read_complete", total_rows=total_rows)
+            return rows
+            
+    except FileNotFoundError:
+        log.error("file_not_found", file_path=str(file_path))
+        raise
+    except PermissionError:
+        log.error("permission_denied", file_path=str(file_path))
+        raise
+    except UnicodeDecodeError as e:
+        log.error("encoding_error", file_path=str(file_path), error=str(e))
+        raise
+
+
+def filter_rows(rows: List[dict], column: str, value: str) -> List[dict]:
+    """Filter rows where column matches value."""
+    filtered = []
+    matched_count = 0
+    
+    for i, row in enumerate(rows):
+        if column not in row:
+            log.warning("missing_column", column=column, row_index=i, available_columns=list(row.keys()))
+            continue
+        
+        if row[column] == value:
+            filtered.append(row)
+            matched_count += 1
+            
+        if (i + 1) % 1000 == 0:
+            log.info("filter_progress", processed=i + 1, matches=matched_count)
+    
+    log.info("filter_complete", total=len(rows), matched=matched_count)
+    return filtered
+
+
+def write_csv_output(rows: List[dict], output_path: Optional[Path], delimiter: str, quotechar: str, encoding: str) -> None:
+    """Write filtered rows to CSV output."""
+    if not rows:
+        log.warning("no_results", message="No rows matched the filter criteria")
+        return
+    
+    try:
+        if output_path is None:
+            # Write to stdout
+            writer = csv.DictWriter(sys.stdout, fieldnames=rows[0].keys(), delimiter=delimiter, quotechar=quotechar)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+            log.info("output_complete", output="stdout", rows=len(rows))
+        else:
+            # Write to file
+            with open(output_path, 'w', encoding=encoding, newline='') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=rows[0].keys(), delimiter=delimiter, quotechar=quotechar)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(row)
+            log.info("output_complete", output=str(output_path), rows=len(rows))
+            
+    except PermissionError:
+        log.error("permission_denied", file_path=str(output_path))
+        raise
+    except Exception as e:
+        log.error("output_error", error=str(e))
+        raise
+
+
+def main() -> int:
+    """Main entry point."""
+    try:
+        args = parse_args()
+        
+        # Validate input file
+        input_path = Path(args.input_file)
+        if not input_path.exists():
+            log.error("input_file_not_found", file_path=args.input_file)
+            return 1
+        
+        # Validate column exists
+        if args.column.strip() == "":
+            log.error("invalid_column", message="Column name cannot be empty")
+            return 1
+        
+        log.info("starting_filter", input_file=args.input_file, column=args.column, value=args.value)
+        
+        # Read and filter data
+        rows = read_csv_file(input_path, args.delimiter, args.quotechar, args.encoding)
+        filtered_rows = filter_rows(rows, args.column, args.value)
+        
+        # Write output
+        output_path = Path(args.output) if args.output else None
+        write_csv_output(filtered_rows, output_path, args.delimiter, args.quotechar, args.encoding)
+        
+        return 0
+        
+    except FileNotFoundError as e:
+        log.error("file_operation_failed", error=str(e))
+        return 1
+    except PermissionError as e:
+        log.error("permission_error", error=str(e))
+        return 1
+    except ValueError as e:
+        log.error("validation_error", error=str(e))
+        return 1
+    except KeyboardInterrupt:
+        log.warning("interrupted", message="Operation cancelled by user")
+        return 130
+    except Exception as e:
+        log.error("unexpected_error", error=str(e))
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+```

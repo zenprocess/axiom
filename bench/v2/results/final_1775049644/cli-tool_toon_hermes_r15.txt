@@ -1,0 +1,244 @@
+```python
+#!/usr/bin/env python3
+"""
+CSV Filter CLI Tool
+
+A command-line tool to filter rows from a CSV file based on a column value.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+
+# Configure structlog
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.ConsoleRenderer(),
+    ],
+)
+
+logger = structlog.get_logger()
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter rows from a CSV file based on a column value."
+    )
+    parser.add_argument(
+        "input_file", type=str, help="Input CSV file path"
+    )
+    parser.add_argument(
+        "output_file", type=str, help="Output CSV file path"
+    )
+    parser.add_argument(
+        "-c", "--column", required=True, help="Column name to filter on"
+    )
+    parser.add_argument(
+        "-v", "--value", required=True, help="Value to match in the column"
+    )
+    parser.add_argument(
+        "-d", "--delimiter", default=",", help="CSV delimiter (default: ,)"
+    )
+    parser.add_argument(
+        "-q", "--quotechar", default='"', help="CSV quote character (default: \")"
+    )
+    parser.add_argument(
+        "-i",
+        "--ignore-case",
+        action="store_true",
+        help="Ignore case when matching values",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose output",
+    )
+    return parser.parse_args()
+
+
+def filter_csv(
+    input_path: Path,
+    output_path: Path,
+    column: str,
+    value: str,
+    delimiter: str = ",",
+    quotechar: str = '"',
+    ignore_case: bool = False,
+    verbose: bool = False,
+) -> bool:
+    """
+    Filter rows from a CSV file based on a column value.
+
+    Args:
+        input_path: Path to the input CSV file
+        output_path: Path to the output CSV file
+        column: Column name to filter on
+        value: Value to match in the column
+        delimiter: CSV delimiter
+        quotechar: CSV quote character
+        ignore_case: Whether to ignore case in matching
+        verbose: Whether to enable verbose output
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        with open(input_path, "r", newline="", encoding="utf-8") as infile:
+            reader = csv.DictReader(
+                infile, delimiter=delimiter, quotechar=quotechar
+            )
+            
+            # Check if column exists
+            if column not in reader.fieldnames:
+                logger.error(
+                    "Column not found",
+                    column=column,
+                    available_columns=reader.fieldnames,
+                )
+                return False
+
+            # Prepare filter value
+            filter_value = (
+                value.lower() if ignore_case else value
+            )
+
+            # Get output fieldnames from input
+            fieldnames = reader.fieldnames
+
+            # Open output file and write filtered rows
+            with open(
+                output_path, "w", newline="", encoding="utf-8"
+            ) as outfile:
+                writer = csv.DictWriter(
+                    outfile,
+                    fieldnames=fieldnames,
+                    delimiter=delimiter,
+                    quotechar=quotechar,
+                )
+                writer.writeheader()
+
+                total_rows = 0
+                filtered_rows = 0
+                processed_rows = 0
+
+                # First pass: count total rows for progress
+                infile.seek(0)
+                reader = csv.DictReader(
+                    infile, delimiter=delimiter, quotechar=quotechar
+                )
+                for _ in reader:
+                    total_rows += 1
+
+                # Second pass: filter and write
+                infile.seek(0)
+                reader = csv.DictReader(
+                    infile, delimiter=delimiter, quotechar=quotechar
+                )
+
+                for row in reader:
+                    processed_rows += 1
+                    # Extract and normalize the column value for comparison
+                    row_value = row.get(column, "")
+                    row_value = (
+                        row_value.lower() if ignore_case else row_value
+                    )
+
+                    if row_value == filter_value:
+                        writer.writerow(row)
+                        filtered_rows += 1
+
+                    # Progress output
+                    if verbose:
+                        progress = int(
+                            (processed_rows / total_rows) * 100
+                        )
+                        if processed_rows % max(
+                            1, total_rows // 10
+                        ) == 0 or processed_rows == total_rows:
+                            logger.info(
+                                "Processing rows",
+                                current=processed_rows,
+                                total=total_rows,
+                                progress=progress,
+                            )
+
+                logger.info(
+                    "Filtering completed",
+                    total_rows=processed_rows,
+                    filtered_rows=filtered_rows,
+                    output_file=str(output_path),
+                )
+                return True
+
+    except FileNotFoundError:
+        logger.error("Input file not found", path=str(input_path))
+        return False
+    except PermissionError:
+        logger.error(
+            "Permission denied", path=str(input_path)
+        )
+        return False
+    except csv.Error as e:
+        logger.error("CSV parsing error", error=str(e))
+        return False
+    except Exception as e:
+        logger.error("Unexpected error", error=str(e))
+        return False
+
+
+def main() -> int:
+    """Main entry point for the CLI tool."""
+    args = parse_args()
+
+    # Set logging level based on verbose flag
+    if args.verbose:
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(
+                logging.DEBUG
+            )
+        )
+    else:
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(
+                logging.INFO
+            )
+        )
+
+    # Convert paths
+    input_path = Path(args.input_file)
+    output_path = Path(args.output_file)
+
+    # Check input file exists
+    if not input_path.exists():
+        logger.error("Input file not found", path=str(input_path))
+        return 1
+
+    # Run the filter operation
+    success = filter_csv(
+        input_path=input_path,
+        output_path=output_path,
+        column=args.column,
+        value=args.value,
+        delimiter=args.delimiter,
+        quotechar=args.quotechar,
+        ignore_case=args.ignore_case,
+        verbose=args.verbose,
+    )
+
+    return 0 if success else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

@@ -1,0 +1,7 @@
+The project rules (`structlog-only`, `no-print-debug`) prohibit `print()` entirely — all output must use `structlog`. Your request explicitly asks for `print` for test output.
+
+Should I:
+1. **Use `structlog`** for all output (compliant with rules, structured output)
+2. **Use `print`** as you requested (overrides the no-print rule for this file)
+
+Which do you prefer?

@@ -1,0 +1,12 @@
+Looks like write permissions aren't granted yet. Let me try once more — this is writing `examples/test_framework.py` with:
+
+**Features:**
+- **Assertions**: `assert_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in`
+- **Fixtures**: `@fixture` decorator with auto-injection by parameter name
+- **Discovery**: finds all `test_` functions in a module via `inspect`
+- **Runner**: `run_suite()` / `run_file()` with structlog output and Pydantic result models
+- **CLI**: `python test_framework.py [file]` — runs self-tests or tests from a given file
+
+Note: I used `structlog` instead of `print()` per the project's coding standards (the `structlog-only` and `no-print-debug` rules prohibit `print()`). The structured log output gives you the same information in a machine-parseable format.
+
+Want me to retry writing the file, or would you like any changes to the design?

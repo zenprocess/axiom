@@ -1,0 +1,190 @@
+```python
+#!/usr/bin/env python3
+"""
+CSV Filter CLI Tool
+
+A command-line tool to filter CSV files by a specific column value.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for the CSV filter operation."""
+    input_file: Path
+    output_file: Path | None = None
+    column_name: str
+    column_value: str
+    delimiter: str = ','
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Filter CSV rows by column value',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s data.csv output.csv name "Alice"
+  %(prog)s --delimiter ';' input.csv --column "status" --value "active"
+'''
+    )
+    
+    parser.add_argument('input_file', type=Path, help='Input CSV file path')
+    parser.add_argument('output_file', nargs='?', type=Path, 
+                        help='Output CSV file path (optional, defaults to stdout)')
+    parser.add_argument('-c', '--column', dest='column_name', required=True,
+                        help='Column name to filter on')
+    parser.add_argument('-v', '--value', dest='column_value', required=True,
+                        help='Value to match in the specified column')
+    parser.add_argument('-d', '--delimiter', default=',',
+                        help='CSV delimiter (default: ,)')
+    
+    return parser.parse_args()
+
+
+def read_csv_rows(input_path: Path, delimiter: str) -> tuple[list[str], list[dict[str, str]]]:
+    """Read CSV file and return headers and rows."""
+    try:
+        with open(input_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f, delimiter=delimiter)
+            headers = reader.fieldnames or []
+            rows = list(reader)
+            return headers, rows
+    except FileNotFoundError:
+        log.error("input_file_not_found", path=str(input_path))
+        sys.exit(1)
+    except csv.Error as e:
+        log.error("csv_parsing_error", path=str(input_path), error=str(e))
+        sys.exit(1)
+    except UnicodeDecodeError as e:
+        log.error("encoding_error", path=str(input_path), error=str(e))
+        sys.exit(1)
+
+
+def filter_rows(rows: list[dict[str, str]], column_name: str, column_value: str) -> list[dict[str, str]]:
+    """Filter rows by column value with progress logging."""
+    filtered = []
+    total_rows = len(rows)
+    
+    for i, row in enumerate(rows):
+        # Log progress every 10% or at start/end
+        if i == 0 or i == total_rows - 1 or (i % max(1, total_rows // 10) == 0):
+            log.info("filtering_progress", current=i+1, total=total_rows)
+        
+        # Handle missing column gracefully
+        if column_name not in row:
+            log.warning("column_not_found", column=column_name, row_index=i)
+            continue
+            
+        if row[column_name] == column_value:
+            filtered.append(row)
+    
+    log.info("filtering_complete", total_filtered=len(filtered))
+    return filtered
+
+
+def write_csv_rows(output_path: Path | None, headers: list[str], rows: list[dict[str, str]]) -> None:
+    """Write filtered rows to output file or stdout."""
+    if output_path:
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=headers, extrasaction='ignore')
+                writer.writeheader()
+                writer.writerows(rows)
+            log.info("output_written", path=str(output_path), row_count=len(rows))
+        except OSError as e:
+            log.error("output_write_error", path=str(output_path), error=str(e))
+            sys.exit(1)
+    else:
+        # Output to stdout
+        writer = csv.DictWriter(sys.stdout, fieldnames=headers, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(rows)
+        log.info("output_stdout", row_count=len(rows))
+
+
+def main() -> None:
+    """Main entry point for the CLI tool."""
+    args = parse_args()
+    
+    # Create config object
+    config = FilterConfig(
+        input_file=args.input_file,
+        output_file=args.output_file,
+        column_name=args.column_name,
+        column_value=args.column_value,
+        delimiter=args.delimiter
+    )
+    
+    # Validate input file exists
+    if not config.input_file.exists():
+        log.error("input_file_not_found", path=str(config.input_file))
+        sys.exit(1)
+    
+    log.info("starting_filter", 
+             input_file=str(config.input_file),
+             column=config.column_name,
+             value=config.column_value)
+    
+    # Read CSV
+    headers, rows = read_csv_rows(config.input_file, config.delimiter)
+    log.info("read_csv", row_count=len(rows), headers=headers)
+    
+    # Filter rows
+    filtered_rows = filter_rows(rows, config.column_name, config.column_value)
+    
+    # Write output
+    write_csv_rows(config.output_file, headers, filtered_rows)
+    
+    log.info("filtering_done")
+
+
+if __name__ == '__main__':
+    main()
+```
+
+This CLI tool:
+
+1. Uses `argparse` for command-line argument parsing with:
+   - Required positional arguments for input file
+   - Optional positional argument for output file
+   - Required flags for column name and value
+   - Optional delimiter specification
+
+2. Uses `structlog` for structured logging as required
+
+3. Uses Pydantic models for configuration validation
+
+4. Implements proper error handling for:
+   - File not found
+   - CSV parsing errors
+   - Encoding issues
+   - Output write errors
+
+5. Provides progress output with:
+   - Logging at start, progress checkpoints (every 10%), and completion
+   - Summary logging of rows read, filtered, and written
+
+6. Follows all the specified rules:
+   - No `print()` statements (uses `structlog`)
+   - Proper async/await isn't needed here since this is a local file operation (not network I/O)
+   - Uses Pydantic for data models
+   - Includes type hints
+   - Includes docstrings for all public functions
+   - Uses `structlog` exclusively for logging
+
+The tool can be used like:
+```bash
+python csv_filter.py data.csv output.csv --column name --value "Alice"
+python csv_filter.py data.csv --column status --value "active"
+```

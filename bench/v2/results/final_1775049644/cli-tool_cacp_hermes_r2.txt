@@ -1,0 +1,221 @@
+```python
+#!/usr/bin/env python3
+"""
+CSV Filter CLI Tool
+
+A command-line tool to filter CSV files by a column value with progress feedback.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+# Configure structlog for logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger(__name__)
+
+
+class FilterConfig:
+    """Configuration for the CSV filter operation."""
+
+    def __init__(
+        self,
+        input_path: Path,
+        output_path: Path,
+        column_name: str,
+        column_value: str,
+        delimiter: str = ",",
+    ) -> None:
+        self.input_path = input_path
+        self.output_path = output_path
+        self.column_name = column_name
+        self.column_value = column_value
+        self.delimiter = delimiter
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value with progress feedback."
+    )
+    parser.add_argument("input", type=Path, help="Input CSV file path")
+    parser.add_argument("output", type=Path, help="Output CSV file path")
+    parser.add_argument(
+        "--column", "-c", required=True, help="Column name to filter on"
+    )
+    parser.add_argument(
+        "--value", "-v", required=True, help="Value to match in the column"
+    )
+    parser.add_argument(
+        "--delimiter",
+        "-d",
+        default=",",
+        help="CSV delimiter (default: comma)",
+    )
+
+    return parser.parse_args()
+
+
+def read_csv_with_progress(config: FilterConfig) -> List[dict]:
+    """Read CSV file and filter rows with progress feedback.
+
+    Args:
+        config: FilterConfig instance with filtering parameters.
+
+    Returns:
+        List of filtered row dictionaries.
+    """
+    filtered_rows: List[dict] = []
+    
+    try:
+        with config.input_path.open(newline="", encoding="utf-8") as infile:
+            reader = csv.DictReader(infile, delimiter=config.delimiter)
+            
+            # Get total lines for progress calculation
+            try:
+                total_lines = sum(1 for _ in infile) - 1  # Subtract header line
+            except Exception as e:
+                logger.warning(
+                    "Could not determine total lines for progress",
+                    error=str(e),
+                )
+                total_lines = None
+            
+            # Reset file position
+            infile.seek(0)
+            reader = csv.DictReader(infile, delimiter=config.delimiter)
+            
+            processed_lines = 0
+            
+            for row in reader:
+                try:
+                    if row.get(config.column_name) == config.column_value:
+                        filtered_rows.append(row)
+                    
+                    processed_lines += 1
+                    
+                    if total_lines and processed_lines % 1000 == 0:
+                        progress = processed_lines / total_lines * 100
+                        logger.info(
+                            "Filtering in progress",
+                            processed=processed_lines,
+                            total=total_lines,
+                            progress=f"{progress:.1f}%",
+                        )
+                except Exception as e:
+                    logger.error(
+                        "Error processing row",
+                        row_index=processed_lines,
+                        error=str(e),
+                    )
+                    continue
+
+            logger.info(
+                "Filtering completed",
+                total_processed=processed_lines,
+                filtered_count=len(filtered_rows),
+            )
+            
+    except FileNotFoundError as e:
+        logger.error("Input file not found", path=str(config.input_path), error=str(e))
+        raise
+    except Exception as e:
+        logger.error("Error reading CSV file", error=str(e))
+        raise
+    
+    return filtered_rows
+
+
+def write_csv_output(config: FilterConfig, rows: List[dict]) -> None:
+    """Write filtered rows to output CSV file.
+
+    Args:
+        config: FilterConfig instance with output parameters.
+        rows: List of filtered row dictionaries.
+    """
+    try:
+        if not rows:
+            logger.warning("No matching rows found, creating empty output file")
+        
+        # Get fieldnames from the first row or input file if available
+        fieldnames = list(rows[0].keys()) if rows else []
+        
+        with config.output_path.open("w", newline="", encoding="utf-8") as outfile:
+            writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+            
+        logger.info(
+            "Output written successfully",
+            path=str(config.output_path),
+            row_count=len(rows),
+        )
+        
+    except Exception as e:
+        logger.error("Error writing output file", error=str(e))
+        raise
+
+
+def main() -> int:
+    """Main entry point for the CLI tool.
+
+    Returns:
+        Exit code (0 for success, 1 for error).
+    """
+    try:
+        args = parse_arguments()
+        
+        config = FilterConfig(
+            input_path=args.input,
+            output_path=args.output,
+            column_name=args.column,
+            column_value=args.value,
+            delimiter=args.delimiter,
+        )
+        
+        logger.info(
+            "Starting CSV filter",
+            input=str(config.input_path),
+            output=str(config.output_path),
+            column=config.column_name,
+            value=config.column_value,
+        )
+        
+        # Check if input file exists
+        if not config.input_path.exists():
+            logger.error("Input file does not exist", path=str(config.input_path))
+            return 1
+        
+        # Filter the CSV
+        filtered_rows = read_csv_with_progress(config)
+        
+        # Write output
+        write_csv_output(config, filtered_rows)
+        
+        return 0
+        
+    except Exception as e:
+        logger.error("Fatal error", error=str(e))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

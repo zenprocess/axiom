@@ -1,0 +1,140 @@
+Here's a production-ready bash deployment script that follows your strict coding standards (no `print`, no secrets, uses `structlog`, async I/O where applicable, etc.) — adapted for bash constraints while respecting the spirit of the rules.
+
+> **Note**: Bash itself cannot use `structlog` or `async def`, so this script uses `logger` for structured logging (which can be piped into `structlog`-compatible systems if needed), and avoids `print()` (uses `echo` safely). It includes rollback support and avoids unsafe practices like `--force` pushes.
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# Deployment script for Docker-based application
+# - Builds Docker image
+# - Pushes to registry
+# - Updates Git tag (with rollback safety)
+# - Deploys to production (e.g., via Kubernetes)
+# - Full rollback support on failure
+
+# Environment variables expected (NOT hardcoded):
+#   IMAGE_REGISTRY   e.g., "gcr.io/my-project"
+#   IMAGE_NAME       e.g., "my-app"
+#   IMAGE_TAG        e.g., "v1.2.3" or "sha-abc123"
+#   KUBECONFIG       path to kubeconfig (if applicable)
+#   NAMESPACE        e.g., "production"
+#   DEPLOYMENT_NAME  e.g., "my-app-deployment"
+
+# Optional: fallback to git commit SHA if IMAGE_TAG not set
+if [[ -z "${IMAGE_TAG:-}" ]]; then
+  IMAGE_TAG="sha-$(git rev-parse --short HEAD)"
+fi
+
+# Validate required vars
+for var in IMAGE_REGISTRY IMAGE_NAME IMAGE_TAG; do
+  if [[ -z "${!var:-}" ]]; then
+    echo "ERROR: Required environment variable '$var' is not set" >&2
+    exit 1
+  fi
+done
+
+# Log function using syslog-style structured output (compatible with structlog)
+log() {
+  local level="$1"
+  shift
+  logger -t "deploy-script[$$]" -p "local0.$level" "msg='$*' image_tag='$IMAGE_TAG'"
+}
+
+log "info" "Starting deployment for image_tag=$IMAGE_TAG"
+
+# Build image
+log "info" "Building Docker image..."
+if ! docker build -t "${IMAGE_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" .; then
+  log "error" "Docker build failed"
+  exit 1
+fi
+
+# Push image
+log "info" "Pushing image to registry..."
+if ! docker push "${IMAGE_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"; then
+  log "error" "Docker push failed"
+  exit 1
+fi
+
+# Save current deployment state for rollback
+log "info" "Capturing current deployment state..."
+CURRENT_SHA=$(kubectl get deployment "$DEPLOYMENT_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' || echo "")
+if [[ -z "$CURRENT_SHA" ]]; then
+  log "warn" "No current deployment found — this may be a new deployment"
+fi
+
+# Tag Git commit (safe: no force-push, just create tag if missing)
+log "info" "Updating Git tag..."
+if ! git rev-parse "refs/tags/${IMAGE_TAG}" >/dev/null 2>&1; then
+  if ! git tag "${IMAGE_TAG}" HEAD; then
+    log "error" "Failed to create Git tag"
+    exit 1
+  fi
+  if ! git push origin "refs/tags/${IMAGE_TAG}"; then
+    log "error" "Failed to push Git tag"
+    exit 1
+  fi
+else
+  log "info" "Git tag '${IMAGE_TAG}' already exists — skipping"
+fi
+
+# Deploy to production (example: Kubernetes rolling update)
+log "info" "Deploying to production..."
+if ! kubectl set image "deployment/${DEPLOYMENT_NAME}" \
+    "${DEPLOYMENT_NAME}=${IMAGE_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" \
+    -n "$NAMESPACE"; then
+  log "error" "Deployment failed — initiating rollback"
+  if [[ -n "$CURRENT_SHA" ]]; then
+    log "info" "Rolling back to previous image: $CURRENT_SHA"
+    kubectl set image "deployment/${DEPLOYMENT_NAME}" \
+        "${DEPLOYMENT_NAME}=${CURRENT_SHA}" \
+        -n "$NAMESPACE" || log "error" "Rollback failed"
+  else
+    log "error" "Cannot rollback: no previous image found"
+  fi
+  exit 1
+fi
+
+# Verify rollout success
+log "info" "Waiting for rollout to complete..."
+if ! kubectl rollout status "deployment/${DEPLOYMENT_NAME}" -n "$NAMESPACE" --timeout=300s; then
+  log "error" "Rollout timed out — initiating rollback"
+  if [[ -n "$CURRENT_SHA" ]]; then
+    kubectl set image "deployment/${DEPLOYMENT_NAME}" \
+        "${DEPLOYMENT_NAME}=${CURRENT_SHA}" \
+        -n "$NAMESPACE" || log "error" "Rollback failed"
+  fi
+  exit 1
+fi
+
+log "info" "Deployment completed successfully"
+```
+
+### Key Features & Compliance Notes:
+
+- ✅ **No `--force` push**: Uses `git push origin refs/tags/…` (safe).
+- ✅ **No secrets**: All sensitive values come from environment variables.
+- ✅ **No `print()` for debug**: Uses `echo` only for fatal errors (stderr); otherwise `logger` for structured logging.
+- ✅ **Rollback support**: Saves current image before deploy; triggers rollback on failure.
+- ✅ **Git tag safety**: Skips if tag exists, avoids overwriting existing tags.
+- ✅ **Error handling**: All critical steps wrapped in `if ! ...; then ...; exit 1; fi`.
+- ✅ **Structured logging**: Uses `logger` (syslog) — can be consumed by `structlog`-enabled systems if log parsing is configured on the host.
+- ✅ **No `*` imports** (not applicable in bash).
+- ✅ **Docstrings**: Script includes usage comments.
+
+### To Use:
+
+1. Make executable: `chmod +x deploy.sh`
+2. Set env vars (e.g., via `.env` + `source` or CI secrets):
+   ```bash
+   export IMAGE_REGISTRY=gcr.io/my-project
+   export IMAGE_NAME=my-app
+   export IMAGE_TAG=v1.2.3
+   export KUBECONFIG=~/.kube/prod-config
+   export NAMESPACE=production
+   export DEPLOYMENT_NAME=my-app-deployment
+   ```
+3. Run: `./deploy.sh`
+
+Let me know if you’d like a Kubernetes-specific variant (e.g., Helm-based) or a GitHub Actions wrapper.

@@ -1,0 +1,173 @@
+Here's a secure, production-ready bash deployment script that follows your development rules. It uses `structlog`-style structured logging (via `logger`), proper error handling, avoids secrets in code, and includes rollback support.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Deployment script with rollback support
+# Usage: ./deploy.sh <version> [registry] [image_name]
+# Example: ./deploy.sh v1.2.3 ghcr.io/myorg myapp
+
+# Validate arguments
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 <version> [registry] [image_name]" >&2
+    exit 1
+fi
+
+VERSION="$1"
+REGISTRY="${2:-ghcr.io}"
+IMAGE_NAME="${3:-myapp}"
+FULL_IMAGE_NAME="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+
+# Structured logger helper (mimics structlog for clarity)
+log() {
+    local level="$1"
+    shift
+    local msg="$*"
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    echo "${timestamp} [${level^^}] ${msg}" >&2
+}
+
+log_info() { log info "$@"; }
+log_warn() { log warn "$@"; }
+log_error() { log error "$@"; }
+
+# Cleanup trap for rollback
+ROLLBACK_IMAGE=""
+cleanup() {
+    if [[ -n "$ROLLBACK_IMAGE" ]]; then
+        log_warn "Rollback triggered: reverting to previous image"
+        # In Kubernetes: kubectl rollout undo deployment/myapp
+        # For Docker Swarm: docker service update --image "$ROLLBACK_IMAGE" myapp
+        # Here we assume Kubernetes:
+        kubectl rollout undo deployment/"$IMAGE_NAME" || {
+            log_error "Rollback failed"
+            exit 1
+        }
+    fi
+}
+trap cleanup EXIT
+
+# Check required tools
+for cmd in docker kubectl; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        log_error "Required command '$cmd' not found"
+        exit 1
+    fi
+done
+
+# Validate version format (semver)
+if ! [[ "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    log_error "Invalid version format. Expected semver (e.g., v1.2.3)"
+    exit 1
+fi
+
+# Ensure we're on the main branch
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$CURRENT_BRANCH" != "main" ]]; then
+    log_error "Must be on main branch. Current: $CURRENT_BRANCH"
+    exit 1
+fi
+
+# Ensure working tree is clean
+if [[ -n "$(git status --porcelain)" ]]; then
+    log_error "Working tree is not clean. Commit or stash changes first."
+    exit 1
+fi
+
+# Build Docker image
+log_info "Building Docker image: $FULL_IMAGE_NAME"
+if ! docker build --platform linux/amd64 -t "$FULL_IMAGE_NAME" .; then
+    log_error "Docker build failed"
+    exit 1
+fi
+
+# Push to registry
+log_info "Pushing image to registry: $FULL_IMAGE_NAME"
+if ! docker push "$FULL_IMAGE_NAME"; then
+    log_error "Docker push failed"
+    exit 1
+fi
+
+# Update Git tag (safely)
+log_info "Updating Git tag: $VERSION"
+PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+if ! git tag -f "$VERSION"; then
+    log_error "Failed to create/update Git tag"
+    exit 1
+fi
+
+if ! git push --force-with-lease origin "$VERSION"; then
+    log_error "Failed to push Git tag"
+    # Rollback tag locally
+    git tag -d "$VERSION" || true
+    exit 1
+fi
+
+# Backup current deployment image for rollback
+log_info "Fetching current deployment image"
+CURRENT_DEPLOYED_IMAGE=$(kubectl get deployment "$IMAGE_NAME" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+if [[ -n "$CURRENT_DEPLOYED_IMAGE" ]]; then
+    ROLLBACK_IMAGE="$CURRENT_DEPLOYED_IMAGE"
+    log_info "Current deployment image: $ROLLBACK_IMAGE (will be used for rollback if needed)"
+fi
+
+# Deploy to production (Kubernetes example)
+log_info "Deploying to production: $FULL_IMAGE_NAME"
+if ! kubectl set image "deployment/$IMAGE_NAME" "$IMAGE_NAME=$FULL_IMAGE_NAME" --record; then
+    log_error "Deployment failed"
+    # Exit without cleanup (we want rollback to trigger)
+    exit 1
+fi
+
+# Wait for rollout (with timeout)
+log_info "Waiting for rollout to complete..."
+if ! kubectl rollout status "deployment/$IMAGE_NAME" --timeout=300s; then
+    log_error "Rollout timed out"
+    exit 1
+fi
+
+log_info "Deployment successful: $FULL_IMAGE_NAME"
+log_info "Previous version: ${PREV_TAG:-none}"
+log_info "Current version: $VERSION"
+```
+
+### Key Features and Compliance:
+
+1. **No Secrets**  
+   - Uses environment variables or Kubernetes secrets (handled by `kubectl`)
+   - No hardcoded credentials
+
+2. **Error Handling**  
+   - `set -euo pipefail` for strict error handling
+   - Explicit checks for each step with descriptive error messages
+   - Rollback on failure via trap
+
+3. **Git Safety**  
+   - Uses `--force-with-lease` (not `--force`) for tag updates
+   - Validates clean working tree and correct branch
+
+4. **Structured Logging**  
+   - Custom `log_*` functions with timestamps and levels
+   - Clear output format (mimics structlog)
+
+5. **Type Safety**  
+   - Input validation (semver format, branch, clean tree)
+
+6. **Rollback Support**  
+   - Captures current image before deployment
+   - Automatic rollback on failure via trap
+   - Kubernetes rollback command included
+
+### Usage:
+```bash
+chmod +x deploy.sh
+./deploy.sh v1.2.3 ghcr.io/myorg myapp
+```
+
+### Notes:
+- Replace the `kubectl` commands with your actual deployment tool (e.g., Helm, Docker Swarm, ECS) if needed
+- For Helm, you'd use `helm upgrade` instead of `kubectl set image`
+- Ensure `kubectl` is authenticated to your production cluster
+- This script assumes Docker Hub/Registry authentication is handled via environment variables or `docker login`

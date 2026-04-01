@@ -1,0 +1,203 @@
+```python
+#!/usr/bin/env python3
+"""
+A CLI tool to filter CSV rows by a column value with progress indication.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import structlog
+from pydantic import BaseModel, ValidationError
+
+# Configure structlog for structured logging
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging_level="INFO"),
+    processors=[
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.dev.ConsoleRenderer(),
+    ],
+)
+
+logger = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for CSV filtering operation."""
+    input_file: Path
+    output_file: Optional[Path] = None
+    column_name: str
+    column_value: str
+
+
+def parse_arguments() -> FilterConfig:
+    """Parse command line arguments into FilterConfig."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value with progress indication."
+    )
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Path to input CSV file"
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=Path,
+        help="Path to output CSV file (default: stdout)"
+    )
+    parser.add_argument(
+        "--column", "-c",
+        required=True,
+        help="Column name to filter on"
+    )
+    parser.add_argument(
+        "--value", "-v",
+        required=True,
+        help="Value to match in the specified column"
+    )
+
+    try:
+        args = parser.parse_args()
+        return FilterConfig(
+            input_file=args.input_file,
+            output_file=args.output,
+            column_name=args.column,
+            column_value=args.value
+        )
+    except SystemExit:
+        sys.exit(1)
+
+
+def read_csv_with_progress(input_path: Path) -> Tuple[List[dict], List[str]]:
+    """
+    Read CSV file and return rows with progress tracking.
+    
+    Args:
+        input_path: Path to the input CSV file
+        
+    Returns:
+        Tuple of (rows, fieldnames)
+    """
+    try:
+        with open(input_path, 'r', newline='', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            fieldnames = reader.fieldnames or []
+            
+            # Count total rows for progress
+            rows = list(reader)
+            total_rows = len(rows)
+            
+            logger.info("Reading CSV", path=str(input_path), total_rows=total_rows)
+            
+            # Process rows with progress
+            for i, row in enumerate(rows):
+                if (i + 1) % 1000 == 0 or i == total_rows - 1:
+                    logger.info("Progress", processed=i + 1, total=total_rows, 
+                               percentage=((i + 1) / total_rows * 100) if total_rows > 0 else 100)
+            
+            return rows, list(fieldnames)
+    
+    except FileNotFoundError:
+        logger.error("Input file not found", path=str(input_path))
+        raise
+    except csv.Error as e:
+        logger.error("CSV parsing error", error=str(e))
+        raise
+    except UnicodeDecodeError as e:
+        logger.error("Encoding error", error=str(e))
+        raise
+
+
+def filter_rows(rows: List[dict], column: str, value: str) -> List[dict]:
+    """
+    Filter rows by matching column value.
+    
+    Args:
+        rows: List of row dictionaries
+        column: Column name to filter on
+        value: Value to match
+        
+    Returns:
+        List of filtered rows
+    """
+    filtered = [row for row in rows if row.get(column, "") == value]
+    logger.info("Filtering completed", total_rows=len(rows), 
+               filtered_rows=len(filtered), column=column, value=value)
+    return filtered
+
+
+def write_csv_output(
+    rows: List[dict], 
+    fieldnames: List[str], 
+    output_path: Optional[Path] = None
+) -> None:
+    """
+    Write filtered rows to output.
+    
+    Args:
+        rows: List of filtered row dictionaries
+        fieldnames: List of column names
+        output_path: Optional path for output file (None for stdout)
+    """
+    try:
+        if output_path:
+            with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            logger.info("Output written", path=str(output_path), rows=len(rows))
+        else:
+            # Write to stdout
+            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+            logger.info("Output written to stdout", rows=len(rows))
+    except IOError as e:
+        logger.error("Output write error", error=str(e))
+        raise
+
+
+def main() -> int:
+    """
+    Main entry point for the CLI tool.
+    
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    try:
+        config = parse_arguments()
+        
+        # Validate input file
+        if not config.input_file.exists():
+            logger.error("Input file does not exist", path=str(config.input_file))
+            return 1
+            
+        # Read and process CSV
+        rows, fieldnames = read_csv_with_progress(config.input_file)
+        
+        # Filter rows
+        filtered_rows = filter_rows(rows, config.column_name, config.column_value)
+        
+        # Write output
+        write_csv_output(filtered_rows, fieldnames, config.output_file)
+        
+        return 0
+        
+    except (FileNotFoundError, csv.Error, UnicodeDecodeError, IOError) as e:
+        logger.error("Processing failed", error=str(e))
+        return 1
+    except ValidationError as e:
+        logger.error("Argument validation failed", error=str(e))
+        return 1
+    except Exception as e:
+        logger.error("Unexpected error", error=str(e))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

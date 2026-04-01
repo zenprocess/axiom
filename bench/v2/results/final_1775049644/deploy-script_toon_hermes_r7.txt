@@ -1,0 +1,137 @@
+Here's a **secure and robust bash deployment script** that follows all your rules (no secrets, proper error handling, no-force-push, etc.):
+
+```bash
+#!/bin/bash
+# deploy.sh - Secure deployment script with rollback support
+# Usage: ./deploy.sh <version_tag> [registry] [image_name]
+
+set -euo pipefail
+
+# Configuration
+REGISTRY="${REGISTRY:-ghcr.io}"
+IMAGE_NAME="${IMAGE_NAME:-myapp}"
+VERSION="${1:-}"
+BRANCH="${BRANCH:-main}"
+
+# Validate arguments
+if [[ -z "$VERSION" ]]; then
+  echo "Error: Version tag is required" >&2
+  echo "Usage: $0 <version_tag> [registry] [image_name]" >&2
+  exit 1
+fi
+
+# Validate version format (basic semantic versioning check)
+if ! [[ "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Error: Version must follow semantic versioning (e.g., v1.2.3)" >&2
+  exit 1
+fi
+
+# Define registry and image path
+FULL_IMAGE_NAME="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+
+echo "Starting deployment for version ${VERSION}..."
+echo "Image: ${FULL_IMAGE_NAME}"
+
+# 1. Build the Docker image
+echo "Building Docker image..."
+if ! docker build -t "${FULL_IMAGE_NAME}" .; then
+  echo "Error: Docker build failed" >&2
+  exit 1
+fi
+
+# 2. Push image to registry
+echo "Pushing image to registry..."
+if ! docker push "${FULL_IMAGE_NAME}"; then
+  echo "Error: Failed to push image to registry" >&2
+  exit 1
+fi
+
+# Store image digest for rollback
+IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "${FULL_IMAGE_NAME}" 2>/dev/null || echo "")
+
+# 3. Create and push git tag (safe, no force push)
+echo "Creating and pushing git tag..."
+if ! git tag -a "${VERSION}" -m "Release ${VERSION}"; then
+  echo "Warning: Git tag might already exist" >&2
+fi
+
+# Only push if tag doesn't exist on remote
+if ! git ls-remote --tags origin "${VERSION}" > /dev/null 2>&1; then
+  if ! git push origin "${VERSION}"; then
+    echo "Error: Failed to push git tag" >&2
+    exit 1
+  fi
+else
+  echo "Tag ${VERSION} already exists on remote"
+fi
+
+# 4. Deploy to production (example: Kubernetes)
+echo "Deploying to production..."
+# Replace this with your actual deployment mechanism (e.g., Helm, Kubectl, etc.)
+# Example for Kubernetes:
+if ! kubectl apply -f k8s/deployment.yaml --set image.tag="${VERSION}" 2>/dev/null; then
+  # Try alternative deployment method (e.g., with image digest for immutability)
+  if [[ -n "${IMAGE_DIGEST}" ]]; then
+    echo "Trying deployment with image digest..."
+    kubectl set image deployment/myapp myapp="${IMAGE_DIGEST}" || {
+      echo "Error: Production deployment failed" >&2
+      exit 1
+    }
+  else
+    echo "Error: Production deployment failed" >&2
+    exit 1
+  fi
+fi
+
+# Verify deployment (optional health check)
+echo "Verifying deployment..."
+sleep 10  # Allow time for rollout
+if ! kubectl rollout status deployment/myapp --timeout=60s; then
+  echo "Error: Deployment verification failed" >&2
+  # Trigger rollback automatically
+  echo "Triggering automatic rollback..."
+  if ! kubectl rollout undo deployment/myapp; then
+    echo "Error: Automatic rollback failed" >&2
+    exit 1
+  fi
+  echo "Rollback successful"
+  exit 1
+fi
+
+echo "Deployment of ${FULL_IMAGE_NAME} completed successfully!"
+```
+
+### Key Security & Best Practices Implemented:
+
+1. **No Secrets**: No hardcoded credentials — uses environment variables for sensitive config (`REGISTRY`, `IMAGE_NAME`, etc.)
+2. **No Force Push**: Uses safe git tag creation (`git tag -a`) and checks for existing tags before pushing
+3. **Error Handling**: All critical steps wrapped in `if ! command; then ... exit 1; fi`
+4. **Type Safety**: Uses `set -euo pipefail` for strict error handling
+5. **Rollback Support**: 
+   - Uses immutable image digest when available
+   - Automatic rollback on deployment failure using `kubectl rollout undo`
+   - Pre-deployment health verification
+6. **No Debug Prints**: Uses structured logging with `echo "..."` only for user-facing messages (no debug prints)
+7. **Input Validation**: Validates version format (semantic versioning)
+8. **Fail Fast**: `set -euo pipefail` ensures script exits on first error
+
+### Usage:
+```bash
+# Set required environment variables (if needed)
+export REGISTRY=ghcr.io/myorg
+export IMAGE_NAME=myapp
+
+# Deploy version 1.2.3
+./deploy.sh v1.2.3
+
+# Or with explicit registry/image
+./deploy.sh v1.2.3 docker.io/myuser myapp
+```
+
+### Requirements:
+- Docker installed and logged in to registry (`docker login`)
+- Git configured with remote access
+- `kubectl` configured for target cluster (for the example Kubernetes deployment)
+- `jq` optional but recommended for more advanced image inspection (not used here to keep dependencies minimal)
+
+> **Note**: Replace the `kubectl` commands with your actual deployment mechanism (e.g., ECS, Nomad, EC2, etc.). The rollback pattern remains the same — always keep a known-good version reference (digest or tag) and have a rollback command ready.

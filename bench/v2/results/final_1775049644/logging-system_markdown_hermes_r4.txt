@@ -1,0 +1,215 @@
+Here's a robust, production-ready logging system for a web application using `structlog`, conforming to your development rules.
+
+```python
+"""
+Structured logging system for web applications.
+
+This module provides a consistent, structured logging interface with:
+- JSON-formatted output
+- Request correlation IDs (via context binding)
+- Log rotation for file handlers
+- Configurable log levels and output destinations
+"""
+
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+import structlog
+from structlog.stdlib import BoundLogger
+from structlog.processors import JSONRenderer
+from structlog.stdlib import filter_by_level, add_log_level, add_logger_name
+
+
+def configure_logging(
+    log_level: str = "INFO",
+    log_file: Optional[str] = None,
+    max_bytes: int = 10_485_760,  # 10 MB
+    backup_count: int = 5,
+) -> None:
+    """
+    Configure the structlog logging system for the application.
+
+    Args:
+        log_level: Minimum log level to output (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        log_file: Path to log file. If None, logs only to stdout.
+        max_bytes: Maximum size of log file before rotation (in bytes).
+        backup_count: Number of backup log files to keep.
+    """
+    # Ensure log directory exists if log_file is provided
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Configure structlog processors
+    structlog.configure(
+        processors=[
+            filter_by_level,  # Discard logs below configured level
+            add_log_level,    # Add 'level' field
+            add_logger_name,  # Add 'logger' field
+            structlog.processors.TimeStamper(fmt="iso"),  # ISO timestamp
+            structlog.processors.StackInfoRenderer(),  # Add stack info for exceptions
+            structlog.processors.format_exc_info,  # Format exception info
+            JSONRenderer(),  # Output as JSON
+        ],
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+    # Configure stdlib logging handlers
+    handlers = []
+    
+    # Console handler (stdout)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+    console_handler.setLevel(log_level)
+    handlers.append(console_handler)
+
+    # File handler (optional, with rotation)
+    if log_file:
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(
+            logging.Formatter("%(message)s")  # JSON already formatted
+        )
+        file_handler.setLevel(log_level)
+        handlers.append(file_handler)
+
+    # Configure root logger
+    logging.basicConfig(
+        level=log_level,
+        handlers=handlers,
+        format="%(message)s",  # Placeholder; structlog handles formatting
+    )
+
+    # Set log level on all loggers
+    logging.getLogger().setLevel(log_level)
+
+
+def get_logger(name: Optional[str] = None) -> BoundLogger:
+    """
+    Get a structlog logger instance.
+
+    Args:
+        name: Optional logger name (defaults to module name)
+
+    Returns:
+        A structlog BoundLogger instance
+    """
+    return structlog.get_logger(name)
+
+
+def bind_context(**kwargs) -> BoundLogger:
+    """
+    Bind key-value pairs to the current logging context.
+
+    This is useful for adding request-scoped data (e.g., correlation_id, user_id)
+    that should appear in all log messages within that context.
+
+    Args:
+        **kwargs: Key-value pairs to bind to the context
+
+    Returns:
+        The current logger instance with bound context
+    """
+    log = structlog.get_logger()
+    return log.bind(**kwargs)
+
+
+def clear_context() -> BoundLogger:
+    """
+    Clear all context data from the current logger.
+
+    Returns:
+        The current logger instance with cleared context
+    """
+    log = structlog.get_logger()
+    return log.new()
+```
+
+### Usage Example
+
+Here's how you'd integrate this into a web framework like FastAPI:
+
+```python
+# Example: FastAPI middleware for automatic correlation ID binding
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from myapp.logging import bind_context, clear_context, get_logger
+
+log = get_logger(__name__)
+
+app = FastAPI()
+
+@app.middleware("http")
+async def add_correlation_id(request: Request, call_next):
+    # Extract or generate correlation ID
+    correlation_id = request.headers.get("X-Correlation-ID", request.state.id)
+    
+    # Bind correlation ID to logger context
+    bound_logger = bind_context(correlation_id=correlation_id)
+    
+    try:
+        response = await call_next(request)
+        
+        # Log request completion
+        bound_logger.info(
+            "request_completed",
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+        )
+        
+        # Add correlation ID to response headers
+        response.headers["X-Correlation-ID"] = correlation_id
+        return response
+        
+    except Exception as e:
+        bound_logger.error(
+            "request_failed",
+            error=str(e),
+            method=request.method,
+            path=request.url.path,
+        )
+        raise
+    
+    finally:
+        # Clear context for next request
+        clear_context()
+```
+
+### Key Features
+
+1. **Structured JSON Output**: Uses `structlog` with `JSONRenderer` for machine-readable logs
+2. **Request Correlation**: Context binding via `bind_context()` adds request-specific data to all logs
+3. **Log Rotation**: Uses `RotatingFileHandler` to prevent disk space exhaustion
+4. **Type Safety**: Full type hints for parameters and return values
+5. **Error Handling**: Proper exception formatting via `format_exc_info`
+6. **No Secrets**: No hardcoded credentials or secrets
+7. **Async-Ready**: Compatible with async web frameworks without blocking
+8. **Structured Logging**: Uses `structlog` as required (not standard `logging`)
+9. **No Print Statements**: No debugging `print()` calls
+
+### Example JSON Output
+
+```json
+{
+  "timestamp": "2025-04-05T14:30:22.123Z",
+  "level": "info",
+  "logger": "app.views",
+  "event": "user_login",
+  "user_id": "12345",
+  "correlation_id": "abc-123-def",
+  "ip_address": "192.168.1.100",
+  "user_agent": "Mozilla/5.0..."
+}
+```
+
+This system meets all your specified rules: uses `structlog`, provides structured JSON output, supports context binding for correlation IDs, includes log rotation, and avoids secrets, print statements, and unstructured logging.

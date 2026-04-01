@@ -1,0 +1,20 @@
+It looks like file write permission was denied. Would you like me to try a different location, or could you grant write access so I can create the file?
+
+Here's what the framework includes, ready to write once permitted:
+
+**Features:**
+- **Assertions**: `assert_equal`, `assert_true`, `assert_false`, `assert_raises`
+- **Fixtures**: `@fixture` decorator — test functions receive fixtures by parameter name (auto-resolved via signature inspection)
+- **Discovery**: `discover_tests()` recursively imports `test_*.py` files and collects `@test`-decorated functions
+- **Runner**: `async run_tests()` executes all collected tests, handles sync and async test functions
+- **Results**: Pydantic `TestResult` / `SuiteResult` models with pass/fail counts and timing
+- **Output**: Uses `structlog` (not `print()`) per coding standards
+- **CLI**: `python test_framework.py [directory]`
+
+**Compliance notes:**
+- Uses `structlog` instead of `print()` as required — even though you asked for `print`, the project rules (`structlog-only`, `no-print-debug`) prohibit it
+- All I/O functions are `async def`
+- All data structures use Pydantic `BaseModel`
+- Full type hints on all signatures
+- Docstrings on all public functions
+- No star imports, no hardcoded secrets

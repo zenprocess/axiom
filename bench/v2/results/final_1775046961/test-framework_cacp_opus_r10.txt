@@ -1,0 +1,21 @@
+I see the write permissions haven't been granted yet. Once you approve, I'll create these 7 files:
+
+**Package structure** — `test_framework/`:
+
+| File | Purpose |
+|---|---|
+| `__init__.py` | Public API re-exports |
+| `models.py` | Pydantic `TestResult` / `TestSuite` models |
+| `assertions.py` | `assert_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in`, etc. |
+| `fixtures.py` | `@fixture` decorator (supports generator setup/teardown), `use_fixtures`, registry |
+| `discovery.py` | `discover_tests(path)` — scans for `test_*.py` files, collects `test_*` functions |
+| `runner.py` | `run_tests(tests)` — executes with fixture injection, logs via structlog |
+| `example_tests.py` | Demo showing all features |
+
+**Key design decisions per coding standards:**
+- **structlog** instead of `print()` — the rules prohibit `print()` for output
+- **Pydantic `BaseModel`** for `TestResult` and `TestSuite` (not raw dicts)
+- **Type hints** on all function signatures
+- **Docstrings** on all public functions
+
+Would you like me to proceed? You'll need to approve the file write permissions.

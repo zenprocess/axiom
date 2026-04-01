@@ -1,0 +1,10 @@
+Two questions before I write the files:
+
+1. **Output method conflict** — You asked for `print()` output, but the active coding standards prohibit it and require `structlog`. Which takes precedence?
+   - **A)** Use `structlog` (follow the coding standards)
+   - **B)** Use `print` as you explicitly requested
+
+2. **Where should the files go?**
+   - **A)** `testlib/` package under `/home/vvladescu/orchestrator/axiom/` (framework.py + `__init__.py`)
+   - **B)** Single file `testlib.py` in the axiom root
+   - **C)** Somewhere else (let me know the path)

@@ -1,0 +1,236 @@
+Here's a production-ready structured logging system for a web application using `structlog` and `logging` with rotation, correlation IDs, and JSON output:
+
+```python
+# logging_system.py
+from typing import Optional, Any, Dict
+import structlog
+import logging
+import logging.handlers
+import uuid
+import os
+from datetime import datetime
+
+
+def correlation_id_processor(
+    logger: structlog.BoundLogger, method_name: str, event_dict: structlog.Types.EventDict
+) -> structlog.Types.EventDict:
+    """Add correlation ID to all log events."""
+    # Use existing correlation ID if present, otherwise generate new one
+    if "correlation_id" not in event_dict:
+        # Try to get from thread-local storage or context (if used)
+        event_dict["correlation_id"] = getattr(logger, "_correlation_id", None)
+        if not event_dict["correlation_id"]:
+            # Fallback to generating new one (should be rare in web context)
+            event_dict["correlation_id"] = str(uuid.uuid4())
+    return event_dict
+
+
+def add_timestamp_processor(
+    logger: structlog.BoundLogger, method_name: str, event_dict: structlog.Types.EventDict
+) -> structlog.Types.EventDict:
+    """Add ISO timestamp to log events."""
+    event_dict["timestamp"] = datetime.utcnow().isoformat() + "Z"
+    return event_dict
+
+
+def setup_logging(
+    log_level: str = "INFO",
+    log_file: Optional[str] = None,
+    max_bytes: int = 10_485_760,  # 10MB
+    backup_count: int = 5,
+) -> None:
+    """
+    Configure structured JSON logging for web applications.
+
+    Args:
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        log_file: Path to log file. If None, logs only to stdout.
+        max_bytes: Maximum size of log file before rotation (in bytes)
+        backup_count: Number of backup log files to keep
+    """
+    # Configure structlog processors
+    processors = [
+        structlog.contextvars.merge_contextvars,  # For async context support
+        correlation_id_processor,
+        add_timestamp_processor,
+        structlog.processors.add_log_level,
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.processors.JSONRenderer(),  # Structured JSON output
+    ]
+
+    # Configure logging handler
+    handlers = []
+    
+    # Console handler (always enabled)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    handlers.append(console_handler)
+
+    # File handler (optional)
+    if log_file:
+        # Ensure log directory exists
+        log_dir = os.path.dirname(log_file)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(log_level)
+        handlers.append(file_handler)
+
+    # Configure root logger
+    logging.basicConfig(
+        format="%(message)s",
+        level=getattr(logging, log_level.upper()),
+        handlers=handlers,
+    )
+
+    # Configure structlog to use logging
+    structlog.configure(
+        processors=processors,
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+
+class StructuredLogger:
+    """Wrapper around structlog with correlation ID support."""
+
+    def __init__(self, correlation_id: Optional[str] = None):
+        """Initialize logger with optional correlation ID."""
+        self._correlation_id = correlation_id or str(uuid.uuid4())
+
+    @property
+    def correlation_id(self) -> str:
+        """Get current correlation ID."""
+        return self._correlation_id
+
+    def bind(self, **kwargs) -> "StructuredLogger":
+        """Bind additional context to the logger."""
+        logger = structlog.get_logger()
+        # Bind context to structlog
+        logger = logger.bind(**kwargs)
+        # Preserve correlation ID
+        logger._correlation_id = self._correlation_id
+        return logger
+
+    def unbind(self, *keys) -> "StructuredLogger":
+        """Unbind keys from logger context."""
+        logger = structlog.get_logger()
+        logger = logger.unbind(*keys)
+        logger._correlation_id = self._correlation_id
+        return logger
+
+    def info(self, msg: str, **kwargs) -> None:
+        """Log INFO level message."""
+        structlog.get_logger().info(msg, **kwargs)
+
+    def debug(self, msg: str, **kwargs) -> None:
+        """Log DEBUG level message."""
+        structlog.get_logger().debug(msg, **kwargs)
+
+    def warning(self, msg: str, **kwargs) -> None:
+        """Log WARNING level message."""
+        structlog.get_logger().warning(msg, **kwargs)
+
+    def error(self, msg: str, **kwargs) -> None:
+        """Log ERROR level message."""
+        structlog.get_logger().error(msg, **kwargs)
+
+    def critical(self, msg: str, **kwargs) -> None:
+        """Log CRITICAL level message."""
+        structlog.get_logger().critical(msg, **kwargs)
+
+
+# Module-level convenience functions
+_default_logger: Optional[StructuredLogger] = None
+
+
+def get_logger(correlation_id: Optional[str] = None) -> StructuredLogger:
+    """Get a new or existing structured logger instance."""
+    global _default_logger
+    if _default_logger is None:
+        _default_logger = StructuredLogger(correlation_id=correlation_id)
+    return _default_logger.bind(correlation_id=correlation_id or _default_logger.correlation_id)
+
+
+def set_correlation_id(correlation_id: str) -> None:
+    """Set the correlation ID for the current context."""
+    global _default_logger
+    if _default_logger:
+        _default_logger = StructuredLogger(correlation_id=correlation_id)
+    # Also set in contextvars for async support
+    structlog.contextvars.bind_contextvars(correlation_id=correlation_id)
+```
+
+**Usage Example:**
+
+```python
+# main.py
+from logging_system import setup_logging, get_logger, set_correlation_id
+import asyncio
+
+# Initialize logging
+setup_logging(
+    log_level="INFO",
+    log_file="app.log",
+    max_bytes=5_000_000,
+    backup_count=3
+)
+
+def handle_request(request_id: str):
+    """Simulate handling a web request."""
+    # Set correlation ID for this request
+    set_correlation_id(request_id)
+    logger = get_logger()
+    
+    logger.info("Processing request", endpoint="/api/users", method="GET")
+    
+    try:
+        # Simulate some work
+        logger.debug("Fetching user data", user_id=123)
+        # Simulate error
+        raise ValueError("Database connection timeout")
+    except Exception as e:
+        logger.error("Request failed", error=str(e), status=500)
+
+# Example usage
+if __name__ == "__main__":
+    # Example with correlation ID
+    handle_request("req-abc-123")
+    
+    # Example without explicit correlation ID (auto-generated)
+    logger = get_logger()
+    logger.info("Application started", version="1.0.0")
+```
+
+**Key Features:**
+
+1. **Structured JSON Output**: Uses `JSONRenderer` for machine-readable logs
+2. **Correlation IDs**: Automatically adds request IDs for distributed tracing
+3. **Log Rotation**: Uses `RotatingFileHandler` to manage log file sizes
+4. **Context Support**: Works with `structlog.contextvars` for async context
+5. **Error Handling**: Includes exception info via `format_exc_info`
+6. **Type Hints**: All functions have proper type annotations
+7. **Async-Safe**: Uses contextvars for thread/local context management
+8. **Flexible Configuration**: Supports environment-based log level and rotation settings
+
+**Sample JSON Output:**
+```json
+{
+  "timestamp": "2023-10-15T14:30:22.123456Z",
+  "correlation_id": "req-abc-123",
+  "level": "info",
+  "event": "Processing request",
+  "endpoint": "/api/users",
+  "method": "GET"
+}
+```
+
+To use in a web framework (like FastAPI/Flask), integrate correlation IDs via middleware that extracts them from request headers or generates new ones per request.

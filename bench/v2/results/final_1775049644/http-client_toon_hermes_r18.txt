@@ -1,0 +1,87 @@
+```python
+"""
+User data fetcher module for retrieving user information from a REST API.
+"""
+
+from typing import Optional
+import httpx
+from pydantic import BaseModel
+
+
+class User(BaseModel):
+    """Pydantic model representing a user."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    address: Optional[dict] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+    company: Optional[dict] = None
+
+
+class UserFetcher:
+    """Class to fetch user data from a REST API."""
+    
+    def __init__(self, base_url: str = "https://api.example.com"):
+        """
+        Initialize the UserFetcher with a base URL.
+        
+        Args:
+            base_url: The base URL for the API (default: "https://api.example.com")
+        """
+        self.base_url = base_url
+        self.client = httpx.AsyncClient()
+
+    async def fetch_user(self, user_id: int) -> User:
+        """
+        Fetch a user by ID from the API.
+        
+        Args:
+            user_id: The ID of the user to fetch
+            
+        Returns:
+            User: A User object containing the user's data
+            
+        Raises:
+            ValueError: If the user is not found (404)
+            RuntimeError: For other API errors or network issues
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        
+        try:
+            response = await self.client.get(url)
+            response.raise_for_status()
+            return User(**response.json())
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise ValueError(f"User with ID {user_id} not found") from exc
+            raise RuntimeError(f"HTTP error occurred: {exc}") from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"Request error occurred: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Unexpected error occurred: {exc}") from exc
+
+    async def close(self):
+        """Close the HTTP client."""
+        await self.client.aclose()
+
+
+async def main():
+    """Main function that fetches user #42."""
+    fetcher = UserFetcher()
+    try:
+        user = await fetcher.fetch_user(42)
+        print(f"User #42: {user}")
+    except ValueError as e:
+        print(f"Error: {e}")
+    except RuntimeError as e:
+        print(f"Runtime error: {e}")
+    finally:
+        await fetcher.close()
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```

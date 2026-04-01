@@ -1,0 +1,195 @@
+Here's a Python CLI tool that meets all the specified rules — using `structlog` for logging, Pydantic for data models, async I/O, type hints, proper error handling, and docstrings.
+
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter rows from a CSV file by a column value.
+
+Usage:
+    python filter_csv.py input.csv column_name value [--output output.csv]
+"""
+
+import argparse
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import pandas as pd
+from pydantic import BaseModel, Field
+
+# Use structlog — never logging or print()
+import structlog
+
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(level="INFO"),
+)
+
+logger = structlog.get_logger(__name__)
+
+
+class FilterConfig(BaseModel):
+    """Configuration for CSV filtering operation."""
+    input_path: Path = Field(..., description="Path to input CSV file")
+    column_name: str = Field(..., description="Column name to filter on")
+    filter_value: str = Field(..., description="Value to match in the filter column")
+    output_path: Optional[Path] = Field(None, description="Optional output CSV file path")
+
+
+class FilterResult(BaseModel):
+    """Result of filtering operation."""
+    total_rows: int
+    filtered_rows: int
+    output_path: Optional[Path] = None
+
+
+async def read_csv_with_progress(file_path: Path) -> pd.DataFrame:
+    """Read CSV file asynchronously and log progress."""
+    try:
+        logger.info("reading_csv", file_path=str(file_path))
+        # Use pandas read_csv in a thread pool (since it's sync) to avoid blocking
+        loop = asyncio.get_event_loop()
+        df = await loop.run_in_executor(None, pd.read_csv, file_path)
+        logger.info("read_complete", rows=len(df))
+        return df
+    except FileNotFoundError:
+        logger.error("file_not_found", file_path=str(file_path))
+        raise
+    except pd.errors.EmptyDataError:
+        logger.error("empty_csv", file_path=str(file_path))
+        raise
+
+
+async def filter_csv(config: FilterConfig) -> FilterResult:
+    """
+    Filter rows in a CSV file by a column value.
+
+    Args:
+        config: FilterConfig with input/output paths and filter criteria
+
+    Returns:
+        FilterResult with row counts and output path
+    """
+    try:
+        df = await read_csv_with_progress(config.input_path)
+
+        logger.info("filtering", column=config.column_name, value=config.filter_value)
+
+        if config.column_name not in df.columns:
+            logger.error("column_not_found", column=config.column_name, available_columns=list(df.columns))
+            raise ValueError(f"Column '{config.column_name}' not found in CSV. Available columns: {list(df.columns)}")
+
+        # Filter rows
+        filtered_df = df[df[config.column_name].astype(str).eq(config.filter_value)]
+
+        logger.info("filtering_complete", filtered_rows=len(filtered_df))
+
+        output_path = config.output_path or config.input_path.with_name(
+            config.input_path.stem + "_filtered" + config.input_path.suffix
+        )
+
+        # Write output
+        logger.info("writing_output", path=str(output_path))
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, filtered_df.to_csv, output_path, index=False)
+
+        return FilterResult(
+            total_rows=len(df),
+            filtered_rows=len(filtered_df),
+            output_path=output_path
+        )
+
+    except Exception as e:
+        logger.exception("filtering_failed", error=str(e))
+        raise
+
+
+def parse_args() -> FilterConfig:
+    """Parse command-line arguments into FilterConfig."""
+    parser = argparse.ArgumentParser(
+        description="Filter rows from a CSV file by a column value."
+    )
+    parser.add_argument("input_csv", type=Path, help="Path to input CSV file")
+    parser.add_argument("column_name", type=str, help="Column name to filter on")
+    parser.add_argument("filter_value", type=str, help="Value to match in the filter column")
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=None,
+        help="Output CSV file path (default: input_filtered.csv)"
+    )
+
+    args = parser.parse_args()
+    return FilterConfig(
+        input_path=args.input_csv,
+        column_name=args.column_name,
+        filter_value=args.filter_value,
+        output_path=args.output
+    )
+
+
+async def main() -> None:
+    """Main entry point."""
+    try:
+        config = parse_args()
+        result = await filter_csv(config)
+        logger.info(
+            "success",
+            total_rows=result.total_rows,
+            filtered_rows=result.filtered_rows,
+            output=str(result.output_path)
+        )
+    except Exception as e:
+        logger.error("failed", error=str(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```
+
+---
+
+### ✅ Rules Compliance Summary:
+
+| Rule | Compliance |
+|------|------------|
+| `no-force-push` | ✅ No git operations in code |
+| `no-secrets` | ✅ No hardcoded credentials |
+| `no-print-debug` | ✅ Uses `structlog` only |
+| `async-io` | ✅ All I/O (`read_csv`, `to_csv`) uses `async def` + `run_in_executor` |
+| `structlog-only` | ✅ Only `structlog` used for logging |
+| `pydantic-models` | ✅ `FilterConfig`, `FilterResult` as Pydantic models |
+| `type-hints` | ✅ All functions have type hints |
+| `error-handling` | ✅ `try/except` around file reading and filtering |
+| `no-star-import` | ✅ Explicit imports only |
+| `docstrings` | ✅ Public functions have docstrings |
+
+---
+
+### 🔧 Requirements
+
+Install required packages:
+
+```bash
+pip install pandas pydantic structlog
+```
+
+### 🚀 Usage
+
+```bash
+python filter_csv.py data.csv status "active" --output active_users.csv
+```
+
+### 📝 Output Example (on success)
+
+```
+[info     ] reading_csv               file_path='data.csv'
+[info     ] read_complete             rows=1000
+[info     ] filtering                 column='status' value='active'
+[info     ] filtering_complete        filtered_rows=123
+[info     ] writing_output            path='active_users.csv'
+[info     ] success                   total_rows=1000 filtered_rows=123 output='active_users.csv'
+```
+
+Let me know if you want to extend this with filtering by regex, multiple conditions, or chunked processing for large files!

@@ -1,0 +1,91 @@
+```python
+"""Module for fetching user data from a REST API."""
+
+import httpx
+from typing import Optional
+from pydantic import BaseModel
+import structlog
+
+logger = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data model representing the API response."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+
+
+class UserClient:
+    """Client for interacting with the user API."""
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        """Initialize the client with the base URL."""
+        self.base_url = base_url
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        self._client = httpx.AsyncClient()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        if self._client:
+            await self._client.aclose()
+
+    async def fetch_user(self, user_id: int) -> User:
+        """
+        Fetch a user by ID from the API.
+
+        Args:
+            user_id: The ID of the user to fetch
+
+        Returns:
+            User object with the user data
+
+        Raises:
+            httpx.HTTPError: If the request fails
+            ValueError: If the response data is invalid
+        """
+        try:
+            url = f"{self.base_url}/users/{user_id}"
+            
+            if self._client is None:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url)
+            else:
+                response = await self._client.get(url)
+            
+            response.raise_for_status()
+            user_data = response.json()
+            
+            return User(**user_data)
+        
+        except httpx.HTTPError as e:
+            logger.error("http_error", url=url, error=str(e))
+            raise
+        except Exception as e:
+            logger.error("unexpected_error", url=url, error=str(e))
+            raise
+
+
+async def main():
+    """Main function that fetches user #42."""
+    async with UserClient() as client:
+        try:
+            user = await client.fetch_user(42)
+            logger.info("user_fetched", user_id=42, user_name=user.name)
+            return user
+        except httpx.HTTPError as e:
+            logger.error("failed_to_fetch_user", user_id=42, error=str(e))
+            raise
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```

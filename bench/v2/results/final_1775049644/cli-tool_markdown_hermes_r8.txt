@@ -1,0 +1,218 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by a column value.
+
+Usage:
+    python csv_filter.py input.csv column_name value [--output output.csv]
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import Optional
+
+import structlog
+from pydantic import BaseModel
+
+log = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for CSV filtering."""
+    input_path: Path
+    column_name: str
+    filter_value: str
+    output_path: Optional[Path] = None
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Filter CSV rows by a column value'
+    )
+    parser.add_argument(
+        'input_file',
+        type=Path,
+        help='Input CSV file path'
+    )
+    parser.add_argument(
+        'column_name',
+        type=str,
+        help='Column name to filter on'
+    )
+    parser.add_argument(
+        'filter_value',
+        type=str,
+        help='Value to match in the specified column'
+    )
+    parser.add_argument(
+        '-o', '--output',
+        type=Path,
+        help='Output file path (default: stdout)'
+    )
+    return parser.parse_args()
+
+
+def read_csv_with_progress(input_path: Path) -> tuple[list[dict], int]:
+    """
+    Read CSV file and return rows with progress tracking.
+    
+    Args:
+        input_path: Path to the input CSV file
+        
+    Returns:
+        Tuple of (rows, total_lines)
+    """
+    rows = []
+    total_lines = 0
+    
+    try:
+        with open(input_path, 'r', newline='', encoding='utf-8') as csvfile:
+            # Count total lines first for progress calculation
+            total_lines = sum(1 for _ in csvfile)
+            csvfile.seek(0)
+            
+            reader = csv.DictReader(csvfile)
+            fieldnames = reader.fieldnames
+            
+            if fieldnames is None:
+                log.error('empty_csv_file', path=str(input_path))
+                raise ValueError(f"CSV file '{input_path}' appears to be empty")
+            
+            if total_lines > 1:
+                log.info('reading_csv', path=str(input_path), total_lines=total_lines)
+            else:
+                log.info('reading_csv_empty', path=str(input_path))
+            
+            for i, row in enumerate(reader, start=1):
+                rows.append(row)
+                if i % 1000 == 0 or i == total_lines - 1:
+                    progress = (i / (total_lines - 1)) * 100 if total_lines > 1 else 100
+                    log.info('reading_progress', 
+                            rows_read=i, 
+                            total_rows=total_lines - 1, 
+                            progress=f"{progress:.1f}%")
+            
+            return rows, total_lines
+            
+    except FileNotFoundError:
+        log.error('file_not_found', path=str(input_path))
+        raise
+    except PermissionError:
+        log.error('permission_denied', path=str(input_path))
+        raise
+    except csv.Error as e:
+        log.error('csv_parse_error', path=str(input_path), error=str(e))
+        raise
+
+
+def filter_rows(rows: list[dict], column_name: str, filter_value: str) -> list[dict]:
+    """
+    Filter rows by column value.
+    
+    Args:
+        rows: List of row dictionaries
+        column_name: Name of the column to filter on
+        filter_value: Value to match
+        
+    Returns:
+        Filtered list of rows
+    """
+    if not rows:
+        log.info('no_rows_to_filter')
+        return []
+    
+    # Check if column exists
+    if column_name not in rows[0]:
+        log.error('column_not_found', 
+                 column=column_name, 
+                 available_columns=list(rows[0].keys()))
+        raise ValueError(f"Column '{column_name}' not found in CSV. Available columns: {list(rows[0].keys())}")
+    
+    filtered = [row for row in rows if row.get(column_name) == filter_value]
+    
+    log.info('filtering_complete', 
+            total_rows=len(rows), 
+            filtered_rows=len(filtered),
+            column=column_name,
+            value=filter_value)
+    
+    return filtered
+
+
+def write_output(rows: list[dict], output_path: Optional[Path], fieldnames: Optional[list[str]] = None) -> None:
+    """
+    Write filtered rows to output.
+    
+    Args:
+        rows: List of row dictionaries to write
+        output_path: Output file path (None for stdout)
+        fieldnames: Column names for the CSV header
+    """
+    if not rows:
+        log.warning('no_results_to_write')
+        return
+    
+    if fieldnames is None and rows:
+        fieldnames = list(rows[0].keys())
+    
+    try:
+        if output_path is None:
+            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+            log.info('output_written', destination='stdout', rows_written=len(rows))
+        else:
+            with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(row)
+            log.info('output_written', destination=str(output_path), rows_written=len(rows))
+            
+    except PermissionError:
+        log.error('permission_denied', path=str(output_path))
+        raise
+    except Exception as e:
+        log.error('write_error', path=str(output_path), error=str(e))
+        raise
+
+
+def main() -> int:
+    """Main entry point for the CLI tool."""
+    try:
+        args = parse_args()
+        
+        # Validate input file exists
+        if not args.input_file.exists():
+            log.error('input_file_not_found', path=str(args.input_file))
+            return 1
+        
+        # Read CSV with progress
+        rows, _ = read_csv_with_progress(args.input_file)
+        
+        # Filter rows
+        filtered_rows = filter_rows(rows, args.column_name, args.filter_value)
+        
+        # Write output
+        write_output(filtered_rows, args.output)
+        
+        return 0
+        
+    except FileNotFoundError as e:
+        log.error('file_operation_failed', error=str(e))
+        return 1
+    except ValueError as e:
+        log.error('validation_error', error=str(e))
+        return 1
+    except Exception as e:
+        log.error('unexpected_error', error=str(e))
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+```

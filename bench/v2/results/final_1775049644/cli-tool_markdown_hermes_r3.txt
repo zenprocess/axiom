@@ -1,0 +1,225 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by a column value.
+
+Usage:
+    python csv_filter.py input.csv column_name value [--delimiter ,]
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import Optional
+
+import structlog
+from pydantic import BaseModel
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.dev.ConsoleRenderer(),
+    ],
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=False,
+)
+
+log = structlog.get_logger()
+
+
+class FilterConfig(BaseModel):
+    """Configuration for CSV filtering operation."""
+    input_file: Path
+    output_file: Optional[Path] = None
+    column_name: str
+    column_value: str
+    delimiter: str = ","
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python csv_filter.py data.csv name "John"          # Filter rows where 'name' equals 'John'
+  python csv_filter.py data.csv status active --out filtered.csv  # Save to file
+  python csv_filter.py data.csv date "2023-01-01" --delimiter ";" # Use semicolon delimiter
+        """,
+    )
+    
+    parser.add_argument("input_file", type=Path, help="Path to input CSV file")
+    parser.add_argument("column_name", type=str, help="Name of the column to filter on")
+    parser.add_argument("column_value", type=str, help="Value to match in the column")
+    parser.add_argument(
+        "--output", "-o",
+        type=Path,
+        default=None,
+        help="Output file path (default: stdout)",
+    )
+    parser.add_argument(
+        "--delimiter", "-d",
+        type=str,
+        default=",",
+        help="CSV delimiter character (default: ,)",
+    )
+    
+    return parser.parse_args()
+
+
+def read_csv_rows(input_path: Path, delimiter: str) -> tuple[list[dict], int]:
+    """
+    Read CSV file and return rows with total count.
+    
+    Args:
+        input_path: Path to the CSV file
+        delimiter: Column delimiter
+        
+    Returns:
+        Tuple of (list of row dicts, total row count)
+        
+    Raises:
+        FileNotFoundError: If the file doesn't exist
+        ValueError: If the file is empty or has no headers
+    """
+    rows = []
+    
+    try:
+        with open(input_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter=delimiter)
+            
+            if reader.fieldnames is None:
+                raise ValueError(f"CSV file {input_path} has no headers")
+                
+            for row in reader:
+                rows.append(row)
+                
+    except FileNotFoundError:
+        log.error("input_file_not_found", path=str(input_path))
+        raise
+    except csv.Error as e:
+        log.error("csv_parse_error", path=str(input_path), error=str(e))
+        raise
+    
+    return rows, len(rows)
+
+
+def filter_rows(rows: list[dict], column_name: str, column_value: str) -> list[dict]:
+    """
+    Filter rows by matching column value.
+    
+    Args:
+        rows: List of row dictionaries
+        column_name: Name of column to filter on
+        column_value: Value to match
+        
+    Returns:
+        List of matching rows
+    """
+    filtered = []
+    
+    for i, row in enumerate(rows):
+        # Check if column exists
+        if column_name not in row:
+            log.warning("column_not_found", column=column_name, row_index=i)
+            continue
+            
+        # Match the value (exact match)
+        if row[column_name] == column_value:
+            filtered.append(row)
+            
+        # Progress output (every 1000 rows)
+        if (i + 1) % 1000 == 0:
+            log.info("progress", processed=i + 1, total=len(rows))
+            
+    return filtered
+
+
+def write_output(rows: list[dict], output_path: Optional[Path]) -> None:
+    """
+    Write filtered rows to output.
+    
+    Args:
+        rows: List of row dictionaries to write
+        output_path: Output file path or None for stdout
+    """
+    if not rows:
+        log.info("no_matching_rows")
+        return
+        
+    # Get fieldnames from first row
+    fieldnames = list(rows[0].keys())
+    
+    if output_path:
+        try:
+            with open(output_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+                
+            log.info("output_written", path=str(output_path), row_count=len(rows))
+        except IOError as e:
+            log.error("output_write_error", path=str(output_path), error=str(e))
+            raise
+    else:
+        # Output to stdout
+        writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+        
+        log.info("output_written", destination="stdout", row_count=len(rows))
+
+
+def main() -> int:
+    """Main entry point."""
+    try:
+        args = parse_args()
+        
+        # Validate input file exists
+        if not args.input_file.exists():
+            log.error("input_file_not_found", path=str(args.input_file))
+            return 1
+            
+        # Check if output directory exists if specified
+        if args.output and not args.output.parent.exists():
+            log.error("output_directory_not_found", path=str(args.output.parent))
+            return 1
+            
+        # Process CSV
+        log.info("starting_filter", input_file=str(args.input_file))
+        
+        # Read all rows
+        rows, total_count = read_csv_rows(args.input_file, args.delimiter)
+        log.info("read_complete", row_count=total_count)
+        
+        # Filter rows
+        filtered = filter_rows(rows, args.column_name, args.column_value)
+        log.info("filter_complete", matched_count=len(filtered))
+        
+        # Write output
+        write_output(filtered, args.output)
+        
+        return 0
+        
+    except FileNotFoundError as e:
+        log.error("file_error", error=str(e))
+        return 1
+    except ValueError as e:
+        log.error("value_error", error=str(e))
+        return 1
+    except KeyboardInterrupt:
+        log.info("operation_cancelled")
+        return 130
+    except Exception as e:
+        log.error("unexpected_error", error=str(e))
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

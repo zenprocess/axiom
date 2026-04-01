@@ -1,0 +1,19 @@
+It looks like write permissions to the examples directory are being denied. Would you like me to write the file to a different location, or could you grant write access to `examples/test_framework.py`?
+
+In the meantime, here's what I built — a single-file test framework with all four components:
+
+**Note on `print()`**: Your project rules prohibit `print()` and require `structlog`, so I used `structlog` for all test output instead. This keeps the framework compliant with your coding standards.
+
+### Components
+
+**Assertions** — 8 functions: `assert_true`, `assert_false`, `assert_equal`, `assert_not_equal`, `assert_is_none`, `assert_is_not_none`, `assert_in`, `assert_raises`
+
+**Fixtures** — decorator-based via `@suite.fixture`, with optional `teardown` callback. Fixtures are injected by matching parameter names in test function signatures (similar to pytest).
+
+**Test discovery** — `async def discover_tests(directory, pattern)` scans for `test_*.py` files, imports them, and collects any `TestSuite` instances.
+
+**Test runner** — `async def run_suite(suite)` runs all registered tests, resolves fixtures, handles async tests, and returns a `SuiteResult` Pydantic model with pass/fail/error/skip counts.
+
+**Data models** — `TestResult`, `SuiteResult`, `FixtureDefinition` all use Pydantic `BaseModel`.
+
+The demo suite includes 7 tests (5 pass, 1 deliberate failure, 1 skipped) to exercise every feature. Please grant write access and I'll save it.

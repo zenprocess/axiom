@@ -1,0 +1,237 @@
+Here's a production-ready logging system for a web application using `structlog`, following all your development rules.
+
+```python
+import os
+import sys
+import logging
+import structlog
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
+from typing import Optional
+from datetime import datetime
+import uuid
+
+# Configure structlog processors and format
+def configure_logging(
+    log_level: str = None,
+    log_dir: str = None,
+    log_file: str = "app.log",
+    max_bytes: int = 10 * 1024 * 1024,  # 10 MB
+    backup_count: int = 5,
+) -> None:
+    """
+    Configure the structured logging system for the web application.
+
+    Args:
+        log_level: Log level string (e.g., "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL").
+                   Defaults to "INFO" or LOG_LEVEL environment variable.
+        log_dir: Directory to store log files. Defaults to "logs" or LOG_DIR environment variable.
+        log_file: Name of the log file. Defaults to "app.log".
+        max_bytes: Maximum size of log file before rotation (in bytes).
+        backup_count: Number of backup files to keep.
+
+    Raises:
+        ValueError: If log level is invalid.
+    """
+    # Get configuration from environment or use defaults
+    level_name = log_level or os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, None)
+    if not isinstance(level, int):
+        raise ValueError(f"Invalid log level: {log_level or os.getenv('LOG_LEVEL')}")
+
+    log_directory = log_dir or os.getenv("LOG_DIR", "logs")
+
+    # Create logs directory if it doesn't exist
+    log_path = Path(log_directory)
+    log_path.mkdir(parents=True, exist_ok=True)
+
+    # Configure structlog processors
+    processors = [
+        structlog.contextvars.merge_contextvars,  # Add context vars (e.g., request_id)
+        structlog.stdlib.add_logger_name,         # Add logger name
+        structlog.stdlib.add_log_level,           # Add log level
+        structlog.processors.TimeStamper(fmt="iso"),  # ISO timestamp
+        structlog.processors.StackInfoRenderer(), # Add stack info for exceptions
+        structlog.processors.format_exc_info,     # Format exception info
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ]
+
+    # Console renderer (for development)
+    console_renderer = structlog.dev.ConsoleRenderer(colors=True)
+
+    # JSON renderer (for production)
+    json_renderer = structlog.processors.JSONRenderer()
+
+    # Create handlers
+    handlers = []
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            processor=console_renderer,
+            foreign_pre_chain=processors,
+        )
+    )
+    handlers.append(console_handler)
+
+    # File handler with rotation
+    if log_directory:
+        file_path = log_path / log_file
+        file_handler = RotatingFileHandler(
+            str(file_path),
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+            delay=True,  # Delay file creation until first log
+        )
+        file_handler.setFormatter(
+            structlog.stdlib.ProcessorFormatter(
+                processor=json_renderer,
+                foreign_pre_chain=processors,
+            )
+        )
+        handlers.append(file_handler)
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # Remove existing handlers to avoid duplicates
+    root_logger.handlers.clear()
+    for handler in handlers:
+        root_logger.addHandler(handler)
+
+    # Configure structlog
+    structlog.configure(
+        processors=processors
+        + [
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+        ],
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+
+# Request correlation ID context
+class RequestContext:
+    """Context manager for request-specific logging context."""
+
+    def __init__(self, request_id: Optional[str] = None):
+        """Initialize with optional request ID."""
+        self.request_id = request_id or str(uuid.uuid4())
+
+    def __enter__(self):
+        """Set the request_id in structlog context."""
+        structlog.contextvars.bind_contextvars(request_id=self.request_id)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Clear the request_id from structlog context."""
+        structlog.contextvars.unbind_contextvars("request_id")
+
+
+# Get logger instance
+def get_logger(name: str = __name__) -> structlog.BoundLogger:
+    """
+    Get a configured logger instance.
+
+    Args:
+        name: Logger name (typically __name__ from calling module).
+
+    Returns:
+        A structlog BoundLogger instance.
+    """
+    return structlog.get_logger(name)
+
+
+# Example usage
+if __name__ == "__main__":
+    # Configure logging
+    configure_logging()
+
+    # Get logger
+    log = get_logger(__name__)
+
+    # Simulate a request
+    with RequestContext("req-123"):
+        log.info("request_started", method="GET", path="/api/users")
+
+        try:
+            # Simulate some work
+            log.debug("database_query", query="SELECT * FROM users")
+            users = ["alice", "bob"]
+            log.info("request_completed", status=200, users_count=len(users))
+        except Exception as e:
+            log.exception("request_failed", error=str(e))
+```
+
+## Features Implemented
+
+1. **Structured JSON Output**: Uses `structlog` with JSON renderer for production-ready logs
+2. **Log Levels**: Supports DEBUG, INFO, WARNING, ERROR, CRITICAL
+3. **Request Correlation IDs**: `RequestContext` class manages request-specific context
+4. **Log Rotation**: Uses `RotatingFileHandler` to prevent log files from growing unbounded
+5. **Type Hints**: Full type annotations for parameters and return values
+6. **Error Handling**: Comprehensive exception logging with stack traces
+7. **Environment Configuration**: Supports `LOG_LEVEL` and `LOG_DIR` environment variables
+8. **Context Variables**: Uses `structlog.contextvars` for async-safe request context
+9. **Production-Ready**: JSON format for log aggregation systems (ELK, Splunk, etc.)
+10. **Development-Friendly**: Colored console output for local development
+
+## Usage Examples
+
+```python
+# In your web application framework (e.g., FastAPI, Flask, Django middleware)
+from your_logging_module import configure_logging, RequestContext, get_logger
+
+# Initialize once at startup
+configure_logging()
+
+# In your request handler
+log = get_logger(__name__)
+
+@app.get("/api/users/{user_id}")
+async def get_user(user_id: int):
+    with RequestContext() as ctx:  # ctx.request_id is available
+        log.info("user_request_started", user_id=user_id)
+        # ... your logic
+        log.info("user_request_completed", status=200)
+```
+
+## Environment Variables
+
+- `LOG_LEVEL`: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+- `LOG_DIR`: Directory for log files (defaults to "logs")
+
+## Integration with Web Frameworks
+
+For FastAPI/Starlette, you can create middleware:
+
+```python
+from fastapi import Request, BackgroundTasks
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        
+        with RequestContext(request_id):
+            log = get_logger(__name__)
+            log.info("request_started", 
+                    method=request.method, 
+                    path=request.url.path,
+                    request_id=request_id)
+            
+            response = await call_next(request)
+            
+            log.info("request_completed",
+                    status_code=response.status_code,
+                    request_id=request_id)
+            
+            response.headers["X-Request-ID"] = request_id
+            return response
+```
+
+This logging system is production-ready, follows all your development rules, and provides structured, searchable logs with correlation IDs for distributed tracing.

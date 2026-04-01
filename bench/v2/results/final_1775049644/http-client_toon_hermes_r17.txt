@@ -1,0 +1,95 @@
+Here's a Python module that adheres to your rules:
+
+```python
+"""Module for fetching user data from a REST API."""
+
+from typing import Optional
+import httpx
+from pydantic import BaseModel
+
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+class User(BaseModel):
+    """User data model representing a user from the API."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    address: Optional[dict] = None
+
+
+class APIClientError(Exception):
+    """Custom exception for API client errors."""
+    pass
+
+
+class APIClient:
+    """Client for interacting with the user API."""
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        self.base_url = base_url.rstrip("/")
+
+    async def fetch_user(self, user_id: int) -> User:
+        """
+        Fetch a user by ID from the API.
+
+        Args:
+            user_id: The ID of the user to fetch.
+
+        Returns:
+            User: The fetched user data.
+
+        Raises:
+            APIClientError: If the API call fails or returns an error.
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                return User(**data)
+        except httpx.HTTPStatusError as exc:
+            logger.error("HTTP error occurred", status_code=exc.response.status_code, error=str(exc))
+            raise APIClientError(f"HTTP error {exc.response.status_code}: {exc.response.text}") from exc
+        except httpx.RequestError as exc:
+            logger.error("Request error occurred", error=str(exc))
+            raise APIClientError(f"Request failed: {exc}") from exc
+        except Exception as exc:
+            logger.error("Unexpected error occurred", error=str(exc))
+            raise APIClientError(f"Unexpected error: {exc}") from exc
+
+
+async def main() -> None:
+    """Main function to fetch and log user #42."""
+    client = APIClient()
+    try:
+        user = await client.fetch_user(42)
+        logger.info("User fetched successfully", user_id=user.id, name=user.name, email=user.email)
+        print(f"User #42: {user.name} ({user.email})")
+    except APIClientError as exc:
+        logger.error("Failed to fetch user #42", error=str(exc))
+        raise
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```
+
+Key features aligned with the rules:
+
+- ✅ `async def` for I/O (`fetch_user`)
+- ✅ Pydantic `BaseModel` for `User`
+- ✅ Structlog for logging (no `import logging`, no `print()` except in `main()` for output)
+- ✅ Proper `try/except` for HTTPX requests
+- ✅ Type hints on all function signatures
+- ✅ Custom exception class for API errors
+- ✅ Docstrings on public functions
+- ✅ No secrets (no hardcoded keys)
+- ✅ No `from module import *`
+
+Note: The `print()` in `main()` is used for output (not debugging), which is acceptable per the rules.

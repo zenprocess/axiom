@@ -1,0 +1,209 @@
+```bash
+#!/bin/bash
+
+# Deployment script for Docker-based service with rollback support
+# Complies with strict Python development standards (no print, no secrets, etc.)
+
+set -euo pipefail
+
+# Required environment variables (must be set by CI/CD or caller)
+# - IMAGE_NAME: Docker image name (e.g., myregistry/myapp)
+# - IMAGE_TAG: Docker image tag (e.g., v1.2.3)
+# - DEPLOYMENT_SERVICE: Kubernetes service name or Docker Compose service name
+# - NAMESPACE: Kubernetes namespace (if applicable)
+# - REGISTRY_URL: Docker registry URL
+# - GIT_TAG_PREFIX: Prefix for git tags (default: "deploy-")
+
+: "${IMAGE_NAME:?Environment variable IMAGE_NAME is required}"
+: "${IMAGE_TAG:?Environment variable IMAGE_TAG is required}"
+: "${DEPLOYMENT_SERVICE:?Environment variable DEPLOYMENT_SERVICE is required}"
+: "${REGISTRY_URL:?Environment variable REGISTRY_URL is required}"
+: "${NAMESPACE:-default}"
+: "${GIT_TAG_PREFIX:-deploy-}"
+
+# Derived variables
+FULL_IMAGE_NAME="${REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_TAG}"
+PREVIOUS_TAG="${GIT_TAG_PREFIX}$(date +%Y%m%d%H%M%S)-previous"
+CURRENT_TAG="${GIT_TAG_PREFIX}${IMAGE_TAG}"
+
+# Import structlog-compatible logging (simulated via functions for bash)
+log_info() {
+    echo "[INFO] $(date -Iseconds) $*" >&2
+}
+
+log_error() {
+    echo "[ERROR] $(date -Iseconds) $*" >&2
+}
+
+log_warn() {
+    echo "[WARN] $(date -Iseconds) $*" >&2
+}
+
+# Function: Build Docker image
+build_image() {
+    log_info "Building Docker image ${FULL_IMAGE_NAME}..."
+    if ! docker build -t "${FULL_IMAGE_NAME}" .; then
+        log_error "Failed to build Docker image"
+        return 1
+    fi
+    log_info "Successfully built image"
+}
+
+# Function: Push image to registry
+push_image() {
+    log_info "Pushing image to registry..."
+    if ! docker push "${FULL_IMAGE_NAME}"; then
+        log_error "Failed to push image to registry"
+        return 1
+    fi
+    log_info "Successfully pushed image"
+}
+
+# Function: Update git tag
+update_git_tag() {
+    log_info "Updating git tag ${CURRENT_TAG}..."
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+    
+    # Create tag pointing to current HEAD
+    if ! git tag -f "${CURRENT_TAG}" HEAD; then
+        log_error "Failed to create/update git tag"
+        return 1
+    fi
+    
+    # Push tag to remote (safe, no force push)
+    if ! git push origin "${CURRENT_TAG}"; then
+        log_error "Failed to push git tag"
+        git tag -d "${CURRENT_TAG}" || true
+        return 1
+    fi
+    
+    # Store current commit for rollback
+    if ! git tag -f "${PREVIOUS_TAG}" HEAD; then
+        log_warn "Failed to create previous tag for rollback"
+    else
+        git push origin "${PREVIOUS_TAG}" || true
+    fi
+    
+    log_info "Successfully updated git tag"
+}
+
+# Function: Deploy to production
+deploy_production() {
+    log_info "Deploying ${DEPLOYMENT_SERVICE} to production..."
+    
+    # Determine deployment method based on environment
+    if command -v kubectl &>/dev/null; then
+        # Kubernetes deployment
+        if ! kubectl set image "deployment/${DEPLOYMENT_SERVICE}" \
+            "${DEPLOYMENT_SERVICE}"="${FULL_IMAGE_NAME}" \
+            --namespace="${NAMESPACE}" \
+            --record; then
+            log_error "Failed to update Kubernetes deployment"
+            return 1
+        fi
+        
+        # Wait for rollout to complete
+        if ! kubectl rollout status "deployment/${DEPLOYMENT_SERVICE}" \
+            --namespace="${NAMESPACE}" \
+            --timeout=300s; then
+            log_error "Kubernetes rollout failed or timed out"
+            return 1
+        fi
+    elif command -v docker-compose &>/dev/null; then
+        # Docker Compose deployment
+        if ! docker-compose pull "${DEPLOYMENT_SERVICE}"; then
+            log_error "Failed to pull new image with docker-compose"
+            return 1
+        fi
+        if ! docker-compose up -d "${DEPLOYMENT_SERVICE}"; then
+            log_error "Failed to start service with docker-compose"
+            return 1
+        fi
+    else
+        log_error "No deployment tool found (kubectl or docker-compose)"
+        return 1
+    fi
+    
+    log_info "Successfully deployed to production"
+}
+
+# Function: Rollback deployment
+rollback() {
+    log_info "Rolling back to previous deployment..."
+    
+    # Determine rollback target
+    local rollback_tag="${PREVIOUS_TAG}"
+    if git tag --list | grep -q "^${rollback_tag}$"; then
+        local rollback_commit
+        rollback_commit=$(git rev-list -n 1 "${rollback_tag}")
+        log_info "Rolling back to commit ${rollback_commit} (${rollback_tag})"
+    else
+        log_error "No previous deployment tag found (${rollback_tag})"
+        return 1
+    fi
+    
+    # Rebuild and push image from rollback commit
+    if ! git checkout "${rollback_commit}"; then
+        log_error "Failed to checkout rollback commit"
+        return 1
+    fi
+    
+    local rollback_image_tag="${IMAGE_TAG}-rollback-${rollback_commit:0:7}"
+    local rollback_full_image="${REGISTRY_URL}/${IMAGE_NAME}:${rollback_image_tag}"
+    
+    if ! docker build -t "${rollback_full_image}" .; then
+        log_error "Failed to rebuild image for rollback"
+        return 1
+    fi
+    
+    if ! docker push "${rollback_full_image}"; then
+        log_error "Failed to push rollback image"
+        return 1
+    fi
+    
+    # Deploy rollback image
+    if command -v kubectl &>/dev/null; then
+        kubectl set image "deployment/${DEPLOYMENT_SERVICE}" \
+            "${DEPLOYMENT_SERVICE}"="${rollback_full_image}" \
+            --namespace="${NAMESPACE}" \
+            --record || return 1
+        kubectl rollout status "deployment/${DEPLOYMENT_SERVICE}" \
+            --namespace="${NAMESPACE}" \
+            --timeout=300s || return 1
+    elif command -v docker-compose &>/dev/null; then
+        docker-compose pull "${DEPLOYMENT_SERVICE}" || return 1
+        docker-compose up -d "${DEPLOYMENT_SERVICE}" || return 1
+    fi
+    
+    log_info "Successfully rolled back to ${rollback_tag}"
+}
+
+# Function: Cleanup on failure
+cleanup() {
+    local exit_code=$?
+    
+    if [[ $exit_code -ne 0 ]]; then
+        log_error "Deployment failed with exit code ${exit_code}"
+        rollback
+    fi
+    
+    exit $exit_code
+}
+
+# Main deployment flow
+main() {
+    log_info "Starting deployment of ${IMAGE_NAME}:${IMAGE_TAG}"
+    
+    trap cleanup EXIT
+    
+    build_image
+    push_image
+    update_git_tag
+    deploy_production
+    
+    log_info "Deployment completed successfully"
+}
+
+main "$@"
+```

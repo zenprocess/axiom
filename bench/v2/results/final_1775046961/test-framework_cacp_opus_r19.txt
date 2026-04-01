@@ -1,0 +1,13 @@
+It seems write permissions aren't being granted. Would you like me to try a different location, or could you approve the write to `test_framework/framework.py`?
+
+The framework I've prepared includes:
+
+- **Result models** — `TestResult` and `SuiteResult` as Pydantic `BaseModel`s
+- **Assertions** — `assert_equal`, `assert_true`, `assert_false`, `assert_raises`, `assert_in`, etc.
+- **Fixtures** — `@fixture` decorator with support for both simple return values and generator-based setup/teardown
+- **Test discovery** — `@test` decorator for explicit registration + `discover_tests()` for `test_`-prefixed auto-discovery
+- **`@skip` decorator** — with optional reason
+- **`run_tests()` runner** — times each test, catches failures vs errors, runs fixture teardown, and returns a `SuiteResult`
+- **structlog output** instead of `print()` per the project's coding standards
+
+Note: I used `structlog` rather than `print()` as your project rules require. The structured log events (`test_passed`, `test_failed`, `suite_complete`) are more useful in practice anyway — they're machine-parseable and include key-value context.

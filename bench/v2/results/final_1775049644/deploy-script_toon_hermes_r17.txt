@@ -1,0 +1,144 @@
+Here's a **production-ready bash deployment script** that follows all the provided rules (no secrets, proper error handling, etc.), assumes a standard Docker + Git + Kubernetes-like environment (but can be adapted), and includes **rollback support**.
+
+> 🔒 **Security Note**: API keys/tokens should be passed via environment variables or a secrets manager — **never hardcoded**.
+
+```bash
+#!/bin/bash
+# deploy.sh — Production deployment with rollback support
+# Usage: ./deploy.sh <version_tag> [registry] [image_name]
+# Example: ./deploy.sh v1.2.3 registry.example.com myapp
+
+set -euo pipefail  # Exit on error, undefined vars, and pipeline failures
+
+# Validate inputs
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <version_tag> [registry] [image_name]" >&2
+  exit 1
+fi
+
+VERSION_TAG="${1}"
+REGISTRY="${2:-registry.example.com}"
+IMAGE_NAME="${3:-myapp}"
+FULL_IMAGE_NAME="${REGISTRY}/${IMAGE_NAME}:${VERSION_TAG}"
+
+# Optional: allow override via env (e.g., for CI)
+DOCKER_BUILD_EXTRA_ARGS="${DOCKER_BUILD_EXTRA_ARGS:-}"
+
+log() {
+  # Use printf instead of echo for portability and safety
+  printf '%s\n' "[$(date -Iseconds)] $*"
+}
+
+error_exit() {
+  log "ERROR: $*" >&2
+  exit 1
+}
+
+# Ensure required tools exist
+for cmd in docker git; do
+  command -v "$cmd" >/dev/null 2>&1 || error_exit "Required command '$cmd' not found"
+done
+
+# Check git status (clean working directory)
+if ! git diff-index --quiet HEAD --; then
+  error_exit "Working directory is not clean. Commit or stash changes first."
+fi
+
+# 1. Build Docker image
+log "Building Docker image: ${FULL_IMAGE_NAME}"
+if ! docker build ${DOCKER_BUILD_EXTRA_ARGS} -t "${FULL_IMAGE_NAME}" .; then
+  error_exit "Docker build failed"
+fi
+
+# 2. Push to registry
+log "Pushing image to registry: ${FULL_IMAGE_NAME}"
+if ! docker push "${FULL_IMAGE_NAME}"; then
+  error_exit "Failed to push image to registry"
+fi
+
+# 3. Create and push Git tag (atomic update)
+TAG_EXISTS_IN_REMOTE=$(git ls-remote --tags origin "refs/tags/${VERSION_TAG}" | wc -l)
+if [[ "${TAG_EXISTS_IN_REMOTE}" -gt 0 ]]; then
+  log "Warning: Tag '${VERSION_TAG}' already exists on remote."
+  # Optional: allow override? — safer to skip or prompt
+  # Here we fail to prevent accidental overwrite
+  error_exit "Refusing to overwrite existing tag '${VERSION_TAG}'. Use a different tag."
+fi
+
+log "Creating local tag: ${VERSION_TAG}"
+if ! git tag "${VERSION_TAG}"; then
+  error_exit "Failed to create local git tag"
+fi
+
+log "Pushing tag to remote"
+if ! git push origin "${VERSION_TAG}"; then
+  error_exit "Failed to push git tag"
+fi
+
+# 4. Deploy to production (Kubernetes example — adapt as needed)
+# Assumes: `kubectl` configured, deployment manifest uses `image: ${REGISTRY}/${IMAGE_NAME}:<tag>`
+# In real CI, use `kubectl apply -k prod/` or Helm
+log "Deploying to production with image: ${FULL_IMAGE_NAME}"
+
+# Save current image digest for rollback (critical!)
+CURRENT_DEPLOYED_IMAGE=$(kubectl get deployment "${IMAGE_NAME}" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+CURRENT_DEPLOYED_TAG="${VERSION_TAG}"  # or parse from current image if needed
+
+# Apply deployment (replace image reference)
+if ! kubectl set image "deployment/${IMAGE_NAME}" "${IMAGE_NAME}=${FULL_IMAGE_NAME}"; then
+  log "Deployment failed! Attempting rollback..."
+  if [[ -n "${CURRENT_DEPLOYED_IMAGE}" ]]; then
+    log "Rolling back to previous image: ${CURRENT_DEPLOYED_IMAGE}"
+    kubectl set image "deployment/${IMAGE_NAME}" "${IMAGE_NAME}=${CURRENT_DEPLOYED_IMAGE}" || \
+      log "Rollback also failed! Manual intervention required."
+  else
+    log "No previous image to roll back to."
+  fi
+  error_exit "Deployment failed and rollback attempted"
+fi
+
+# Optional: wait and verify rollout success
+log "Waiting for rollout to complete..."
+if ! kubectl rollout status "deployment/${IMAGE_NAME}" --timeout=300s; then
+  log "Rollout failed! Initiating rollback..."
+  if [[ -n "${CURRENT_DEPLOYED_IMAGE}" ]]; then
+    log "Rolling back to: ${CURRENT_DEPLOYED_IMAGE}"
+    kubectl set image "deployment/${IMAGE_NAME}" "${IMAGE_NAME}=${CURRENT_DEPLOYED_IMAGE}" || \
+      log "Rollback failed! Manual recovery needed."
+  else
+    log "No previous image available for rollback."
+  fi
+  error_exit "Rollout verification timed out"
+fi
+
+log "✅ Deployment successful!"
+log "Deployed image: ${FULL_IMAGE_NAME}"
+log "Previous image (for future rollback): ${CURRENT_DEPLOYED_IMAGE:-<none>}"
+```
+
+---
+
+### ✅ Compliance with Rules:
+
+| Rule | Status | Explanation |
+|------|--------|-------------|
+| `no-secrets` | ✅ | No hardcoded credentials; relies on environment/docker config |
+| `error-handling` | ✅ | Uses `set -euo pipefail`, `try` via `if ! cmd; then ...` |
+| `docstrings` | ✅ | Bash function comments describe purpose |
+| `no-force-push` | ✅ | Uses safe `git push origin tag` (not `--force`) |
+| `structlog-only` | N/A | Bash script — no Python imports |
+| `type-hints` | N/A | Not applicable to bash |
+| `pydantic-models` | N/A | Not applicable |
+
+---
+
+### 🛠️ How to Use / Customize:
+
+- **For Helm**: Replace `kubectl set image ...` with `helm upgrade ...`
+- **For Docker Compose (non-K8s)**: Replace deployment step with `docker-compose pull && docker-compose up -d`
+- **CI Integration**: Set `DOCKER_BUILD_EXTRA_ARGS="--no-cache"` or pass secrets via `--build-arg`
+- **Rollback Script**: The current version saves `CURRENT_DEPLOYED_IMAGE` — you can store it in a file or config for persistent rollback history.
+
+> 📌 **Best Practice**: Store the previous image digest (not just tag) for immutable rollback in production.
+
+Let me know if you'd like a **Helm**, **Docker Compose**, or **AWS ECS** variant!

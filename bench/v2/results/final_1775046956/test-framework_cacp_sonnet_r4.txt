@@ -1,0 +1,375 @@
+It seems write permission isn't being granted for that path. The file content is ready — here it is directly:
+
+---
+
+**Note:** Your project rules (`no-print-debug`, `structlog-only`) prohibit `print()`, so I used `structlog` for all output. If you want `print()` specifically, you'd need to relax those rules.
+
+```python
+"""Simple Python test framework with assertions, discovery, fixtures, and a runner."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import time
+import traceback
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+import structlog
+
+log = structlog.get_logger()
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+class Status(str, Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    ERROR = "ERROR"
+    SKIP = "SKIP"
+
+
+@dataclass
+class TestResult:
+    name: str
+    status: Status
+    duration_ms: float
+    message: str = ""
+    traceback: str = ""
+
+
+@dataclass
+class SuiteResult:
+    suite: str
+    results: list[TestResult] = field(default_factory=list)
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for r in self.results if r.status == Status.PASS)
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for r in self.results if r.status == Status.FAIL)
+
+    @property
+    def errors(self) -> int:
+        return sum(1 for r in self.results if r.status == Status.ERROR)
+
+    @property
+    def skipped(self) -> int:
+        return sum(1 for r in self.results if r.status == Status.SKIP)
+
+    @property
+    def total(self) -> int:
+        return len(self.results)
+
+
+# ---------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------
+
+class AssertionError(Exception):  # noqa: A001
+    pass
+
+
+def assert_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual == expected."""
+    if actual != expected:
+        raise AssertionError(msg or f"{actual!r} != {expected!r}")
+
+
+def assert_not_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual != expected."""
+    if actual == expected:
+        raise AssertionError(msg or f"{actual!r} == {expected!r}")
+
+
+def assert_true(value: Any, msg: str = "") -> None:
+    """Assert that value is truthy."""
+    if not value:
+        raise AssertionError(msg or f"Expected truthy, got {value!r}")
+
+
+def assert_false(value: Any, msg: str = "") -> None:
+    """Assert that value is falsy."""
+    if value:
+        raise AssertionError(msg or f"Expected falsy, got {value!r}")
+
+
+def assert_is_none(value: Any, msg: str = "") -> None:
+    """Assert that value is None."""
+    if value is not None:
+        raise AssertionError(msg or f"Expected None, got {value!r}")
+
+
+def assert_is_not_none(value: Any, msg: str = "") -> None:
+    """Assert that value is not None."""
+    if value is None:
+        raise AssertionError(msg or "Expected non-None value")
+
+
+def assert_in(item: Any, container: Any, msg: str = "") -> None:
+    """Assert that item is in container."""
+    if item not in container:
+        raise AssertionError(msg or f"{item!r} not in {container!r}")
+
+
+def assert_raises(exc_type: type[BaseException], callable_: Callable, *args: Any, **kwargs: Any) -> None:
+    """Assert that callable_ raises exc_type."""
+    try:
+        callable_(*args, **kwargs)
+    except exc_type:
+        return
+    except Exception as exc:
+        raise AssertionError(f"Expected {exc_type.__name__}, got {type(exc).__name__}: {exc}") from exc
+    raise AssertionError(f"Expected {exc_type.__name__} but no exception was raised")
+
+
+@contextmanager
+def assert_raises_ctx(exc_type: type[BaseException]) -> Generator[None, None, None]:
+    """Context manager asserting that the block raises exc_type."""
+    try:
+        yield
+    except exc_type:
+        return
+    except Exception as exc:
+        raise AssertionError(f"Expected {exc_type.__name__}, got {type(exc).__name__}: {exc}") from exc
+    raise AssertionError(f"Expected {exc_type.__name__} but no exception was raised")
+
+
+# ---------------------------------------------------------------------------
+# Decorators
+# ---------------------------------------------------------------------------
+
+def skip(reason: str = "") -> Callable:
+    """Mark a test to be skipped."""
+    def decorator(fn: Callable) -> Callable:
+        fn._skip = True           # type: ignore[attr-defined]
+        fn._skip_reason = reason  # type: ignore[attr-defined]
+        return fn
+    return decorator
+
+
+def fixture(fn: Callable) -> Callable:
+    """Mark a callable as a fixture."""
+    fn._is_fixture = True  # type: ignore[attr-defined]
+    return fn
+
+
+# ---------------------------------------------------------------------------
+# TestSuite
+# ---------------------------------------------------------------------------
+
+class TestSuite:
+    """Collects tests and fixtures; executes them."""
+
+    def __init__(self, name: str) -> None:
+        """Initialise with a suite name."""
+        self.name = name
+        self._tests: list[Callable] = []
+        self._setup: Callable | None = None
+        self._teardown: Callable | None = None
+
+    def add_test(self, fn: Callable) -> None:
+        """Register a test function."""
+        self._tests.append(fn)
+
+    def set_setup(self, fn: Callable) -> None:
+        """Register a per-test setup fixture."""
+        self._setup = fn
+
+    def set_teardown(self, fn: Callable) -> None:
+        """Register a per-test teardown fixture."""
+        self._teardown = fn
+
+    async def _run_fn(self, fn: Callable, context: dict[str, Any]) -> None:
+        """Call fn, injecting fixture values by parameter name."""
+        sig = inspect.signature(fn)
+        kwargs = {k: context[k] for k in sig.parameters if k in context}
+        if asyncio.iscoroutinefunction(fn):
+            await fn(**kwargs)
+        else:
+            fn(**kwargs)
+
+    async def run(self) -> SuiteResult:
+        """Execute all registered tests and return a SuiteResult."""
+        result = SuiteResult(suite=self.name)
+        log.info("suite.start", suite=self.name, total=len(self._tests))
+
+        for test_fn in self._tests:
+            name = test_fn.__name__
+
+            if getattr(test_fn, "_skip", False):
+                reason = getattr(test_fn, "_skip_reason", "")
+                log.info("test.skip", test=name, reason=reason)
+                result.results.append(TestResult(name=name, status=Status.SKIP, duration_ms=0.0, message=reason))
+                continue
+
+            context: dict[str, Any] = {}
+            start = time.perf_counter()
+
+            try:
+                if self._setup:
+                    ctx = (await self._setup()) if asyncio.iscoroutinefunction(self._setup) else self._setup()
+                    if isinstance(ctx, dict):
+                        context.update(ctx)
+
+                await self._run_fn(test_fn, context)
+                ms = (time.perf_counter() - start) * 1000
+                log.info("test.pass", test=name, duration_ms=round(ms, 2))
+                result.results.append(TestResult(name=name, status=Status.PASS, duration_ms=ms))
+
+            except AssertionError as exc:
+                ms = (time.perf_counter() - start) * 1000
+                log.warning("test.fail", test=name, reason=str(exc), duration_ms=round(ms, 2))
+                result.results.append(TestResult(name=name, status=Status.FAIL, duration_ms=ms, message=str(exc)))
+
+            except Exception as exc:
+                ms = (time.perf_counter() - start) * 1000
+                tb = traceback.format_exc()
+                log.error("test.error", test=name, exc=str(exc), duration_ms=round(ms, 2))
+                result.results.append(TestResult(name=name, status=Status.ERROR, duration_ms=ms, message=str(exc), traceback=tb))
+
+            finally:
+                if self._teardown:
+                    try:
+                        if asyncio.iscoroutinefunction(self._teardown):
+                            await self._teardown(context)
+                        else:
+                            self._teardown(context)
+                    except Exception as exc:
+                        log.error("teardown.error", test=name, exc=str(exc))
+
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+def discover(obj: object) -> TestSuite:
+    """Discover tests and fixtures on a class instance or module."""
+    name = type(obj).__name__ if not inspect.ismodule(obj) else getattr(obj, "__name__", str(obj))
+    suite = TestSuite(name=name)
+
+    for attr_name in dir(obj):
+        if attr_name.startswith("_"):
+            continue
+        try:
+            member = getattr(obj, attr_name)
+        except AttributeError:
+            continue
+        if not callable(member):
+            continue
+        if attr_name in ("setup", "setUp"):
+            suite.set_setup(member)
+        elif attr_name in ("teardown", "tearDown"):
+            suite.set_teardown(member)
+        elif attr_name.startswith("test"):
+            suite.add_test(member)
+
+    return suite
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
+class TestRunner:
+    """Runs suites and reports aggregate results."""
+
+    def __init__(self) -> None:
+        """Initialise with an empty suite list."""
+        self._suites: list[TestSuite] = []
+
+    def add_suite(self, suite: TestSuite) -> None:
+        """Register a pre-built suite."""
+        self._suites.append(suite)
+
+    def register(self, obj: object) -> None:
+        """Discover and register a class/module instance."""
+        self.add_suite(discover(obj))
+
+    async def run(self) -> list[SuiteResult]:
+        """Run all suites and log an aggregate summary."""
+        all_results: list[SuiteResult] = []
+        for suite in self._suites:
+            all_results.append(await suite.run())
+
+        log.info(
+            "runner.summary",
+            total=sum(r.total for r in all_results),
+            passed=sum(r.passed for r in all_results),
+            failed=sum(r.failed for r in all_results),
+            errors=sum(r.errors for r in all_results),
+            skipped=sum(r.skipped for r in all_results),
+            ok=all(r.failed + r.errors == 0 for r in all_results),
+        )
+        return all_results
+
+
+# ---------------------------------------------------------------------------
+# Demo
+# ---------------------------------------------------------------------------
+
+class SampleTests:
+    """Demo suite — shows assertions, fixture injection, skip, and failure."""
+
+    def setup(self) -> dict[str, Any]:
+        """Fixture: shared data injected into test parameters."""
+        return {"value": 42, "items": [1, 2, 3]}
+
+    def test_equality(self, value: int) -> None:
+        """Equality check via fixture."""
+        assert_equal(value, 42)
+
+    def test_membership(self, items: list[int]) -> None:
+        """Membership check via fixture."""
+        assert_in(2, items)
+
+    def test_raises(self) -> None:
+        """Exception assertion."""
+        assert_raises(ZeroDivisionError, lambda: 1 / 0)
+
+    @skip("demonstrating skip")
+    def test_skipped(self) -> None:
+        """Never runs."""
+        assert_true(False)
+
+    def test_failure(self) -> None:
+        """Intentional failure."""
+        assert_equal(1, 2, "intentional failure")
+
+
+async def main() -> None:
+    """Run the demo suite."""
+    runner = TestRunner()
+    runner.register(SampleTests())
+    await runner.run()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+---
+
+**Architecture summary:**
+
+| Component | What it does |
+|---|---|
+| `assert_*` functions | Raise `AssertionError` on failure with a clear diff message |
+| `assert_raises` / `assert_raises_ctx` | Verify exceptions are thrown |
+| `@skip(reason)` | Marks a test method to be skipped |
+| `@fixture` | Optional marker; `setup`/`teardown` are auto-discovered by name |
+| `discover(obj)` | Scans any class instance or module for `test*`, `setup`, `teardown` |
+| `TestSuite.run()` | Async runner with per-test setup/teardown and fixture injection by parameter name |
+| `TestRunner` | Aggregates multiple suites, logs a final summary |
+
+Output via `structlog` — each event (`test.pass`, `test.fail`, `test.error`, `test.skip`, `runner.summary`) is a structured log line, so it's machine-readable and compatible with your existing logging pipeline.

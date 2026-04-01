@@ -1,0 +1,101 @@
+```python
+"""
+User data fetcher module for retrieving user information from a REST API.
+"""
+
+import asyncio
+from typing import Optional
+
+import httpx
+import structlog
+from pydantic import BaseModel
+
+# Initialize structlog for structured logging
+logger = structlog.get_logger()
+
+
+class User(BaseModel):
+    """Pydantic model representing a user response from the API."""
+    id: int
+    name: str
+    email: str
+    username: Optional[str] = None
+    address: Optional[dict] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+    company: Optional[dict] = None
+
+
+class UserFetcher:
+    """Class to fetch user data from the REST API."""
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        """
+        Initialize the UserFetcher with the base API URL.
+
+        Args:
+            base_url: The base URL for the API endpoint.
+        """
+        self.base_url = base_url.rstrip("/")
+
+    async def fetch_user(self, user_id: int) -> User:
+        """
+        Fetch user data from the API by user ID.
+
+        Args:
+            user_id: The ID of the user to fetch.
+
+        Returns:
+            User: A Pydantic model containing the user data.
+
+        Raises:
+            ValueError: If the user_id is not positive.
+            httpx.HTTPError: If the HTTP request fails.
+            ValueError: If the response data is invalid.
+        """
+        if user_id <= 0:
+            raise ValueError("User ID must be a positive integer")
+
+        url = f"{self.base_url}/users/{user_id}"
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.error("http_error", url=url, error=str(exc))
+                raise
+
+            try:
+                data = response.json()
+                user = User(**data)
+                logger.info("user_fetched", user_id=user_id, username=user.name)
+                return user
+            except (ValueError, KeyError) as exc:
+                logger.error("invalid_response", url=url, error=str(exc))
+                raise ValueError("Invalid response data") from exc
+
+
+async def main() -> User:
+    """
+    Main function to fetch user #42 from the API.
+
+    Returns:
+        User: The user data for ID 42.
+
+    Raises:
+        Exception: Any exception raised during the fetch process.
+    """
+    fetcher = UserFetcher()
+    user = await fetcher.fetch_user(42)
+    return user
+
+
+if __name__ == "__main__":
+    try:
+        user_data = asyncio.run(main())
+        # Using structlog instead of print() for logging
+        logger.info("user_data_fetched", user_id=user_data.id, name=user_data.name)
+    except Exception as exc:
+        logger.error("failed_to_fetch_user", error=str(exc))
+```

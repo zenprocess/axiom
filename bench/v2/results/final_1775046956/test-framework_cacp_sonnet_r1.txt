@@ -1,0 +1,283 @@
+It looks like file write permissions aren't granted. Here's the complete `testkit.py` — you can paste it yourself:
+
+```python
+"""
+testkit.py — Minimal Python test framework.
+
+Features: assertions, fixtures, test discovery, and a CLI runner.
+"""
+
+from __future__ import annotations
+
+import inspect
+import sys
+import traceback
+from dataclasses import dataclass, field
+from time import perf_counter
+from typing import Any
+from collections.abc import Callable
+
+
+# ---------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------
+
+def assert_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual == expected."""
+    if actual != expected:
+        detail = f"{actual!r} != {expected!r}"
+        raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+def assert_not_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual != expected."""
+    if actual == expected:
+        detail = f"expected {actual!r} to differ from {expected!r}"
+        raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+def assert_true(value: Any, msg: str = "") -> None:
+    """Assert that value is truthy."""
+    if not value:
+        detail = f"expected truthy, got {value!r}"
+        raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+def assert_false(value: Any, msg: str = "") -> None:
+    """Assert that value is falsy."""
+    if value:
+        detail = f"expected falsy, got {value!r}"
+        raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+def assert_in(item: Any, container: Any, msg: str = "") -> None:
+    """Assert that item is in container."""
+    if item not in container:
+        detail = f"{item!r} not in {container!r}"
+        raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+def assert_not_in(item: Any, container: Any, msg: str = "") -> None:
+    """Assert that item is not in container."""
+    if item in container:
+        detail = f"{item!r} unexpectedly found in {container!r}"
+        raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+def assert_is_none(value: Any, msg: str = "") -> None:
+    """Assert that value is None."""
+    if value is not None:
+        detail = f"expected None, got {value!r}"
+        raise AssertionError(f"{msg}: {detail}" if msg else detail)
+
+def assert_is_not_none(value: Any, msg: str = "") -> None:
+    """Assert that value is not None."""
+    if value is None:
+        raise AssertionError(f"{msg}: expected non-None value" if msg else "expected non-None value")
+
+class _RaisesContext:
+    def __init__(self, exc_type: type[BaseException], msg: str) -> None:
+        self._exc_type = exc_type
+        self._msg = msg
+
+    def __enter__(self) -> "_RaisesContext":
+        return self
+
+    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, tb: Any) -> bool:
+        if exc_type is None:
+            label = self._exc_type.__name__
+            detail = f"expected {label} to be raised"
+            raise AssertionError(f"{self._msg}: {detail}" if self._msg else detail)
+        if not issubclass(exc_type, self._exc_type):
+            return False  # let unexpected exception propagate
+        return True   # suppress expected exception
+
+def assert_raises(exc_type: type[BaseException], msg: str = "") -> _RaisesContext:
+    """Context manager that asserts the body raises exc_type."""
+    return _RaisesContext(exc_type, msg)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+_FIXTURES: dict[str, Callable[[], Any]] = {}
+
+def fixture(fn: Callable[[], Any]) -> Callable[[], Any]:
+    """Register a fixture by name. Use as a decorator."""
+    _FIXTURES[fn.__name__] = fn
+    return fn
+
+def _resolve_fixtures(fn: Callable[..., Any]) -> dict[str, Any]:
+    """Inject fixtures matching the test function's parameter names."""
+    sig = inspect.signature(fn)
+    resolved: dict[str, Any] = {}
+    for name in sig.parameters:
+        if name not in _FIXTURES:
+            raise LookupError(f"No fixture named '{name}' for test '{fn.__name__}'")
+        resolved[name] = _FIXTURES[name]()
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Test registration + discovery
+# ---------------------------------------------------------------------------
+
+_REGISTERED: list[Callable[..., Any]] = []
+
+def test(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Register a test function. Use as a decorator."""
+    _REGISTERED.append(fn)
+    return fn
+
+def discover(module: Any) -> list[Callable[..., Any]]:
+    """Return all callables in *module* whose name starts with 'test_'."""
+    return [
+        obj
+        for name, obj in inspect.getmembers(module, inspect.isfunction)
+        if name.startswith("test_")
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TestResult:
+    """Result for a single test case."""
+    name: str
+    passed: bool
+    duration_s: float
+    error: str = ""
+
+@dataclass
+class SuiteResult:
+    """Aggregated results for a test run."""
+    results: list[TestResult] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        """Total number of tests run."""
+        return len(self.results)
+
+    @property
+    def passed(self) -> int:
+        """Number of passing tests."""
+        return sum(1 for r in self.results if r.passed)
+
+    @property
+    def failed(self) -> int:
+        """Number of failing tests."""
+        return self.total - self.passed
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
+def _run_one(fn: Callable[..., Any]) -> TestResult:
+    """Run a single test and capture its result."""
+    name = fn.__qualname__
+    start = perf_counter()
+    try:
+        fn(**_resolve_fixtures(fn))
+        return TestResult(name=name, passed=True, duration_s=perf_counter() - start)
+    except AssertionError as exc:
+        return TestResult(name=name, passed=False, duration_s=perf_counter() - start, error=str(exc))
+    except Exception:
+        return TestResult(name=name, passed=False, duration_s=perf_counter() - start, error=traceback.format_exc().strip())
+
+def run(tests: list[Callable[..., Any]], *, verbose: bool = False) -> SuiteResult:
+    """Run all tests and print a summary.
+
+    Args:
+        tests:   Test callables to execute.
+        verbose: Print each result as it runs.
+
+    Returns:
+        SuiteResult with pass/fail counts.
+    """
+    suite = SuiteResult()
+    for fn in tests:
+        result = _run_one(fn)
+        suite.results.append(result)
+        if verbose:
+            status = "PASS" if result.passed else "FAIL"
+            print(f"  [{status}] {result.name}  ({result.duration_s * 1000:.1f} ms)")
+            if not result.passed and result.error:
+                for line in result.error.splitlines():
+                    print(f"         {line}")
+    _print_summary(suite)
+    return suite
+
+def _print_summary(suite: SuiteResult) -> None:
+    """Print pass/fail totals."""
+    bar = "=" * 50
+    print(bar)
+    print(f"Results: {suite.passed} passed, {suite.failed} failed, {suite.total} total")
+    print(bar)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main(argv: list[str] | None = None) -> int:
+    """Discover and run tests in the given file(s).
+
+    Usage: python testkit.py <test_file.py> [--verbose]
+    """
+    import importlib.util
+
+    args = argv if argv is not None else sys.argv[1:]
+    verbose = "--verbose" in args
+    paths = [a for a in args if not a.startswith("--")]
+
+    if not paths:
+        print("Usage: python testkit.py <test_file.py> [--verbose]")
+        return 1
+
+    all_tests: list[Callable[..., Any]] = []
+    for path in paths:
+        spec = importlib.util.spec_from_file_location("_testkit_module", path)
+        if spec is None or spec.loader is None:
+            print(f"Cannot load: {path}")
+            return 1
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        found = discover(module)
+        print(f"\nDiscovered {len(found)} test(s) in {path}")
+        all_tests.extend(found)
+
+    return 0 if run(all_tests, verbose=verbose).failed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+---
+
+**How it works:**
+
+| Feature | Mechanism |
+|---|---|
+| **Assertions** | `assert_equal`, `assert_true`, `assert_raises` (context manager), etc. — all raise `AssertionError` with clear messages |
+| **Fixtures** | `@fixture` decorator registers a factory by name; test params are matched by name and injected automatically |
+| **Discovery** | `discover(module)` finds any function named `test_*`; `@test` decorator registers explicitly |
+| **Runner** | `run(tests, verbose=True)` executes each test, catches `AssertionError` vs unexpected exceptions, prints results |
+| **CLI** | `python testkit.py tests.py --verbose` loads the file, discovers tests, and exits 0/1 |
+
+**Example usage:**
+
+```python
+from testkit import fixture, assert_equal, assert_raises
+
+@fixture
+def sample_list() -> list[int]:
+    return [1, 2, 3]
+
+def test_list_length(sample_list):
+    assert_equal(len(sample_list), 3)
+
+def test_division_by_zero():
+    with assert_raises(ZeroDivisionError):
+        _ = 1 / 0
+```
+
+**Note on `print()`:** I used it here per your explicit instruction since `structlog` isn't a project dependency — but it conflicts with the `structlog-only` rule in your project config. If you want to enforce that rule, swap `print()` for `structlog.get_logger().info(...)`.

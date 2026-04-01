@@ -1,0 +1,172 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by column value with progress reporting.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+# Initialize structlog
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+)
+logger = structlog.get_logger()
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value with progress reporting."
+    )
+    parser.add_argument(
+        "input_file", type=str, help="Path to the input CSV file"
+    )
+    parser.add_argument(
+        "--column", "-c", required=True, help="Column name to filter on"
+    )
+    parser.add_argument(
+        "--value", "-v", required=True, help="Value to match in the column"
+    )
+    parser.add_argument(
+        "--output", "-o", type=str, help="Output file path (default: stdout)"
+    )
+    parser.add_argument(
+        "--delimiter", "-d", default=",", help="CSV delimiter (default: ',')"
+    )
+    parser.add_argument(
+        "--quiet", "-q", action="store_true", help="Suppress progress output"
+    )
+    return parser.parse_args()
+
+
+def read_csv_with_progress(
+    file_path: Path, column: str, value: str, delimiter: str, quiet: bool
+) -> List[dict]:
+    """
+    Read CSV file and filter rows by column value.
+
+    Args:
+        file_path: Path to the CSV file.
+        column: Column name to filter on.
+        value: Value to match in the column.
+        delimiter: CSV delimiter.
+        quiet: Whether to suppress progress output.
+
+    Returns:
+        List of matching rows as dictionaries.
+    """
+    filtered_rows: List[dict] = []
+    
+    try:
+        with open(file_path, "r", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile, delimiter=delimiter)
+            
+            # Check if column exists
+            if column not in reader.fieldnames:
+                logger.error(f"Column '{column}' not found in CSV. Available columns: {reader.fieldnames}")
+                sys.exit(1)
+            
+            total_rows = 0
+            matched_rows = 0
+            
+            # Count total rows (excluding header)
+            # We need to re-open file to get total count
+            csvfile.seek(0)
+            reader = csv.DictReader(csvfile, delimiter=delimiter)
+            
+            for row in reader:
+                total_rows += 1
+                if row[column] == value:
+                    filtered_rows.append(row)
+                    matched_rows += 1
+                
+                if not quiet and total_rows % 1000 == 0:
+                    logger.info(f"Processed {total_rows} rows, {matched_rows} matches so far")
+            
+            if not quiet:
+                logger.info(
+                    f"Filtering complete: {matched_rows} matches from {total_rows} total rows"
+                )
+            
+            return filtered_rows
+            
+    except FileNotFoundError:
+        logger.error(f"File not found: {file_path}")
+        sys.exit(1)
+    except PermissionError:
+        logger.error(f"Permission denied: {file_path}")
+        sys.exit(1)
+    except csv.Error as e:
+        logger.error(f"CSV parsing error: {e}")
+        sys.exit(1)
+
+
+def write_output(
+    rows: List[dict], output_path: Optional[str], delimiter: str
+) -> None:
+    """
+    Write filtered rows to output.
+
+    Args:
+        rows: List of filtered rows.
+        output_path: Path to output file or None for stdout.
+        delimiter: CSV delimiter.
+    """
+    try:
+        if output_path:
+            output_file = Path(output_path)
+            with open(output_file, "w", newline="", encoding="utf-8") as f:
+                if rows:
+                    writer = csv.DictWriter(
+                        f, fieldnames=rows[0].keys(), delimiter=delimiter
+                    )
+                    writer.writeheader()
+                    writer.writerows(rows)
+                else:
+                    logger.warning("No rows matched the filter criteria")
+        else:
+            # Output to stdout
+            if rows:
+                writer = csv.DictWriter(
+                    sys.stdout, fieldnames=rows[0].keys(), delimiter=delimiter
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+            else:
+                logger.warning("No rows matched the filter criteria")
+                
+    except PermissionError:
+        logger.error(f"Permission denied when writing to: {output_path or 'stdout'}")
+        sys.exit(1)
+    except IOError as e:
+        logger.error(f"IO error while writing output: {e}")
+        sys.exit(1)
+
+
+def main() -> None:
+    """Main entry point."""
+    args = parse_args()
+    
+    input_file = Path(args.input_file)
+    if not input_file.is_file():
+        logger.error(f"Input file does not exist or is not a file: {input_file}")
+        sys.exit(1)
+    
+    # Process the CSV
+    filtered_rows = read_csv_with_progress(
+        input_file, args.column, args.value, args.delimiter, args.quiet
+    )
+    
+    # Write output
+    write_output(filtered_rows, args.output, args.delimiter)
+
+
+if __name__ == "__main__":
+    main()
+```

@@ -1,0 +1,91 @@
+```python
+"""
+User data fetching module.
+
+This module provides functionality to fetch user data from a REST API.
+"""
+
+import structlog
+from typing import Optional
+from pydantic import BaseModel
+import httpx
+
+logger = structlog.get_logger(__name__)
+
+
+class User(BaseModel):
+    """
+    Pydantic model representing a user.
+
+    Attributes:
+        id (int): The user's unique identifier.
+        name (str): The user's full name.
+        email (str): The user's email address.
+    """
+    id: int
+    name: str
+    email: str
+
+
+class UserFetcher:
+    """
+    Class for fetching user data from the REST API.
+    """
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        """
+        Initialize the UserFetcher.
+
+        Args:
+            base_url (str): Base URL for the API endpoints.
+        """
+        self.base_url = base_url.rstrip("/")
+
+    async def fetch_user(self, user_id: int) -> Optional[User]:
+        """
+        Fetch a user by ID from the API.
+
+        Args:
+            user_id (int): The ID of the user to fetch.
+
+        Returns:
+            Optional[User]: The fetched user data, or None if the request fails.
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                
+                user_data = response.json()
+                user = User(**user_data)
+                
+                logger.info("user_fetched", user_id=user_id, name=user.name)
+                return user
+                
+        except httpx.HTTPError as exc:
+            logger.error("http_error", url=url, error=str(exc))
+            return None
+        except Exception as exc:
+            logger.error("unexpected_error", url=url, error=str(exc))
+            return None
+
+
+async def main() -> Optional[User]:
+    """
+    Main function that fetches user #42 from the API.
+
+    Returns:
+        Optional[User]: The fetched user data for user #42, or None if the request fails.
+    """
+    fetcher = UserFetcher()
+    user = await fetcher.fetch_user(42)
+    
+    if user:
+        logger.info("user_42_fetched_successfully", user_id=user.id, name=user.name)
+    else:
+        logger.warning("failed_to_fetch_user_42")
+    
+    return user
+```

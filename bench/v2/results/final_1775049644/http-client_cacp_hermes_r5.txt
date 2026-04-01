@@ -1,0 +1,107 @@
+```python
+"""
+A module for fetching user data from a REST API.
+
+This module provides a class to fetch user data from a REST API endpoint,
+including data models for the response and proper error handling.
+"""
+
+import structlog
+from typing import Optional
+from pydantic import BaseModel
+import httpx
+
+
+logger = structlog.get_logger(__name__)
+
+
+class User(BaseModel):
+    """
+    Pydantic model representing a user.
+    
+    Attributes:
+        id (int): The user's unique identifier.
+        name (str): The user's full name.
+        username (str): The user's username.
+        email (str): The user's email address.
+    """
+    id: int
+    name: str
+    username: str
+    email: str
+
+
+class UserFetcher:
+    """
+    A class to fetch user data from a REST API.
+    """
+    
+    def __init__(self, base_url: str = "https://api.example.com") -> None:
+        """
+        Initialize the UserFetcher with the base URL.
+        
+        Args:
+            base_url (str): The base URL for the API.
+        """
+        self.base_url = base_url
+    
+    async def fetch_user(self, user_id: int) -> Optional[User]:
+        """
+        Fetch a user by ID from the API.
+        
+        Args:
+            user_id (int): The ID of the user to fetch.
+            
+        Returns:
+            Optional[User]: The user data if successful, None otherwise.
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                user_data = response.json()
+                
+                return User(**user_data)
+                
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "HTTP error occurred while fetching user",
+                user_id=user_id,
+                status_code=exc.response.status_code,
+                error=str(exc)
+            )
+        except httpx.RequestError as exc:
+            logger.error(
+                "Request error occurred while fetching user",
+                user_id=user_id,
+                error=str(exc)
+            )
+        except Exception as exc:
+            logger.error(
+                "Unexpected error occurred while fetching user",
+                user_id=user_id,
+                error=str(exc)
+            )
+        
+        return None
+
+
+async def main() -> None:
+    """
+    Main function to fetch user #42 from the API.
+    """
+    user_fetcher = UserFetcher()
+    user = await user_fetcher.fetch_user(42)
+    
+    if user:
+        logger.info("User fetched successfully", user_id=user.id, name=user.name)
+    else:
+        logger.warning("Failed to fetch user #42")
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```

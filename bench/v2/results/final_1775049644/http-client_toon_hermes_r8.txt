@@ -1,0 +1,96 @@
+```python
+"""Module for fetching user data from a REST API."""
+
+from typing import Optional
+from pydantic import BaseModel, Field
+import httpx
+import structlog
+
+# Configure structlog
+logger = structlog.get_logger()
+
+
+class User(BaseModel):
+    """User data model representing a user response."""
+    id: int = Field(..., description="Unique identifier of the user")
+    name: str = Field(..., description="Full name of the user")
+    email: str = Field(..., description="Email address of the user")
+    username: str = Field(..., description="Username/handle of the user")
+    address: Optional[dict] = Field(None, description="User's address details")
+    phone: Optional[str] = Field(None, description="Phone number of the user")
+    website: Optional[str] = Field(None, description="Website URL of the user")
+    company: Optional[dict] = Field(None, description="Company information")
+
+
+class UserService:
+    """Service class for fetching user data from the REST API."""
+    
+    def __init__(self, base_url: str = "https://api.example.com"):
+        """Initialize the UserService with the base URL.
+        
+        Args:
+            base_url: The base URL of the REST API.
+        """
+        self.base_url = base_url.rstrip("/")
+    
+    async def fetch_user(self, user_id: int) -> User:
+        """Fetch a user by ID from the API.
+        
+        Args:
+            user_id: The ID of the user to fetch.
+            
+        Returns:
+            User: The user data.
+            
+        Raises:
+            httpx.HTTPError: If the HTTP request fails.
+            ValueError: If the user data is invalid or missing.
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        
+        logger.info("Fetching user", user_id=user_id, url=url)
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                # Validate and parse using Pydantic model
+                user = User(**data)
+                logger.info("User fetched successfully", user_id=user_id, name=user.name)
+                return user
+                
+        except httpx.HTTPError as exc:
+            logger.error("HTTP error occurred", 
+                        user_id=user_id, 
+                        url=url, 
+                        status_code=exc.response.status_code if hasattr(exc, 'response') else None,
+                        error=str(exc))
+            raise
+        except Exception as exc:
+            logger.error("Unexpected error occurred", 
+                        user_id=user_id, 
+                        url=url, 
+                        error=str(exc))
+            raise
+
+
+async def main():
+    """Main function to fetch user #42."""
+    service = UserService()
+    
+    try:
+        user = await service.fetch_user(42)
+        logger.info("User data", user=user)
+        return user
+    except Exception as exc:
+        logger.error("Failed to fetch user #42", error=str(exc))
+        raise
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```

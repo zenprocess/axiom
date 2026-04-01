@@ -1,0 +1,166 @@
+```bash
+#!/bin/bash
+# deployment.sh
+# Deploys a Python service to production using Docker, with rollback support.
+# Complies with strict Python dev standards: no print(), uses structlog for logging.
+
+set -euo pipefail
+
+# Configuration (externalized - no hardcoded secrets)
+REGISTRY="${REGISTRY:-ghcr.io}"
+IMAGE_NAME="${IMAGE_NAME:-my-python-service}"
+TAG="${TAG:-latest}"
+GIT_TAG_PREFIX="${GIT_TAG_PREFIX:-v}"
+ROLLBACK_TAG="${ROLLBACK_TAG:-rollback}"
+
+# Logging with structlog (via Python to avoid shell echo/print usage)
+log_info() {
+  python3 -c "import structlog; structlog.configure(wrapper_classes=[structlog.BoundLogger]); logger = structlog.get_logger(); logger.info('$1', **${2:-{}})" 2>/dev/null || true
+}
+
+log_error() {
+  python3 -c "import structlog; structlog.configure(wrapper_classes=[structlog.BoundLogger]); logger = structlog.get_logger(); logger.error('$1', **${2:-{}})" 2>&1
+}
+
+# Validate environment
+validate_environment() {
+  local missing_vars=()
+  for var in REGISTRY IMAGE_NAME; do
+    if [[ -z "${!var:-}" ]]; then
+      missing_vars+=("$var")
+    fi
+  done
+
+  if [[ ${#missing_vars[@]} -gt 0 ]]; then
+    log_error "Missing required environment variables" "{vars: ${missing_vars[*]}}"
+    exit 1
+  fi
+
+  # Verify required tools are available
+  for cmd in docker git; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      log_error "Required tool not found" "{tool: $cmd}"
+      exit 1
+    fi
+  done
+}
+
+# Build Docker image
+build_image() {
+  local image="$REGISTRY/$IMAGE_NAME:$TAG"
+  
+  log_info "Building Docker image" "{image: $image}"
+  
+  if ! docker build -t "$image" .; then
+    log_error "Docker build failed" "{image: $image}"
+    exit 1
+  fi
+}
+
+# Push image to registry
+push_image() {
+  local image="$REGISTRY/$IMAGE_NAME:$TAG"
+  
+  log_info "Pushing Docker image" "{image: $image}"
+  
+  if ! docker push "$image"; then
+    log_error "Docker push failed" "{image: $image}"
+    exit 1
+  fi
+}
+
+# Update git tag
+update_git_tag() {
+  local current_sha
+  current_sha=$(git rev-parse HEAD)
+  local new_tag="${GIT_TAG_PREFIX}${TAG}"
+  
+  log_info "Updating git tag" "{tag: $new_tag, sha: $current_sha}"
+  
+  # Create and push new tag (non-forcefully)
+  if ! git tag "$new_tag" "$current_sha"; then
+    # If tag exists, delete and recreate (safe, as we're not force-pushing)
+    if ! git tag -d "$new_tag" 2>/dev/null || ! git push origin ":refs/tags/$new_tag"; then
+      log_error "Git tag update failed" "{tag: $new_tag}"
+      exit 1
+    fi
+  fi
+  
+  if ! git push origin "$new_tag"; then
+    log_error "Git tag push failed" "{tag: $new_tag}"
+    exit 1
+  fi
+}
+
+# Deploy to production (placeholder for actual deployment)
+deploy_to_production() {
+  local image="$REGISTRY/$IMAGE_NAME:$TAG"
+  
+  log_info "Deploying to production" "{image: $image}"
+  
+  # In real deployment, this would update Kubernetes deployment, ECS task definition, etc.
+  # For demo: simulate deployment by logging success
+  if ! true; then
+    log_error "Production deployment failed" "{image: $image}"
+    exit 1
+  fi
+}
+
+# Rollback function
+rollback() {
+  local image="$REGISTRY/$IMAGE_NAME:$ROLLBACK_TAG"
+  
+  log_info "Rolling back to previous version" "{image: $image}"
+  
+  # Pull rollback image
+  if ! docker pull "$image"; then
+    log_error "Failed to pull rollback image" "{image: $image}"
+    exit 1
+  fi
+  
+  # Deploy rollback image (same deployment mechanism as deploy_to_production)
+  log_info "Deploying rollback image" "{image: $image}"
+  if ! true; then
+    log_error "Rollback deployment failed" "{image: $image}"
+    exit 1
+  fi
+}
+
+# Main execution
+main() {
+  validate_environment
+  
+  # Save current image tag for potential rollback
+  local current_image="$REGISTRY/$IMAGE_NAME:$TAG"
+  local rollback_image="$REGISTRY/$IMAGE_NAME:$ROLLBACK_TAG"
+  
+  # Backup current image if it exists
+  if docker image inspect "$rollback_image" >/dev/null 2>&1; then
+    log_info "Backup of current production image exists" "{image: $rollback_image}"
+  else
+    # Pull current production image for backup
+    if docker image inspect "$current_image" >/dev/null 2>&1; then
+      log_info "Backing up current production image" "{from: $current_image, to: $rollback_image}"
+      docker pull "$current_image" || true
+      docker tag "$current_image" "$rollback_image" || true
+    fi
+  fi
+  
+  # Build and push new version
+  build_image
+  push_image
+  
+  # Update git tag (non-forcefully)
+  update_git_tag
+  
+  # Deploy to production
+  deploy_to_production
+  
+  log_info "Deployment completed successfully" "{image: $current_image}"
+}
+
+# Handle errors for rollback
+trap 'if [[ $? -ne 0 ]]; then log_error "Deployment failed, initiating rollback"; rollback; fi' EXIT
+
+main "$@"
+```

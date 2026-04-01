@@ -1,0 +1,683 @@
+It seems file write permissions need to be granted. Let me present all the files at once so you can review them:
+
+---
+
+### `test_framework/models.py`
+
+```python
+"""Pydantic models for test framework results and metadata."""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Optional
+
+from pydantic import BaseModel, Field
+
+
+class TestStatus(str, Enum):
+    """Possible outcomes for a single test."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    ERROR = "error"
+    SKIPPED = "skipped"
+
+
+class TestResult(BaseModel):
+    """Result of a single test function execution."""
+
+    name: str
+    module: str
+    status: TestStatus
+    duration_ms: float = 0.0
+    error_message: Optional[str] = None
+    traceback_str: Optional[str] = None
+
+
+class RunSummary(BaseModel):
+    """Aggregated results for a full test run."""
+
+    total: int = 0
+    passed: int = 0
+    failed: int = 0
+    errors: int = 0
+    skipped: int = 0
+    duration_ms: float = 0.0
+    results: list[TestResult] = Field(default_factory=list)
+
+    @property
+    def success(self) -> bool:
+        """True only if no failures or errors."""
+        return self.failed == 0 and self.errors == 0
+```
+
+---
+
+### `test_framework/assertions.py`
+
+```python
+"""Assertion helpers that raise AssertionFailure with descriptive messages."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from typing import Any, Generator, Type
+
+
+class AssertionFailure(Exception):
+    """Raised when a test assertion does not hold."""
+
+
+def assert_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual == expected."""
+    if actual != expected:
+        detail = f"{actual!r} != {expected!r}"
+        raise AssertionFailure(f"{msg}: {detail}" if msg else detail)
+
+
+def assert_not_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual != expected."""
+    if actual == expected:
+        detail = f"expected values to differ, both are {actual!r}"
+        raise AssertionFailure(f"{msg}: {detail}" if msg else detail)
+
+
+def assert_true(value: Any, msg: str = "") -> None:
+    """Assert that bool(value) is True."""
+    if not value:
+        detail = f"{value!r} is not truthy"
+        raise AssertionFailure(f"{msg}: {detail}" if msg else detail)
+
+
+def assert_false(value: Any, msg: str = "") -> None:
+    """Assert that bool(value) is False."""
+    if value:
+        detail = f"{value!r} is not falsy"
+        raise AssertionFailure(f"{msg}: {detail}" if msg else detail)
+
+
+def assert_is_none(value: Any, msg: str = "") -> None:
+    """Assert that value is None."""
+    if value is not None:
+        detail = f"expected None, got {value!r}"
+        raise AssertionFailure(f"{msg}: {detail}" if msg else detail)
+
+
+def assert_is_not_none(value: Any, msg: str = "") -> None:
+    """Assert that value is not None."""
+    if value is None:
+        raise AssertionFailure(f"{msg}: expected non-None value" if msg else "expected non-None value")
+
+
+def assert_in(item: Any, container: Any, msg: str = "") -> None:
+    """Assert that item is in container."""
+    if item not in container:
+        detail = f"{item!r} not in {container!r}"
+        raise AssertionFailure(f"{msg}: {detail}" if msg else detail)
+
+
+def assert_not_in(item: Any, container: Any, msg: str = "") -> None:
+    """Assert that item is not in container."""
+    if item in container:
+        detail = f"{item!r} unexpectedly found in {container!r}"
+        raise AssertionFailure(f"{msg}: {detail}" if msg else detail)
+
+
+def assert_almost_equal(actual: float, expected: float, places: int = 7, msg: str = "") -> None:
+    """Assert that actual ≈ expected to the given decimal places."""
+    if round(abs(actual - expected), places) != 0:
+        detail = f"{actual!r} != {expected!r} within {places} decimal places"
+        raise AssertionFailure(f"{msg}: {detail}" if msg else detail)
+
+
+@contextmanager
+def assert_raises(exc_type: Type[Exception], msg: str = "") -> Generator[None, None, None]:
+    """Context manager asserting that a specific exception is raised."""
+    try:
+        yield
+    except exc_type:
+        return
+    except Exception as exc:
+        detail = f"expected {exc_type.__name__}, got {type(exc).__name__}: {exc}"
+        raise AssertionFailure(f"{msg}: {detail}" if msg else detail) from exc
+    else:
+        detail = f"expected {exc_type.__name__} to be raised"
+        raise AssertionFailure(f"{msg}: {detail}" if msg else detail)
+```
+
+---
+
+### `test_framework/fixtures.py`
+
+```python
+"""Fixture registration and resolution with setup/teardown via generators."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+from collections.abc import AsyncGenerator, Generator
+from typing import Any, Callable
+
+_FIXTURE_REGISTRY: dict[str, Callable[..., Any]] = {}
+
+
+def fixture(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator to register a function as a named fixture."""
+    _FIXTURE_REGISTRY[fn.__name__] = fn
+    return fn
+
+
+def get_fixture(name: str) -> Callable[..., Any] | None:
+    """Return the fixture function registered under name, or None."""
+    return _FIXTURE_REGISTRY.get(name)
+
+
+async def resolve_fixtures(param_names: list[str]) -> tuple[dict[str, Any], list[Any]]:
+    """
+    Instantiate fixtures for the given parameter names.
+
+    Returns a (kwargs_dict, teardown_stack) tuple. Call teardown() with
+    the stack to run cleanup in reverse order after the test.
+    """
+    kwargs: dict[str, Any] = {}
+    teardown_stack: list[Any] = []
+
+    for name in param_names:
+        fn = get_fixture(name)
+        if fn is None:
+            raise RuntimeError(f"No fixture registered for parameter '{name}'")
+
+        if inspect.isasyncgenfunction(fn):
+            gen: AsyncGenerator[Any, None] = fn()
+            value = await gen.__anext__()
+            kwargs[name] = value
+            teardown_stack.append(("async_gen", gen))
+        elif inspect.isgeneratorfunction(fn):
+            sync_gen: Generator[Any, None, None] = fn()
+            value = next(sync_gen)
+            kwargs[name] = value
+            teardown_stack.append(("sync_gen", sync_gen))
+        elif asyncio.iscoroutinefunction(fn):
+            value = await fn()
+            kwargs[name] = value
+        else:
+            kwargs[name] = fn()
+
+    return kwargs, teardown_stack
+
+
+async def teardown_fixtures(stack: list[Any]) -> None:
+    """Run teardown for all fixtures in the stack in reverse order."""
+    for kind, gen in reversed(stack):
+        try:
+            if kind == "async_gen":
+                await gen.__anext__()
+            else:
+                next(gen)
+        except StopIteration:
+            pass
+        except StopAsyncIteration:
+            pass
+```
+
+---
+
+### `test_framework/registry.py`
+
+```python
+"""Test registration via @test and @skip decorators."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+_TEST_REGISTRY: list["TestEntry"] = []
+
+
+@dataclass
+class TestEntry:
+    """Metadata for a registered test function."""
+
+    fn: Callable[..., Any]
+    name: str
+    module: str
+    skipped: bool = False
+    skip_reason: str = ""
+    param_names: list[str] = field(default_factory=list)
+
+
+def test(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator to register a function as a test case."""
+    import inspect
+
+    params = [
+        p.name
+        for p in inspect.signature(fn).parameters.values()
+        if p.default is inspect.Parameter.empty
+    ]
+    entry = TestEntry(
+        fn=fn,
+        name=fn.__name__,
+        module=fn.__module__,
+        param_names=params,
+    )
+    _TEST_REGISTRY.append(entry)
+    return fn
+
+
+def skip(reason: str = "") -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorator to mark a test as skipped with an optional reason."""
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        import inspect
+
+        params = [
+            p.name
+            for p in inspect.signature(fn).parameters.values()
+            if p.default is inspect.Parameter.empty
+        ]
+        entry = TestEntry(
+            fn=fn,
+            name=fn.__name__,
+            module=fn.__module__,
+            skipped=True,
+            skip_reason=reason,
+            param_names=params,
+        )
+        _TEST_REGISTRY.append(entry)
+        return fn
+
+    return decorator
+
+
+def get_all_tests() -> list[TestEntry]:
+    """Return a snapshot of all registered test entries."""
+    return list(_TEST_REGISTRY)
+
+
+def clear_registry() -> None:
+    """Clear the global registry (useful for isolated testing of the framework itself)."""
+    _TEST_REGISTRY.clear()
+```
+
+---
+
+### `test_framework/discovery.py`
+
+```python
+"""Discover and import test modules from a directory tree."""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from types import ModuleType
+
+
+def discover_test_files(root: Path) -> list[Path]:
+    """
+    Recursively find test files under root.
+
+    Matches files named test_*.py or *_test.py.
+    """
+    matches: list[Path] = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name.startswith("test_") or path.name.endswith("_test.py"):
+            matches.append(path)
+    return matches
+
+
+def import_test_module(path: Path) -> ModuleType:
+    """
+    Import a test file as a module.
+
+    Uses importlib so the file does not need to be on sys.path.
+    """
+    module_name = path.stem
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load spec for {path}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
+def load_tests_from_path(root: Path) -> None:
+    """
+    Import all test modules found under root, triggering @test registrations.
+    """
+    for test_file in discover_test_files(root):
+        import_test_module(test_file)
+```
+
+---
+
+### `test_framework/runner.py`
+
+```python
+"""Async test runner: executes registered tests and emits structured output via structlog."""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import traceback
+from pathlib import Path
+from time import perf_counter
+
+import structlog
+
+from test_framework.assertions import AssertionFailure
+from test_framework.discovery import load_tests_from_path
+from test_framework.fixtures import resolve_fixtures, teardown_fixtures
+from test_framework.models import RunSummary, TestResult, TestStatus
+from test_framework.registry import TestEntry, get_all_tests
+
+log = structlog.get_logger()
+
+
+def _configure_structlog() -> None:
+    """Configure structlog for human-readable test output if not already set up."""
+    structlog.configure(
+        processors=[
+            structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty()),
+        ],
+        wrapper_class=structlog.BoundLogger,
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+
+async def _run_one(entry: TestEntry) -> TestResult:
+    """Execute a single test entry and return its result."""
+    if entry.skipped:
+        return TestResult(
+            name=entry.name,
+            module=entry.module,
+            status=TestStatus.SKIPPED,
+            error_message=entry.skip_reason or None,
+        )
+
+    kwargs: dict = {}
+    teardown_stack: list = []
+    start = perf_counter()
+
+    try:
+        kwargs, teardown_stack = await resolve_fixtures(entry.param_names)
+    except Exception as exc:
+        duration_ms = (perf_counter() - start) * 1000
+        return TestResult(
+            name=entry.name,
+            module=entry.module,
+            status=TestStatus.ERROR,
+            duration_ms=duration_ms,
+            error_message=f"fixture error: {exc}",
+            traceback_str=traceback.format_exc(),
+        )
+
+    try:
+        if asyncio.iscoroutinefunction(entry.fn):
+            await entry.fn(**kwargs)
+        else:
+            entry.fn(**kwargs)
+
+        duration_ms = (perf_counter() - start) * 1000
+        return TestResult(
+            name=entry.name,
+            module=entry.module,
+            status=TestStatus.PASSED,
+            duration_ms=duration_ms,
+        )
+
+    except AssertionFailure as exc:
+        duration_ms = (perf_counter() - start) * 1000
+        return TestResult(
+            name=entry.name,
+            module=entry.module,
+            status=TestStatus.FAILED,
+            duration_ms=duration_ms,
+            error_message=str(exc),
+            traceback_str=traceback.format_exc(),
+        )
+
+    except Exception as exc:
+        duration_ms = (perf_counter() - start) * 1000
+        return TestResult(
+            name=entry.name,
+            module=entry.module,
+            status=TestStatus.ERROR,
+            duration_ms=duration_ms,
+            error_message=str(exc),
+            traceback_str=traceback.format_exc(),
+        )
+
+    finally:
+        await teardown_fixtures(teardown_stack)
+
+
+def _log_result(result: TestResult) -> None:
+    """Emit a structured log line for a single test result."""
+    fields = dict(
+        test=f"{result.module}::{result.name}",
+        duration_ms=round(result.duration_ms, 2),
+    )
+    if result.error_message:
+        fields["reason"] = result.error_message
+
+    status = result.status
+    if status == TestStatus.PASSED:
+        log.info("PASS", **fields)
+    elif status == TestStatus.FAILED:
+        log.warning("FAIL", **fields)
+        if result.traceback_str:
+            log.debug("traceback", tb=result.traceback_str)
+    elif status == TestStatus.ERROR:
+        log.error("ERROR", **fields)
+        if result.traceback_str:
+            log.debug("traceback", tb=result.traceback_str)
+    else:
+        log.info("SKIP", **fields)
+
+
+async def run(verbosity: int = 1) -> RunSummary:
+    """
+    Run all registered tests and return a summary.
+
+    Args:
+        verbosity: 0 = summary only, 1 = each result, 2 = include tracebacks.
+    """
+    _configure_structlog()
+    entries = get_all_tests()
+    summary = RunSummary(total=len(entries))
+    suite_start = perf_counter()
+
+    log.info("test_run_start", total=len(entries))
+
+    for entry in entries:
+        result = await _run_one(entry)
+        summary.results.append(result)
+
+        if result.status == TestStatus.PASSED:
+            summary.passed += 1
+        elif result.status == TestStatus.FAILED:
+            summary.failed += 1
+        elif result.status == TestStatus.ERROR:
+            summary.errors += 1
+        else:
+            summary.skipped += 1
+
+        if verbosity >= 1:
+            _log_result(result)
+
+    summary.duration_ms = (perf_counter() - suite_start) * 1000
+
+    log.info(
+        "test_run_complete",
+        total=summary.total,
+        passed=summary.passed,
+        failed=summary.failed,
+        errors=summary.errors,
+        skipped=summary.skipped,
+        duration_ms=round(summary.duration_ms, 2),
+        success=summary.success,
+    )
+
+    return summary
+
+
+async def run_path(path: str | Path, verbosity: int = 1) -> RunSummary:
+    """
+    Discover test files under path, import them, then run all registered tests.
+
+    Args:
+        path: Directory to search for test_*.py / *_test.py files.
+        verbosity: Passed through to run().
+    """
+    load_tests_from_path(Path(path))
+    return await run(verbosity=verbosity)
+```
+
+---
+
+### `test_framework/__init__.py`
+
+```python
+"""Simple Python test framework with assertions, fixtures, discovery, and async runner."""
+
+from test_framework.assertions import (
+    assert_almost_equal,
+    assert_equal,
+    assert_false,
+    assert_in,
+    assert_is_none,
+    assert_is_not_none,
+    assert_not_equal,
+    assert_not_in,
+    assert_raises,
+    assert_true,
+)
+from test_framework.fixtures import fixture
+from test_framework.registry import test, skip
+from test_framework.runner import run, run_path
+
+__all__ = [
+    "assert_equal",
+    "assert_not_equal",
+    "assert_true",
+    "assert_false",
+    "assert_is_none",
+    "assert_is_not_none",
+    "assert_raises",
+    "assert_in",
+    "assert_not_in",
+    "assert_almost_equal",
+    "fixture",
+    "test",
+    "skip",
+    "run",
+    "run_path",
+]
+```
+
+---
+
+### `test_framework/example_tests/test_demo.py`
+
+```python
+"""Demonstration tests showing framework usage."""
+
+import asyncio
+from test_framework import (
+    assert_equal,
+    assert_raises,
+    assert_true,
+    fixture,
+    skip,
+    test,
+)
+from test_framework.assertions import AssertionFailure
+
+
+@fixture
+def numbers() -> list[int]:
+    """Provide a reusable list of numbers."""
+    return [1, 2, 3, 4, 5]
+
+
+@fixture
+async def async_value() -> int:
+    """Async fixture example — simulates an async resource fetch."""
+    await asyncio.sleep(0)   # non-blocking yield
+    return 42
+
+
+@test
+def test_addition() -> None:
+    """Basic arithmetic sanity check."""
+    assert_equal(1 + 1, 2)
+
+
+@test
+def test_list_fixture(numbers: list[int]) -> None:
+    """Test using a sync fixture."""
+    assert_equal(len(numbers), 5)
+    assert_equal(numbers[0], 1)
+
+
+@test
+async def test_async_fixture(async_value: int) -> None:
+    """Test using an async fixture."""
+    assert_equal(async_value, 42)
+
+
+@test
+def test_assert_raises() -> None:
+    """Verify assert_raises works for expected exceptions."""
+    with assert_raises(ZeroDivisionError):
+        _ = 1 // 0
+
+
+@skip(reason="not implemented yet")
+def test_future_feature() -> None:
+    """Placeholder for upcoming feature."""
+    assert_true(False)
+
+
+if __name__ == "__main__":
+    import asyncio
+    from test_framework import run
+
+    asyncio.run(run())
+```
+
+---
+
+**Important deviation from your request:** The rules in this project explicitly forbid `print()` (`structlog-only: MUST_NOT`) so I used `structlog` with `ConsoleRenderer` for all output. It produces the same human-readable terminal output (with color when connected to a TTY) but routes through structlog's pipeline.
+
+**Usage:**
+```python
+import asyncio
+from test_framework import run_path
+
+asyncio.run(run_path("./my_tests/"))
+```
+
+**Output looks like:**
+```
+2026-04-01 ... [info ] test_run_start          total=4
+2026-04-01 ... [info ] PASS                    test=test_demo::test_addition duration_ms=0.02
+2026-04-01 ... [warning] FAIL                  test=test_demo::test_something reason=42 != 99
+2026-04-01 ... [info ] test_run_complete        total=4 passed=3 failed=1 ...
+```
+
+If you explicitly want `print()` in this project, the `structlog-only` rule in your project config would need to be relaxed.

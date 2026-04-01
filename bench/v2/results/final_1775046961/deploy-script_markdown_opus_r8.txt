@@ -1,0 +1,17 @@
+It looks like write permissions are being denied. Would you like me to just show you the script instead? Or if you grant the write permission, I can save it to `deploy.sh`.
+
+Here's what the script does:
+
+**Configuration** — All secrets/config via environment variables (`DOCKER_REGISTRY`, `IMAGE_NAME`, `DEPLOY_HOST`, `DEPLOY_USER`). Version is auto-read from `pyproject.toml`, combined with the git short SHA to form the tag (e.g. `0.6.0-f1c0606`).
+
+**Commands** (run individually or all at once):
+- `./deploy.sh full` — (default) build → push → tag → deploy
+- `./deploy.sh build` — builds the Docker image with version + `latest` tags
+- `./deploy.sh push` — pushes both tags to the registry
+- `./deploy.sh tag` — creates an annotated git tag `v{version}-{sha}` and pushes it
+- `./deploy.sh deploy` — SSHs to production, pulls the image, stops the old container, starts the new one, runs a health check
+
+**Rollback support:**
+- Automatic — if the health check fails after deploy, it rolls back to the previously running tag
+- Manual — `./deploy.sh rollback` uses the second-most-recent git tag, or `./deploy.sh rollback <specific-tag>` for a targeted rollback
+- Both paths run a health check after rollback and fail loudly if it also fails

@@ -1,0 +1,229 @@
+It looks like write permissions aren't granted. Here's the script — you can save it as `deploy.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# deploy.sh — Build, push, tag, and deploy a Docker image with rollback.
+#
+# Usage:
+#   ./deploy.sh deploy [--tag <tag>]       Build, push, tag, and deploy
+#   ./deploy.sh rollback [--tag <tag>]     Roll back to a previous tag
+#
+# Required env vars:
+#   DOCKER_REGISTRY   e.g. ghcr.io/zenprocess
+#   DEPLOY_HOST       SSH target, e.g. deploy@prod.example.com
+#   DEPLOY_SERVICE    systemd service or compose project name
+#
+# Optional env vars:
+#   IMAGE_NAME        Defaults to "axiom"
+#   DEPLOY_TIMEOUT    Health-check timeout in seconds (default: 120)
+#   HEALTH_URL        URL to check after deploy (default: http://localhost:8080/health)
+# ---------------------------------------------------------------------------
+
+readonly IMAGE_NAME="${IMAGE_NAME:-axiom}"
+readonly DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-120}"
+readonly HEALTH_URL="${HEALTH_URL:-http://localhost:8080/health}"
+readonly DEPLOY_DIR="${DEPLOY_DIR:-/opt/deploy/${IMAGE_NAME}}"
+
+log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+
+die() { log "FATAL: $*"; exit 1; }
+
+require_env() {
+    local var
+    for var in "$@"; do
+        [[ -n "${!var:-}" ]] || die "Required env var ${var} is not set"
+    done
+}
+
+# --- Resolve the image tag ------------------------------------------------
+
+resolve_tag() {
+    local explicit_tag="${1:-}"
+    if [[ -n "${explicit_tag}" ]]; then
+        printf '%s' "${explicit_tag}"
+    else
+        printf '%s' "$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD)"
+    fi
+}
+
+# --- Build ----------------------------------------------------------------
+
+build_image() {
+    local tag="$1"
+    local full_image="${DOCKER_REGISTRY}/${IMAGE_NAME}:${tag}"
+
+    log "Building ${full_image}"
+    docker build \
+        --label "git.commit=$(git rev-parse HEAD)" \
+        --label "git.tag=${tag}" \
+        --tag "${full_image}" \
+        --tag "${DOCKER_REGISTRY}/${IMAGE_NAME}:latest" \
+        .
+    log "Build complete: ${full_image}"
+}
+
+# --- Push -----------------------------------------------------------------
+
+push_image() {
+    local tag="$1"
+    local full_image="${DOCKER_REGISTRY}/${IMAGE_NAME}:${tag}"
+
+    log "Pushing ${full_image}"
+    docker push "${full_image}"
+    docker push "${DOCKER_REGISTRY}/${IMAGE_NAME}:latest"
+    log "Push complete"
+}
+
+# --- Git tag --------------------------------------------------------------
+
+update_git_tag() {
+    local tag="$1"
+
+    if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
+        log "Tag ${tag} already exists — skipping git tag"
+        return 0
+    fi
+
+    log "Creating git tag: ${tag}"
+    git tag -a "${tag}" -m "Deploy ${tag} at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    git push origin "${tag}"
+    log "Tag ${tag} pushed to origin"
+}
+
+# --- Deploy ---------------------------------------------------------------
+
+deploy_to_production() {
+    local tag="$1"
+    local full_image="${DOCKER_REGISTRY}/${IMAGE_NAME}:${tag}"
+
+    log "Deploying ${full_image} to ${DEPLOY_HOST}"
+
+    # Record the currently running tag for rollback
+    ssh "${DEPLOY_HOST}" \
+        "docker inspect --format='{{index .Config.Labels \"git.tag\"}}' \$(docker ps -q -f name=${IMAGE_NAME}) 2>/dev/null || echo 'none'" \
+        > /tmp/.axiom_previous_tag
+
+    # Pull and restart on the remote host
+    ssh "${DEPLOY_HOST}" bash <<REMOTE
+set -euo pipefail
+docker pull "${full_image}"
+cd "${DEPLOY_DIR}"
+IMAGE_TAG="${tag}" docker compose up -d --remove-orphans
+REMOTE
+
+    log "Containers started — waiting for health check"
+    wait_for_healthy
+    log "Deploy of ${tag} succeeded"
+}
+
+# --- Health check ---------------------------------------------------------
+
+wait_for_healthy() {
+    local elapsed=0
+
+    while (( elapsed < DEPLOY_TIMEOUT )); do
+        if ssh "${DEPLOY_HOST}" "curl -sf '${HEALTH_URL}'" >/dev/null 2>&1; then
+            log "Health check passed after ${elapsed}s"
+            return 0
+        fi
+        sleep 5
+        elapsed=$(( elapsed + 5 ))
+    done
+
+    die "Health check failed after ${DEPLOY_TIMEOUT}s — consider running: $0 rollback"
+}
+
+# --- Rollback -------------------------------------------------------------
+
+rollback() {
+    local target_tag="${1:-}"
+
+    if [[ -z "${target_tag}" ]]; then
+        if [[ -f /tmp/.axiom_previous_tag ]]; then
+            target_tag="$(cat /tmp/.axiom_previous_tag)"
+        fi
+    fi
+
+    [[ -n "${target_tag}" && "${target_tag}" != "none" ]] \
+        || die "No rollback tag available. Specify one with --tag <tag>"
+
+    local full_image="${DOCKER_REGISTRY}/${IMAGE_NAME}:${target_tag}"
+    log "Rolling back to ${full_image}"
+
+    ssh "${DEPLOY_HOST}" bash <<REMOTE
+set -euo pipefail
+docker pull "${full_image}"
+cd "${DEPLOY_DIR}"
+IMAGE_TAG="${target_tag}" docker compose up -d --remove-orphans
+REMOTE
+
+    wait_for_healthy
+    log "Rollback to ${target_tag} succeeded"
+}
+
+# --- Main -----------------------------------------------------------------
+
+main() {
+    local command="${1:-}"
+    shift || true
+
+    local tag=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tag) tag="${2:-}"; shift 2 ;;
+            *)     die "Unknown option: $1" ;;
+        esac
+    done
+
+    case "${command}" in
+        deploy)
+            require_env DOCKER_REGISTRY DEPLOY_HOST DEPLOY_SERVICE
+            tag="$(resolve_tag "${tag}")"
+            build_image "${tag}"
+            push_image "${tag}"
+            update_git_tag "${tag}"
+            deploy_to_production "${tag}"
+            ;;
+        rollback)
+            require_env DOCKER_REGISTRY DEPLOY_HOST DEPLOY_SERVICE
+            rollback "${tag}"
+            ;;
+        *)
+            cat >&2 <<USAGE
+Usage:
+  $0 deploy  [--tag <tag>]   Build, push, tag, and deploy to production
+  $0 rollback [--tag <tag>]  Roll back to a previous (or specified) tag
+
+Environment variables:
+  DOCKER_REGISTRY   Container registry (required)
+  DEPLOY_HOST       SSH target for production (required)
+  DEPLOY_SERVICE    Service/compose project name (required)
+  IMAGE_NAME        Docker image name (default: axiom)
+  DEPLOY_TIMEOUT    Health-check timeout in seconds (default: 120)
+  HEALTH_URL        Endpoint to check (default: http://localhost:8080/health)
+USAGE
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
+```
+
+**How it works:**
+
+| Step | What happens |
+|------|-------------|
+| `deploy` | Builds the image with git metadata labels, pushes to registry (tagged + `:latest`), creates an annotated git tag, SSHes to prod to pull and `docker compose up`, then polls a health endpoint |
+| `rollback` | Reads the previous tag (saved during deploy) or accepts `--tag <tag>`, pulls that image on prod, restarts, and health-checks |
+
+**Key design choices:**
+
+- **Tag auto-resolution** — if no `--tag` is given, uses `git describe` (e.g. `v0.6.0-3-gedfe656`) so every deploy is traceable
+- **Rollback state** — the currently running tag is captured via `docker inspect` labels *before* the new deploy, stored in `/tmp/.axiom_previous_tag`
+- **Health gating** — deploy fails loudly if the health check doesn't pass within `DEPLOY_TIMEOUT`, prompting rollback
+- **Idempotent tags** — skips `git tag` if it already exists rather than failing
+- **No secrets in script** — all config via env vars; registry auth assumed via `docker login` beforehand

@@ -1,0 +1,96 @@
+Here's a Python module that follows all the rules in your linting configuration:
+
+```python
+# users_client.py
+from typing import Optional
+from pydantic import BaseModel
+import httpx
+import structlog
+
+logger = structlog.get_logger()
+
+
+class User(BaseModel):
+    """Model representing a user."""
+    id: int
+    name: str
+    username: str
+    email: str
+    address: dict
+    phone: str
+    website: str
+    company: dict
+
+
+class UsersClient:
+    """Client for fetching user data from the REST API."""
+
+    def __init__(self, base_url: str = "https://api.example.com"):
+        self.base_url = base_url
+
+    async def fetch_user(self, user_id: int) -> Optional[User]:
+        """
+        Fetch user data by ID.
+
+        Args:
+            user_id: The ID of the user to fetch.
+
+        Returns:
+            User model if successful, None otherwise.
+        """
+        url = f"{self.base_url}/users/{user_id}"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                return User(**data)
+        except httpx.HTTPStatusError as exc:
+            logger.error("HTTP error fetching user", user_id=user_id, status_code=exc.response.status_code)
+            return None
+        except httpx.RequestError as exc:
+            logger.error("Request error fetching user", user_id=user_id, error=str(exc))
+            return None
+        except Exception as exc:
+            logger.error("Unexpected error fetching user", user_id=user_id, error=str(exc))
+            return None
+
+
+async def main() -> None:
+    """Main function to fetch user #42."""
+    client = UsersClient()
+    user = await client.fetch_user(42)
+    if user:
+        logger.info("Successfully fetched user", user_id=user.id, user_name=user.name)
+    else:
+        logger.warning("Failed to fetch user", user_id=42)
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```
+
+### Compliance Notes:
+
+- ✅ **structlog-only**: Uses `structlog` for logging, no `logging` or `print`
+- ✅ **error-handling**: `try/except` wraps the HTTP call for `httpx` exceptions
+- ✅ **async-io**: Uses `async def` for I/O function `fetch_user` and `main`
+- ✅ **pydantic-models**: Uses `User` as a `BaseModel`
+- ✅ **type-hints**: All function signatures include type hints
+- ✅ **docstrings**: Public methods (`fetch_user`, `main`) have docstrings
+- ✅ **no-secrets**: No hardcoded secrets
+- ✅ **no-force-push**: Not applicable, but no force push used
+- ✅ **no-print-debug**: No `print()` calls
+- ✅ **no-star-import**: No `from ... import *`
+
+### Usage:
+
+```bash
+pip install httpx pydantic structlog
+python users_client.py
+```
+
+> 🔒 **Note**: `https://api.example.com` is a placeholder domain. For real testing, replace with an actual API (e.g., `https://jsonplaceholder.typicode.com`) or ensure the target API exists and is accessible.
+
+Let me know if you'd like to add features like caching, retry logic, or authentication support!

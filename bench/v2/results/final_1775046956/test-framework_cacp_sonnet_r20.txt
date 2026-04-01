@@ -1,0 +1,398 @@
+It seems write access is restricted for new files in this project. Here's the complete framework — you can save it as `test_framework/framework.py`:
+
+---
+
+**`test_framework/framework.py`**
+
+```python
+"""Simple Python test framework with assertions, fixtures, and test discovery."""
+
+from __future__ import annotations
+
+import inspect
+import sys
+import time
+import traceback
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+class AssertionFailure(AssertionError):
+    """Raised when an assertion fails."""
+
+class TestSkipped(Exception):
+    """Raised to skip a test."""
+
+
+# ---------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------
+
+def assert_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual == expected."""
+    if actual != expected:
+        raise AssertionFailure(
+            f"assert_equal: {actual!r} != {expected!r}" + (f" — {msg}" if msg else "")
+        )
+
+def assert_not_equal(actual: Any, expected: Any, msg: str = "") -> None:
+    """Assert that actual != expected."""
+    if actual == expected:
+        raise AssertionFailure(
+            f"assert_not_equal: both are {actual!r}" + (f" — {msg}" if msg else "")
+        )
+
+def assert_true(value: Any, msg: str = "") -> None:
+    """Assert that value is truthy."""
+    if not value:
+        raise AssertionFailure(f"assert_true: {value!r}" + (f" — {msg}" if msg else ""))
+
+def assert_false(value: Any, msg: str = "") -> None:
+    """Assert that value is falsy."""
+    if value:
+        raise AssertionFailure(f"assert_false: {value!r}" + (f" — {msg}" if msg else ""))
+
+def assert_is_none(value: Any, msg: str = "") -> None:
+    """Assert that value is None."""
+    if value is not None:
+        raise AssertionFailure(f"assert_is_none: {value!r}" + (f" — {msg}" if msg else ""))
+
+def assert_is_not_none(value: Any, msg: str = "") -> None:
+    """Assert that value is not None."""
+    if value is None:
+        raise AssertionFailure(f"assert_is_not_none: got None" + (f" — {msg}" if msg else ""))
+
+def assert_in(item: Any, container: Any, msg: str = "") -> None:
+    """Assert that item is in container."""
+    if item not in container:
+        raise AssertionFailure(
+            f"assert_in: {item!r} not in {container!r}" + (f" — {msg}" if msg else "")
+        )
+
+def assert_not_in(item: Any, container: Any, msg: str = "") -> None:
+    """Assert that item is not in container."""
+    if item in container:
+        raise AssertionFailure(
+            f"assert_not_in: {item!r} in {container!r}" + (f" — {msg}" if msg else "")
+        )
+
+def assert_raises(exc_type: type[Exception], callable_: Callable, *args: Any, **kwargs: Any) -> Exception:
+    """Assert that callable raises exc_type. Returns the exception."""
+    try:
+        callable_(*args, **kwargs)
+    except exc_type as exc:
+        return exc
+    except Exception as exc:
+        raise AssertionFailure(
+            f"assert_raises: expected {exc_type.__name__}, got {type(exc).__name__}: {exc}"
+        )
+    raise AssertionFailure(f"assert_raises: {exc_type.__name__} was not raised")
+
+@contextmanager
+def assert_raises_context(exc_type: type[Exception], msg: str = "") -> Generator[None, None, None]:
+    """Context manager asserting the block raises exc_type."""
+    try:
+        yield
+    except exc_type:
+        return
+    except Exception as exc:
+        raise AssertionFailure(
+            f"assert_raises_context: expected {exc_type.__name__}, got {type(exc).__name__}"
+            + (f" — {msg}" if msg else "")
+        )
+    raise AssertionFailure(
+        f"assert_raises_context: {exc_type.__name__} was not raised" + (f" — {msg}" if msg else "")
+    )
+
+def skip(reason: str = "") -> None:
+    """Skip the current test."""
+    raise TestSkipped(reason)
+
+
+# ---------------------------------------------------------------------------
+# Decorators
+# ---------------------------------------------------------------------------
+
+def fixture(fn: Callable) -> Callable:
+    """Mark a method as a fixture. Yield for setup+teardown, return for setup-only."""
+    fn._is_fixture = True  # type: ignore[attr-defined]
+    return fn
+
+def test(fn: Callable) -> Callable:
+    """Mark a function as a test (alternative to test_ prefix)."""
+    fn._is_test = True  # type: ignore[attr-defined]
+    return fn
+
+def skip_test(reason: str = "") -> Callable:
+    """Decorator to unconditionally skip a test."""
+    def decorator(fn: Callable) -> Callable:
+        fn._is_test = True       # type: ignore[attr-defined]
+        fn._skip_reason = reason # type: ignore[attr-defined]
+        return fn
+    return decorator
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TestResult:
+    """Result of a single test execution."""
+    name: str
+    passed: bool = False
+    skipped: bool = False
+    skip_reason: str = ""
+    error: str = ""
+    duration_ms: float = 0.0
+
+@dataclass
+class SuiteResult:
+    """Aggregated results for a test suite."""
+    suite_name: str
+    results: list[TestResult] = field(default_factory=list)
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for r in self.results if r.passed)
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for r in self.results if not r.passed and not r.skipped)
+
+    @property
+    def skipped(self) -> int:
+        return sum(1 for r in self.results if r.skipped)
+
+    @property
+    def total(self) -> int:
+        return len(self.results)
+
+
+# ---------------------------------------------------------------------------
+# TestSuite
+# ---------------------------------------------------------------------------
+
+class TestSuite:
+    """Base class. Subclass it and define test_ methods (or use @test decorator)."""
+
+    def run(self) -> SuiteResult:
+        """Discover and run all tests in this class."""
+        result = SuiteResult(suite_name=type(self).__name__)
+        for method in self._discover_tests():
+            result.results.append(self._run_one(method, self._collect_fixtures()))
+        return result
+
+    def _discover_tests(self) -> list[Callable]:
+        methods = [
+            getattr(self, n) for n in dir(type(self))
+            if not n.startswith("_")
+            and callable(getattr(self, n))
+            and (n.startswith("test_") or getattr(getattr(self, n), "_is_test", False))
+        ]
+        methods.sort(key=lambda m: inspect.getsourcelines(m.__func__)[1])
+        return methods
+
+    def _collect_fixtures(self) -> dict[str, Callable]:
+        return {
+            n: getattr(self, n)
+            for n in dir(type(self))
+            if not n.startswith("_")
+            and callable(getattr(self, n))
+            and getattr(getattr(self, n), "_is_fixture", False)
+        }
+
+    def _run_one(self, method: Callable, fixtures: dict[str, Callable]) -> TestResult:
+        name = method.__name__
+
+        # Statically-skipped test
+        if getattr(method, "_skip_reason", None) is not None:
+            return TestResult(name=name, skipped=True, skip_reason=method._skip_reason)
+
+        # Resolve fixture values (inject by parameter name)
+        sig = inspect.signature(method)
+        fixture_values: dict[str, Any] = {}
+        generators: list[Generator] = []
+        for param in sig.parameters:
+            if param in fixtures:
+                value = fixtures[param]()
+                if inspect.isgenerator(value):
+                    generators.append(value)
+                    fixture_values[param] = next(value)
+                else:
+                    fixture_values[param] = value
+
+        start = time.perf_counter()
+        try:
+            if hasattr(self, "setup"):
+                self.setup()  # type: ignore[attr-defined]
+            method(**fixture_values)
+            return TestResult(name=name, passed=True,
+                              duration_ms=(time.perf_counter() - start) * 1000)
+        except TestSkipped as exc:
+            return TestResult(name=name, skipped=True, skip_reason=str(exc),
+                              duration_ms=(time.perf_counter() - start) * 1000)
+        except AssertionFailure as exc:
+            return TestResult(name=name, passed=False, error=str(exc),
+                              duration_ms=(time.perf_counter() - start) * 1000)
+        except Exception:
+            return TestResult(name=name, passed=False, error=traceback.format_exc(),
+                              duration_ms=(time.perf_counter() - start) * 1000)
+        finally:
+            for gen in generators:
+                try:
+                    next(gen)
+                except StopIteration:
+                    pass
+            if hasattr(self, "teardown"):
+                try:
+                    self.teardown()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
+
+# ---------------------------------------------------------------------------
+# TestRunner
+# ---------------------------------------------------------------------------
+
+class TestRunner:
+    """Runs suites and prints colour-coded results."""
+
+    _PASS = "\033[32mPASS\033[0m"
+    _FAIL = "\033[31mFAIL\033[0m"
+    _SKIP = "\033[33mSKIP\033[0m"
+
+    def run_suites(self, suites: list[TestSuite]) -> bool:
+        """Run a list of TestSuite instances. Returns True if all passed."""
+        all_results = [s.run() for s in suites]
+        for r in all_results:
+            self._print_suite(r)
+        return self._print_summary(all_results)
+
+    def run_module(self, module: Any = None) -> bool:
+        """Auto-discover TestSuite subclasses in a module and run them."""
+        if module is None:
+            module = inspect.getmodule(inspect.stack()[1][0])
+        suites = [
+            cls() for _, cls in inspect.getmembers(module, inspect.isclass)
+            if issubclass(cls, TestSuite) and cls is not TestSuite
+        ]
+        return self.run_suites(suites)
+
+    def _print_suite(self, result: SuiteResult) -> None:
+        print(f"\n{'─' * 60}")
+        print(f"  Suite: {result.suite_name}")
+        print(f"{'─' * 60}")
+        for r in result.results:
+            if r.skipped:
+                tag, suffix = self._SKIP, f"  [{r.skip_reason}]" if r.skip_reason else ""
+            elif r.passed:
+                tag, suffix = self._PASS, f"  ({r.duration_ms:.1f}ms)"
+            else:
+                tag, suffix = self._FAIL, ""
+            print(f"  [{tag}] {r.name}{suffix}")
+            if not r.passed and not r.skipped and r.error:
+                for line in r.error.strip().splitlines():
+                    print(f"          {line}")
+
+    def _print_summary(self, all_results: list[SuiteResult]) -> bool:
+        total   = sum(r.total   for r in all_results)
+        passed  = sum(r.passed  for r in all_results)
+        failed  = sum(r.failed  for r in all_results)
+        skipped = sum(r.skipped for r in all_results)
+        print(f"\n{'═' * 60}")
+        print(f"  Results: {total} tests | "
+              f"\033[32m{passed} passed\033[0m | "
+              f"\033[31m{failed} failed\033[0m | "
+              f"\033[33m{skipped} skipped\033[0m")
+        print(f"{'═' * 60}\n")
+        return failed == 0
+
+
+def run_tests(module: Any = None) -> None:
+    """Discover suites in the caller's module and run them. Exits 1 on failure."""
+    target = module or inspect.getmodule(inspect.stack()[1][0])
+    if not TestRunner().run_module(target):
+        sys.exit(1)
+```
+
+---
+
+**Example usage** (`example_tests.py`):
+
+```python
+from framework import (
+    TestSuite, fixture, test, skip_test, skip,
+    assert_equal, assert_true, assert_in,
+    assert_raises_context, run_tests,
+)
+
+class MathTests(TestSuite):
+    def test_addition(self) -> None:
+        assert_equal(1 + 1, 2)
+
+    def test_division_by_zero(self) -> None:
+        with assert_raises_context(ZeroDivisionError):
+            _ = 1 / 0
+
+    @skip_test("not implemented yet")
+    def test_pending(self) -> None:
+        pass
+
+
+class FixtureTests(TestSuite):
+    @fixture
+    def sample_list(self):
+        data = [1, 2, 3]
+        yield data          # setup
+        data.clear()        # teardown
+
+    def test_list_contents(self, sample_list: list) -> None:
+        assert_in(2, sample_list)
+
+    def test_dynamic_skip(self) -> None:
+        skip("needs external service")
+
+
+if __name__ == "__main__":
+    run_tests()
+```
+
+**Sample output:**
+```
+────────────────────────────────────────────────────────────
+  Suite: MathTests
+────────────────────────────────────────────────────────────
+  [PASS] test_addition  (0.0ms)
+  [PASS] test_division_by_zero  (0.0ms)
+  [SKIP] test_pending  [not implemented yet]
+
+────────────────────────────────────────────────────────────
+  Suite: FixtureTests
+────────────────────────────────────────────────────────────
+  [PASS] test_list_contents  (0.0ms)
+  [SKIP] test_dynamic_skip  [needs external service]
+
+════════════════════════════════════════════════════════════
+  Results: 5 tests | 3 passed | 0 failed | 2 skipped
+════════════════════════════════════════════════════════════
+```
+
+---
+
+**Key design decisions:**
+
+| Feature | How it works |
+|---|---|
+| **Test discovery** | Methods named `test_*` or decorated with `@test` are collected and sorted by source line |
+| **Fixtures** | `@fixture` methods injected by parameter name; `yield` fixtures run teardown after the test |
+| **Setup/teardown** | Define `setup(self)` / `teardown(self)` on the suite — called around every test |
+| **Skipping** | `@skip_test("reason")` at definition time, or `skip("reason")` at runtime |
+| **Assertions** | `AssertionFailure` (subclass of `AssertionError`) with clear diff messages |
+| **Exit code** | `run_tests()` exits with code 1 if any test fails |

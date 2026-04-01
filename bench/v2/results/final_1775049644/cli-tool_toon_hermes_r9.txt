@@ -1,0 +1,188 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by a column value with progress reporting.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import Optional
+
+import structlog
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by a column value with progress reporting."
+    )
+    parser.add_argument("input_file", type=str, help="Input CSV file path")
+    parser.add_argument(
+        "column_name", type=str, help="Column name to filter on"
+    )
+    parser.add_argument(
+        "filter_value", type=str, help="Value to match in the specified column"
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        help="Output file path (default: stdout)",
+    )
+    parser.add_argument(
+        "-d",
+        "--delimiter",
+        type=str,
+        default=",",
+        help="CSV delimiter (default: ,)",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output",
+    )
+    return parser.parse_args()
+
+
+async def filter_csv(
+    input_path: Path,
+    column_name: str,
+    filter_value: str,
+    delimiter: str = ",",
+    output_path: Optional[Path] = None,
+    quiet: bool = False,
+) -> int:
+    """
+    Filter rows from a CSV file where the specified column matches the filter value.
+
+    Args:
+        input_path: Path to the input CSV file.
+        column_name: Name of the column to filter on.
+        filter_value: Value to match in the specified column.
+        delimiter: CSV delimiter character.
+        output_path: Optional path to write filtered output.
+        quiet: If True, suppress progress output.
+
+    Returns:
+        Exit code (0 for success, non-zero for errors).
+    """
+    logger = structlog.get_logger()
+
+    try:
+        # Validate input file
+        if not input_path.exists():
+            logger.error("Input file not found", path=str(input_path))
+            return 1
+
+        if input_path.stat().st_size == 0:
+            logger.warning("Input file is empty", path=str(input_path))
+            return 0
+
+        # Open input and output files
+        try:
+            with input_path.open(newline="", encoding="utf-8") as infile:
+                reader = csv.DictReader(infile, delimiter=delimiter)
+
+                # Check if column exists
+                if column_name not in reader.fieldnames:
+                    logger.error(
+                        "Column not found",
+                        column=column_name,
+                        available_columns=reader.fieldnames or [],
+                    )
+                    return 1
+
+                # Prepare output
+                output_file = (
+                    sys.stdout
+                    if output_path is None or str(output_path) == "-"
+                    else open(output_path, "w", newline="", encoding="utf-8")
+                )
+                try:
+                    writer = csv.DictWriter(
+                        output_file,
+                        fieldnames=reader.fieldnames,
+                        delimiter=delimiter,
+                    )
+                    writer.writeheader()
+
+                    # Count total rows for progress
+                    total_rows = 0
+                    filtered_rows = 0
+                    # Read all rows first to get count (for progress)
+                    all_rows = list(reader)
+                    total_rows = len(all_rows)
+
+                    # Process rows with progress
+                    for i, row in enumerate(all_rows, start=1):
+                        if not quiet:
+                            progress = (i / total_rows) * 100
+                            logger.info(
+                                "Processing",
+                                progress=progress,
+                                row=i,
+                                total=total_rows,
+                            )
+
+                        if row.get(column_name) == filter_value:
+                            writer.writerow(row)
+                            filtered_rows += 1
+
+                    logger.info(
+                        "Filtering complete",
+                        total_rows=total_rows,
+                        filtered_rows=filtered_rows,
+                    )
+                    return 0
+                finally:
+                    if output_path is not None and str(output_path) != "-":
+                        output_file.close()
+
+        except IOError as e:
+            logger.error("File operation failed", error=str(e))
+            return 1
+
+    except Exception as e:
+        logger.exception("Unexpected error", error=str(e))
+        return 1
+
+
+def main() -> int:
+    """Main entry point for the CLI tool."""
+    args = parse_args()
+    input_path = Path(args.input_file)
+    output_path = Path(args.output) if args.output else None
+
+    # Configure structlog for consistent logging
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.add_log_level,
+            structlog.dev.ConsoleRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(
+            structlog.logging.LoggerFactory()
+        ),
+    )
+    logger = structlog.get_logger()
+
+    try:
+        return await filter_csv(
+            input_path=input_path,
+            column_name=args.column_name,
+            filter_value=args.filter_value,
+            delimiter=args.delimiter,
+            output_path=output_path,
+            quiet=args.quiet,
+        )
+    except Exception as e:
+        logger.error("Fatal error", error=str(e))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

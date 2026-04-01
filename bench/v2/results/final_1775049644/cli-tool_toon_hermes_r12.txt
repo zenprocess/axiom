@@ -1,0 +1,182 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter rows from a CSV file based on a column value.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+
+import structlog
+
+
+def setup_logger() -> structlog.BoundLogger:
+    """Configure structlog for consistent logging."""
+    structlog.configure(
+        processors=[
+            structlog.stdlib.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.dev.ConsoleRenderer(),
+        ],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+    return structlog.get_logger()
+
+
+logger = setup_logger()
+
+
+def read_csv_file(file_path: Path) -> List[Dict[str, str]]:
+    """Read CSV file and return list of rows as dictionaries."""
+    try:
+        with open(file_path, "r", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile)
+            return list(reader)
+    except FileNotFoundError:
+        logger.error("File not found", file_path=str(file_path))
+        sys.exit(1)
+    except PermissionError:
+        logger.error("Permission denied", file_path=str(file_path))
+        sys.exit(1)
+    except csv.Error as e:
+        logger.error("Invalid CSV format", file_path=str(file_path), error=str(e))
+        sys.exit(1)
+
+
+def filter_rows(
+    rows: List[Dict[str, str]],
+    column_name: str,
+    column_value: str,
+    case_sensitive: bool = True,
+) -> List[Dict[str, str]]:
+    """Filter rows where column_name equals column_value."""
+    filtered_rows = []
+    total_rows = len(rows)
+
+    for i, row in enumerate(rows):
+        if not case_sensitive:
+            row_value = row.get(column_name, "").lower()
+            target_value = column_value.lower()
+        else:
+            row_value = row.get(column_name, "")
+            target_value = column_value
+
+        if row_value == target_value:
+            filtered_rows.append(row)
+
+        # Progress output every 10% of rows
+        if (i + 1) % max(1, total_rows // 10) == 0 or i == total_rows - 1:
+            progress = int((i + 1) / total_rows * 100) if total_rows > 0 else 100
+            logger.info(
+                "Filtering progress",
+                processed=i + 1,
+                total=total_rows,
+                progress=progress,
+                matches=len(filtered_rows),
+            )
+
+    return filtered_rows
+
+
+def write_output(
+    filtered_rows: List[Dict[str, str]], output_file: Optional[Path]
+) -> None:
+    """Write filtered rows to stdout or file."""
+    if not filtered_rows:
+        logger.info("No matching rows found")
+        return
+
+    # Get fieldnames from first row
+    fieldnames = list(filtered_rows[0].keys())
+
+    if output_file:
+        try:
+            with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(filtered_rows)
+            logger.info("Output written to file", file_path=str(output_file))
+        except PermissionError:
+            logger.error("Permission denied writing to file", file_path=str(output_file))
+            sys.exit(1)
+    else:
+        writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(filtered_rows)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter rows from a CSV file based on a column value."
+    )
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="Input CSV file path",
+    )
+    parser.add_argument(
+        "--column",
+        required=True,
+        help="Column name to filter on",
+    )
+    parser.add_argument(
+        "--value",
+        required=True,
+        help="Value to match in the specified column",
+    )
+    parser.add_argument(
+        "--case-insensitive",
+        action="store_true",
+        help="Perform case-insensitive matching",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Output file path (default: stdout)",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Main entry point."""
+    args = parse_args()
+
+    # Validate input file
+    if not args.input_file.exists():
+        logger.error("Input file does not exist", file_path=str(args.input_file))
+        sys.exit(1)
+
+    # Read CSV file
+    logger.info("Reading CSV file", file_path=str(args.input_file))
+    rows = read_csv_file(args.input_file)
+    logger.info("CSV file loaded", row_count=len(rows))
+
+    # Filter rows
+    logger.info(
+        "Filtering rows",
+        column=args.column,
+        value=args.value,
+        case_sensitive=not args.case_insensitive,
+    )
+    filtered_rows = filter_rows(
+        rows,
+        args.column,
+        args.value,
+        case_sensitive=not args.case_insensitive,
+    )
+
+    # Write output
+    logger.info("Writing output", match_count=len(filtered_rows))
+    write_output(filtered_rows, args.output)
+
+
+if __name__ == "__main__":
+    main()
+```

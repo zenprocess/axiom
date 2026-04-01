@@ -1,0 +1,203 @@
+Here's a production-ready logging system for a web application following your specified rules:
+
+```python
+import os
+import sys
+import logging
+from typing import Optional
+from datetime import datetime
+from pathlib import Path
+
+import structlog
+from structlog.processors import TimeStamper, format_exc_info, JSONRenderer
+from structlog.stdlib import (
+    add_log_level,
+    add_logger_name,
+    FilterByLevel,
+    BoundLogger,
+)
+from structlog.contextvars import merge_contextvars
+
+# Configuration
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FILE = os.getenv("LOG_FILE", "app.log")
+MAX_LOG_SIZE = int(os.getenv("MAX_LOG_SIZE", 10 * 1024 * 1024))  # 10MB
+BACKUP_COUNT = int(os.getenv("BACKUP_COUNT", 5))
+
+
+def setup_logging(
+    log_file: Optional[str] = None,
+    log_level: Optional[str] = None,
+    debug: bool = False,
+) -> None:
+    """Configure structured logging for the application.
+
+    Args:
+        log_file: Path to log file. Defaults to environment variable LOG_FILE or "app.log".
+        log_level: Minimum log level. Defaults to environment variable LOG_LEVEL or "INFO".
+        debug: Enable debug mode with enhanced output.
+    """
+    # Use provided values or fall back to environment variables
+    log_file = log_file or LOG_FILE
+    log_level = log_level or LOG_LEVEL
+
+    # Create log directory if needed
+    log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Configure structlog processors
+    processors = [
+        merge_contextvars,  # Merge context variables (e.g., request ID)
+        add_log_level,      # Add log level to the log entry
+        add_logger_name,    # Add logger name
+        TimeStamper(fmt="iso"),  # Timestamp in ISO format
+        format_exc_info,    # Format exceptions
+        JSONRenderer(),     # Render as JSON
+    ]
+
+    # Configure structlog logging configuration
+    structlog.configure(
+        processors=processors,
+        wrapper_class=BoundLogger,
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+    # Configure handler(s) for output
+    handlers = []
+
+    # Console handler (stdout) for development and containerized environments
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(log_level)
+    handlers.append(console_handler)
+
+    # File handler for persistent logs
+    try:
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=MAX_LOG_SIZE,
+            backupCount=BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(log_level)
+        handlers.append(file_handler)
+    except (OSError, IOError) as e:
+        # Log error but don't crash if file logging fails
+        structlog.get_logger().warning(
+            "file_logging_disabled", reason=str(e), log_file=log_file
+        )
+
+    # Configure root logger
+    logging.basicConfig(
+        level=log_level,
+        handlers=handlers,
+        format="%(message)s",  # structlog handles formatting
+    )
+
+    # Set log level for all handlers
+    for handler in handlers:
+        handler.setLevel(log_level)
+
+    # Configure urllib3/requests to use our logging
+    logging.getLogger("urllib3").setLevel(log_level)
+    logging.getLogger("httpx").setLevel(log_level)
+    logging.getLogger("httpcore").setLevel(log_level)
+
+    # In debug mode, add more context and reduce noise
+    if debug:
+        structlog.configure(
+            processors=processors + [structlog.processors.CallsiteParameterAdder()],
+        )
+
+
+def get_logger(name: Optional[str] = None) -> BoundLogger:
+    """Get a logger instance with optional name.
+
+    Args:
+        name: Logger name (typically module name using __name__)
+
+    Returns:
+        BoundLogger instance configured for structured logging.
+    """
+    return structlog.get_logger(name)
+
+
+def bind_request_context(request_id: str) -> None:
+    """Bind request-specific context for structured logging.
+
+    Args:
+        request_id: Unique identifier for the request.
+    """
+    structlog.contextvars.bind_contextvars(request_id=request_id)
+
+
+def clear_request_context() -> None:
+    """Clear request-specific context after request processing."""
+    structlog.contextvars.unbind_contextvars("request_id")
+```
+
+Key features:
+
+1. **Structured JSON Output**: Uses `structlog` with `JSONRenderer` for machine-readable logs.
+
+2. **Log Levels**: Configurable via `LOG_LEVEL` environment variable with proper filtering.
+
+3. **Request Correlation IDs**: `bind_request_context()` and `clear_request_context()` manage request-specific context using `structlog.contextvars`.
+
+4. **Log Rotation**: Uses `RotatingFileHandler` with configurable size and backup count.
+
+5. **Environment-Based Configuration**: All settings can be overridden via environment variables.
+
+6. **Error Handling**: Gracefully handles file logging failures without crashing the application.
+
+7. **Type Hints**: All functions include complete parameter and return type hints.
+
+8. **No Secrets**: Uses environment variables for configuration instead of hardcoded values.
+
+9. **Async-Ready**: Uses standard logging infrastructure that's compatible with async frameworks.
+
+Usage example:
+
+```python
+# main.py
+from logging_system import setup_logging, get_logger, bind_request_context, clear_request_context
+
+# Initialize logging at application startup
+setup_logging(debug=False)
+
+# In your request handler
+async def handle_request(request):
+    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+    bind_request_context(request_id)
+    
+    log = get_logger(__name__)
+    log.info("handling_request", method=request.method, path=request.path)
+    
+    try:
+        # Process request
+        result = await process_data(request)
+        log.info("request_processed", status=200)
+        return result
+    except Exception as e:
+        log.error("request_failed", error=str(e), exc_info=True)
+        raise
+    finally:
+        clear_request_context()
+```
+
+Example JSON output:
+
+```json
+{
+  "event": "handling_request",
+  "level": "info",
+  "logger": "myapp.handlers",
+  "timestamp": "2023-10-05T14:30:12.123Z",
+  "request_id": "abc123",
+  "method": "POST",
+  "path": "/api/users"
+}
+```
+
+This system is production-ready and follows all your specified rules.

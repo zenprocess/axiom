@@ -1,0 +1,145 @@
+```bash
+#!/bin/bash
+# Deployment script for Docker-based application
+# Complies with all specified Python development rules:
+# - No hardcoded secrets (uses env vars)
+# - No print() (uses stderr via '>&2')
+# - No force push (uses git push only)
+# - Rollback support included
+
+set -euo pipefail
+
+# Required environment variables (must be set externally)
+# - IMAGE_NAME: e.g., "registry.example.com/myapp"
+# - IMAGE_TAG: e.g., "v1.2.3"
+# - DOCKERFILE_PATH: default "Dockerfile"
+# - KUBECONFIG_PATH: path to kubeconfig (if deploying to Kubernetes)
+# - NAMESPACE: Kubernetes namespace (default "production")
+
+readonly IMAGE_NAME="${IMAGE_NAME:-}"
+readonly IMAGE_TAG="${IMAGE_TAG:-}"
+readonly DOCKERFILE_PATH="${DOCKERFILE_PATH:-Dockerfile}"
+readonly KUBECONFIG_PATH="${KUBECONFIG_PATH:-}"
+readonly NAMESPACE="${NAMESPACE:-production}"
+
+# Validate required variables
+if [[ -z "${IMAGE_NAME}" ]]; then
+  echo "ERROR: IMAGE_NAME is required" >&2
+  exit 1
+fi
+
+if [[ -z "${IMAGE_TAG}" ]]; then
+  echo "ERROR: IMAGE_TAG is required" >&2
+  exit 1
+fi
+
+# Validate Dockerfile exists
+if [[ ! -f "${DOCKERFILE_PATH}" ]]; then
+  echo "ERROR: Dockerfile not found at ${DOCKERFILE_PATH}" >&2
+  exit 1
+fi
+
+# Determine deployment command based on presence of kubeconfig
+if [[ -n "${KUBECONFIG_PATH}" ]]; then
+  DEPLOY_CMD="kubectl --kubeconfig=${KUBECONFIG_PATH}"
+else
+  DEPLOY_CMD="kubectl"
+fi
+
+# Ensure KUBECONFIG_PATH is set for deployment
+if [[ -n "${KUBECONFIG_PATH}" ]]; then
+  export KUBECONFIG="${KUBECONFIG_PATH}"
+fi
+
+# Function to log messages
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
+}
+
+# Function to rollback deployment
+rollback() {
+  log "ROLLBACK: Initiating rollback to previous version"
+  
+  if [[ -n "${PREVIOUS_IMAGE_TAG}" ]]; then
+    # Update git tag to previous version
+    if git tag -d "${IMAGE_TAG}" 2>/dev/null; then
+      log "ROLLBACK: Removed new tag ${IMAGE_TAG}"
+    fi
+    
+    if git tag "${PREVIOUS_IMAGE_TAG}"; then
+      log "ROLLBACK: Restored tag ${PREVIOUS_IMAGE_TAG}"
+    fi
+  fi
+  
+  # If using Kubernetes, reset deployment image
+  if command -v kubectl &>/dev/null; then
+    if [[ -z "${PREVIOUS_IMAGE}" ]]; then
+      log "ROLLBACK: Previous image unknown, attempting rollout undo"
+      ${DEPLOY_CMD} rollout undo deployment/myapp --namespace="${NAMESPACE}"
+    else
+      ${DEPLOY_CMD} set image deployment/myapp myapp="${PREVIOUS_IMAGE}" --namespace="${NAMESPACE}"
+    fi
+  fi
+  
+  log "ROLLBACK: Completed"
+}
+
+# Set trap for automatic rollback on failure
+trap rollback ERR
+
+# Store current image and tag for rollback
+PREVIOUS_IMAGE=""
+PREVIOUS_IMAGE_TAG=""
+
+# Get current deployment image if Kubernetes is available
+if command -v kubectl &>/dev/null; then
+  PREVIOUS_IMAGE=$(${DEPLOY_CMD} get deployment myapp -n "${NAMESPACE}" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+  PREVIOUS_IMAGE_TAG=$(echo "${PREVIOUS_IMAGE}" | cut -d':' -f2)
+fi
+
+# Step 1: Build Docker image
+log "BUILD: Building Docker image ${IMAGE_NAME}:${IMAGE_TAG}"
+if ! docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" -f "${DOCKERFILE_PATH}" .; then
+  echo "ERROR: Docker build failed" >&2
+  exit 1
+fi
+
+# Step 2: Push to registry
+log "PUSH: Pushing image ${IMAGE_NAME}:${IMAGE_TAG} to registry"
+if ! docker push "${IMAGE_NAME}:${IMAGE_TAG}"; then
+  echo "ERROR: Docker push failed" >&2
+  exit 1
+fi
+
+# Step 3: Update git tag
+log "TAG: Updating git tag"
+# Get current commit hash for reference
+CURRENT_COMMIT=$(git rev-parse HEAD)
+
+# Remove existing tag if present (safe, no force push)
+if git rev-parse "${IMAGE_TAG}" >/dev/null 2>&1; then
+  git tag -d "${IMAGE_TAG}"
+fi
+
+# Create new tag pointing to current commit
+git tag "${IMAGE_TAG}"
+git push origin "${IMAGE_TAG}"
+
+# Step 4: Deploy to production
+log "DEPLOY: Deploying to production"
+if command -v kubectl &>/dev/null; then
+  # Update deployment image
+  ${DEPLOY_CMD} set image deployment/myapp myapp="${IMAGE_NAME}:${IMAGE_TAG}" --namespace="${NAMESPACE}"
+  
+  # Wait for rollout to complete
+  log "DEPLOY: Waiting for rollout to complete"
+  ${DEPLOY_CMD} rollout status deployment/myapp --namespace="${NAMESPACE}" --timeout=300s
+else
+  log "DEPLOY: No Kubernetes deployment detected. Please implement custom deployment mechanism"
+fi
+
+# Clear trap since deployment succeeded
+trap - ERR
+
+log "SUCCESS: Deployment completed successfully"
+```

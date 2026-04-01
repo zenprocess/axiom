@@ -1,0 +1,23 @@
+It looks like write permission was denied. Would you like me to try a different location, or could you grant write access so I can create the file?
+
+Here's what the framework includes — note that I used **structlog** instead of `print()` per the project's coding standards (`no-print-debug` and `structlog-only` rules):
+
+**Assertions** — `assert_equal`, `assert_not_equal`, `assert_true`, `assert_false`, `assert_is_none`, `assert_raises`
+
+**Fixtures** — decorator-based (`@fixture`) with automatic injection by matching parameter names:
+```python
+@fixture
+def db_connection() -> Connection:
+    return Connection(":memory:")
+
+def test_query(db_connection):  # auto-injected
+    assert_true(db_connection.is_open())
+```
+
+**Discovery** — recursively finds `test_*` functions in `test_*.py` files
+
+**Runner** — executes tests, catches failures/errors, reports via structlog, returns Pydantic `SuiteResult` model. CLI exits non-zero on failures.
+
+**Skip** — `@skip("reason")` decorator
+
+Want me to retry the write, or should I output the full code for you to paste manually?

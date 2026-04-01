@@ -1,0 +1,294 @@
+```python
+#!/usr/bin/env python3
+"""
+CLI tool to filter CSV rows by column value with progress output.
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import structlog
+
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+log = structlog.get_logger()
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Filter CSV rows by column value with progress output."
+    )
+    parser.add_argument("input_file", type=str, help="Path to input CSV file")
+    parser.add_argument(
+        "output_file", type=str, help="Path to output CSV file (filtered results)"
+    )
+    parser.add_argument(
+        "--column", "-c", required=True, help="Column name to filter on"
+    )
+    parser.add_argument(
+        "--value", "-v", required=True, help="Value to match in the specified column"
+    )
+    parser.add_argument(
+        "--delimiter",
+        "-d",
+        default=",",
+        help="CSV delimiter (default: ',')",
+    )
+    parser.add_argument(
+        "--quotechar",
+        default='"',
+        help="Quote character for CSV (default: '\"')",
+    )
+    parser.add_argument(
+        "--encoding",
+        default="utf-8",
+        help="File encoding (default: 'utf-8')",
+    )
+    return parser.parse_args()
+
+
+def read_csv_with_progress(
+    file_path: Path, delimiter: str, quotechar: str, encoding: str
+) -> tuple[List[dict], List[str]]:
+    """
+    Read CSV file with progress reporting.
+    
+    Args:
+        file_path: Path to the CSV file
+        delimiter: CSV delimiter
+        quotechar: Quote character
+        encoding: File encoding
+    
+    Returns:
+        Tuple of (rows as list of dicts, fieldnames)
+    """
+    rows = []
+    fieldnames = []
+    
+    try:
+        with file_path.open("r", encoding=encoding, newline="") as csvfile:
+            # Get total lines for progress
+            total_lines = sum(1 for _ in csvfile) - 1  # Subtract header line
+            csvfile.seek(0)
+            
+            reader = csv.DictReader(
+                csvfile, 
+                delimiter=delimiter, 
+                quotechar=quotechar
+            )
+            fieldnames = reader.fieldnames or []
+            
+            for i, row in enumerate(reader, start=1):
+                # Progress output every 10% (or every 1000 rows for large files)
+                if i % max(1, total_lines // 10) == 0 or i == 1:
+                    log.info(
+                        "Progress", 
+                        current=i, 
+                        total=total_lines,
+                        percentage=int(i / total_lines * 100)
+                    )
+                rows.append(row)
+            
+            log.info("CSV reading completed", total_rows=len(rows))
+            
+    except FileNotFoundError:
+        log.error("File not found", file_path=str(file_path))
+        raise
+    except UnicodeDecodeError as e:
+        log.error("Encoding error", file_path=str(file_path), encoding=encoding, error=str(e))
+        raise
+    except csv.Error as e:
+        log.error("CSV parsing error", file_path=str(file_path), error=str(e))
+        raise
+    except Exception as e:
+        log.error("Unexpected error reading CSV", file_path=str(file_path), error=str(e))
+        raise
+    
+    return rows, fieldnames
+
+
+def filter_rows(
+    rows: List[dict], column: str, value: str
+) -> tuple[List[dict], int]:
+    """
+    Filter rows by matching column value.
+    
+    Args:
+        rows: List of row dictionaries
+        column: Column name to filter on
+        value: Value to match
+    
+    Returns:
+        Tuple of (filtered rows, count of matching rows)
+    """
+    filtered = []
+    matching_count = 0
+    
+    log.info("Starting filter operation", column=column, value=value)
+    
+    for i, row in enumerate(rows):
+        if i % max(1, len(rows) // 10) == 0 or i == 0:
+            log.info(
+                "Filtering progress", 
+                processed=i, 
+                total=len(rows),
+                matches_found=matching_count
+            )
+        
+        # Handle missing column gracefully
+        if column not in row:
+            if i == 0:  # Only warn once
+                log.warning("Column not found in CSV", column=column)
+            continue
+        
+        if row[column] == value:
+            filtered.append(row)
+            matching_count += 1
+    
+    log.info("Filtering completed", matches=matching_count)
+    return filtered, matching_count
+
+
+def write_csv(
+    file_path: Path, 
+    rows: List[dict], 
+    fieldnames: List[str], 
+    delimiter: str, 
+    quotechar: str, 
+    encoding: str
+) -> None:
+    """
+    Write filtered rows to CSV file.
+    
+    Args:
+        file_path: Output file path
+        rows: List of row dictionaries to write
+        fieldnames: Column names
+        delimiter: CSV delimiter
+        quotechar: Quote character
+        encoding: File encoding
+    """
+    try:
+        with file_path.open("w", encoding=encoding, newline="") as csvfile:
+            writer = csv.DictWriter(
+                csvfile,
+                fieldnames=fieldnames,
+                delimiter=delimiter,
+                quotechar=quotechar,
+                quoting=csv.QUOTE_MINIMAL
+            )
+            
+            writer.writeheader()
+            
+            for i, row in enumerate(rows):
+                if i % max(1, len(rows) // 10) == 0 or i == 0:
+                    log.info(
+                        "Writing progress", 
+                        current=i, 
+                        total=len(rows),
+                        percentage=int(i / len(rows) * 100) if len(rows) > 0 else 100
+                    )
+                writer.writerow(row)
+            
+            log.info("CSV writing completed", rows_written=len(rows))
+            
+    except PermissionError:
+        log.error("Permission denied writing to file", file_path=str(file_path))
+        raise
+    except Exception as e:
+        log.error("Error writing CSV", file_path=str(file_path), error=str(e))
+        raise
+
+
+def main() -> int:
+    """
+    Main entry point for the CLI tool.
+    
+    Returns:
+        Exit code (0 for success, non-zero for errors)
+    """
+    try:
+        args = parse_args()
+        
+        input_path = Path(args.input_file)
+        output_path = Path(args.output_file)
+        
+        # Validate input file exists
+        if not input_path.exists():
+            log.error("Input file does not exist", file_path=str(input_path))
+            return 1
+        
+        # Read CSV with progress
+        rows, fieldnames = read_csv_with_progress(
+            input_path, 
+            args.delimiter, 
+            args.quotechar, 
+            args.encoding
+        )
+        
+        if not fieldnames:
+            log.warning("CSV file appears to be empty")
+            return 0
+        
+        # Filter rows
+        filtered_rows, matching_count = filter_rows(rows, args.column, args.value)
+        
+        # Warn if no matches found
+        if matching_count == 0:
+            log.warning("No matching rows found", column=args.column, value=args.value)
+        
+        # Write results
+        write_csv(
+            output_path,
+            filtered_rows,
+            fieldnames,
+            args.delimiter,
+            args.quotechar,
+            args.encoding
+        )
+        
+        log.info(
+            "Processing completed successfully",
+            input_rows=len(rows),
+            output_rows=len(filtered_rows),
+            matches=matching_count
+        )
+        
+        return 0
+        
+    except FileNotFoundError as e:
+        log.error("File operation failed", error=str(e))
+        return 1
+    except UnicodeDecodeError as e:
+        log.error("Encoding error", error=str(e))
+        return 2
+    except KeyboardInterrupt:
+        log.warning("Process interrupted by user")
+        return 130
+    except Exception as e:
+        log.error("Unexpected error", error=str(e))
+        return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```

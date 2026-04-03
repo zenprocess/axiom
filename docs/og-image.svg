@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0a0a0f"/>
+      <stop offset="50%" stop-color="#0f1729"/>
+      <stop offset="100%" stop-color="#0a0a0f"/>
+    </linearGradient>
+    <!-- Accent gradient -->
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ff6600"/>
+      <stop offset="33%" stop-color="#ff8833"/>
+      <stop offset="66%" stop-color="#ffaa66"/>
+      <stop offset="100%" stop-color="#ffcc99"/>
+    </linearGradient>
+    <!-- Accent gradient vertical (for icon) -->
+    <linearGradient id="accent-v" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ff6600"/>
+      <stop offset="100%" stop-color="#ffaa66"/>
+    </linearGradient>
+    <!-- Grid pattern -->
+    <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse">
+      <path d="M 60 0 L 0 0 0 60" fill="none" stroke="#ffffff" stroke-opacity="0.04" stroke-width="1"/>
+    </pattern>
+    <!-- Glow filter -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- Top accent line -->
+  <rect x="0" y="0" width="1200" height="3" fill="url(#accent)" opacity="0.8"/>
+
+  <!-- Icon: diamond/prism (rule facets) -->
+  <g transform="translate(80, 80)">
+    <!-- Diamond shape -->
+    <path d="M 50 5 L 90 45 L 50 85 L 10 45 Z" fill="none" stroke="url(#accent-v)" stroke-width="2.5" opacity="0.7" filter="url(#glow)"/>
+    <!-- Inner facet lines -->
+    <line x1="50" y1="5" x2="50" y2="85" stroke="#ff8833" stroke-width="1" opacity="0.3"/>
+    <line x1="10" y1="45" x2="90" y2="45" stroke="#ff8833" stroke-width="1" opacity="0.3"/>
+    <!-- Facet highlights -->
+    <path d="M 50 5 L 30 45 L 50 45 Z" fill="#ff6600" opacity="0.08"/>
+    <path d="M 50 5 L 70 45 L 50 45 Z" fill="#ff8833" opacity="0.06"/>
+    <!-- Center dot -->
+    <circle cx="50" cy="45" r="3" fill="#ffaa66"/>
+  </g>
+
+  <!-- Title -->
+  <text x="80" y="210" font-family="'SF Mono', 'Fira Code', 'JetBrains Mono', monospace" font-size="82" font-weight="700" fill="#ffffff" letter-spacing="0.05em">AXIOM</text>
+
+  <!-- Tagline -->
+  <text x="84" y="255" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="24" fill="#8888aa" letter-spacing="0.02em">Rule Definition Language for AI coding agents</text>
+
+  <!-- Feature pills -->
+  <g transform="translate(80, 290)">
+    <!-- Pill: S/D Rows -->
+    <rect x="0" y="0" width="110" height="36" rx="18" fill="none" stroke="#ff6600" stroke-opacity="0.5" stroke-width="1"/>
+    <text x="55" y="23" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#ff8833" letter-spacing="0.03em">S/D Rows</text>
+    <!-- Pill: TOON Format -->
+    <rect x="125" y="0" width="135" height="36" rx="18" fill="none" stroke="#ff6600" stroke-opacity="0.5" stroke-width="1"/>
+    <text x="192" y="23" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#ff8833" letter-spacing="0.03em">TOON Format</text>
+    <!-- Pill: Budget Pressure -->
+    <rect x="275" y="0" width="155" height="36" rx="18" fill="none" stroke="#ff6600" stroke-opacity="0.5" stroke-width="1"/>
+    <text x="352" y="23" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#ff8833" letter-spacing="0.03em">Budget Pressure</text>
+    <!-- Pill: Activation Modes -->
+    <rect x="445" y="0" width="162" height="36" rx="18" fill="none" stroke="#ff6600" stroke-opacity="0.5" stroke-width="1"/>
+    <text x="526" y="23" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#ff8833" letter-spacing="0.03em">Activation Modes</text>
+    <!-- Pill: Scope Tags -->
+    <rect x="622" y="0" width="120" height="36" rx="18" fill="none" stroke="#ff6600" stroke-opacity="0.5" stroke-width="1"/>
+    <text x="682" y="23" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#ff8833" letter-spacing="0.03em">Scope Tags</text>
+  </g>
+
+  <!-- Architecture mini-diagram -->
+  <g transform="translate(80, 400)">
+    <!-- Pipeline boxes -->
+    <rect x="0" y="0" width="120" height="44" rx="6" fill="#0a0a0f" stroke="#ff6600" stroke-opacity="0.3" stroke-width="1"/>
+    <text x="60" y="27" text-anchor="middle" font-family="'SF Mono', monospace" font-size="12" fill="#ffaa66">Rules.md</text>
+
+    <rect x="160" y="0" width="100" height="44" rx="6" fill="#0a0a0f" stroke="#ff6600" stroke-opacity="0.3" stroke-width="1"/>
+    <text x="210" y="27" text-anchor="middle" font-family="'SF Mono', monospace" font-size="12" fill="#ffaa66">Parse</text>
+
+    <rect x="300" y="0" width="100" height="44" rx="6" fill="#0a0a0f" stroke="#ff6600" stroke-opacity="0.3" stroke-width="1"/>
+    <text x="350" y="27" text-anchor="middle" font-family="'SF Mono', monospace" font-size="12" fill="#ffaa66">Encode</text>
+
+    <rect x="440" y="0" width="120" height="44" rx="6" fill="#0a0a0f" stroke="#ff6600" stroke-opacity="0.3" stroke-width="1"/>
+    <text x="500" y="27" text-anchor="middle" font-family="'SF Mono', monospace" font-size="12" fill="#ffaa66">S/D Rows</text>
+
+    <rect x="600" y="0" width="150" height="44" rx="6" fill="#0a0a0f" stroke="#ff6600" stroke-opacity="0.3" stroke-width="1"/>
+    <text x="675" y="27" text-anchor="middle" font-family="'SF Mono', monospace" font-size="12" fill="#ffaa66">Agent Prompt</text>
+
+    <!-- Arrows -->
+    <polygon points="158,18 158,26 152,22" fill="#ff6600" opacity="0.4"/>
+    <polygon points="298,18 298,26 292,22" fill="#ff6600" opacity="0.4"/>
+    <polygon points="438,18 438,26 432,22" fill="#ff6600" opacity="0.4"/>
+    <polygon points="598,18 598,26 592,22" fill="#ff6600" opacity="0.4"/>
+
+    <line x1="122" y1="22" x2="158" y2="22" stroke="#ff6600" stroke-opacity="0.4" stroke-width="1"/>
+    <line x1="262" y1="22" x2="298" y2="22" stroke="#ff6600" stroke-opacity="0.4" stroke-width="1"/>
+    <line x1="402" y1="22" x2="438" y2="22" stroke="#ff6600" stroke-opacity="0.4" stroke-width="1"/>
+    <line x1="562" y1="22" x2="598" y2="22" stroke="#ff6600" stroke-opacity="0.4" stroke-width="1"/>
+  </g>
+
+  <!-- standra.ai badge (bottom-right) -->
+  <g transform="translate(1020, 570)">
+    <rect x="0" y="0" width="150" height="32" rx="16" fill="#0a0a0f" stroke="#ffffff" stroke-opacity="0.1" stroke-width="1"/>
+    <text x="75" y="21" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8888aa" letter-spacing="0.05em">
+      <tspan fill="#aaaacc" font-weight="600">standra</tspan>.ai
+    </text>
+  </g>
+
+  <!-- Bottom accent line -->
+  <rect x="0" y="627" width="1200" height="3" fill="url(#accent)" opacity="0.4"/>
+</svg>

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/og-image.svg" alt="Axiom" width="800" />
+</p>
+
 # Axiom
 
 A compact Rule Definition Language (RDL) for AI coding agents. Compiles verbose markdown rules into self-describing tabular format with 87% token reduction and no compliance degradation.
@@ -120,3 +124,8 @@ See [bench/README.md](bench/README.md) for details.
 ## License
 
 [MIT](LICENSE)
+
+---
+<p align="center">
+  <img src="docs/standra-footer.svg" alt="Part of standra.ai" width="400" />
+</p>

@@ -113,10 +113,14 @@ python bench/aggregate.py
 
 See [bench/README.md](bench/README.md) for details.
 
+## Orchestration & Complexity Stratification (v0.6.0)
+
+Axiom §17 standardizes how runners report multi-dimensional dispatch results: orchestration shape vocabulary (`flat` / `waves` / `scatter-gather` / `team-mode` / `subagents`), complexity tier vocabulary (`display` / `crud` / `transactional` / `cross_cutting`), the `fixture_gap` terminal status, `verification_runs[]`, and `artifact_quality`. Inspired by Fabian Wesner's [One-Shot Shop Challenge](https://agentic-engineers.dev) — the empirical demonstration that orchestration architecture beats model choice (Team Mode 85% vs Sub-Agents 57% on the same model). Reference implementation: [pawbench](https://github.com/zenprocess/pawbench). See [spec.md §17](spec.md).
+
 ## Documentation
 
 - [Paper](paper.md) -- research paper with empirical results (arXiv-style)
-- [Specification](spec.md) -- normative format definition
+- [Specification](spec.md) -- normative format definition (v0.6.0)
 - [Benchmark](bench/) -- compliance benchmark (10 rules, 8 tasks, 20 runs)
 - [Compliance Hook](docs/compliance-hook.md) -- PostToolUse hook for ~100% compliance
 - [Examples](examples/) -- sample `.axiom` files

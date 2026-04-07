@@ -1,4 +1,4 @@
-# Axiom Specification v0.5.0
+# Axiom Specification v0.6.0
 
 ## 1. Overview
 
@@ -469,6 +469,123 @@ An MCP server exposing Axiom resources declares them as standard MCP resources:
 }
 ```
 
-## 17. Versioning
+## 17. Orchestration & Complexity Stratification
 
-This specification is versioned using semantic versioning. The current version is `0.5.0`. The version is not embedded in the file format; it is tracked by the specification document.
+> **Inspirations.** The orchestration axis and complexity-tier stratification
+> in this section are motivated by Fabian Wesner's [One-Shot Shop Challenge](https://agentic-engineers.dev)
+> ([announcement](https://www.linkedin.com/posts/fabian-wesner_oneshotshop-share-7442096217976897536-SRI9/)),
+> which empirically showed that orchestration architecture beats model choice
+> (Team Mode 85% vs Sub-Agents 57% on the same model, 143 E2E tests).
+> The reference implementation is [zenprocess/pawbench](https://github.com/zenprocess/pawbench);
+> see Switchyard spec 009 for the operational mapping.
+
+A dispatcher or benchmark is **Axiom-stratification-compliant** if it either
+implements the schemas in this section or documents in its conformance
+statement why it omits them. These schemas are normative for runners that
+report multi-dimensional dispatch results.
+
+### 17.1 Orchestration Shape Vocabulary
+
+Every dispatch result MUST be tagged with exactly one orchestration shape from
+the canonical vocabulary below. New shapes MAY be added as extensions but MUST
+NOT collide with these identifiers.
+
+| Shape            | Definition                                                                                  |
+|------------------|---------------------------------------------------------------------------------------------|
+| `flat`           | Single dispatch, single agent, no decomposition. The reference baseline.                    |
+| `waves`          | Graph-coloring of non-conflicting tasks into sequential waves of parallel dispatches.       |
+| `scatter-gather` | Decompose → N parallel workers → merge step. Workers do not coordinate during execution.   |
+| `team-mode`      | Coordinated multi-agent execution with a shared spec and an integration checkpoint.        |
+| `subagents`      | Localized sub-dispatches without coordination or merge step.                                |
+
+Tools MUST report shape via the `orchestration` field on every result row.
+
+### 17.2 Complexity Tier Vocabulary
+
+Every dispatched task MUST carry exactly one complexity tier. Tier is
+author-tagged at scenario-authoring time; tools MAY infer when missing, and
+agent self-assessment MAY be present but is overridden by the verifier.
+
+| Tier            | Definition                                                                                       |
+|-----------------|--------------------------------------------------------------------------------------------------|
+| `display`       | Read-only render of existing data; no state mutation.                                            |
+| `crud`          | Single-entity create / read / update / delete with validation.                                   |
+| `transactional` | Multi-entity flow with invariants (checkout, transfer, booking). Failure must roll back fully.   |
+| `cross_cutting` | Spans multiple subsystems (e.g., auth + payments + email).                                       |
+
+Stratified reporting (`pass_rate_by_tier`, `dqs_by_tier`) is REQUIRED for any
+runner claiming Axiom stratification compliance.
+
+### 17.3 `fixture_gap` Status
+
+`fixture_gap` is a terminal dispatch status meaning *acceptance criteria are
+un-evaluable due to missing setup* (seed data, fixtures, environment, external
+services) — and the gap is **not the agent's fault**. Runners MUST:
+
+- Exclude `fixture_gap` rows from agent rankings.
+- Surface `fixture_gap_rate` as a scenario-health metric.
+- Where possible, detect fixture gaps pre-dispatch (faster signal, zero cost).
+
+`fixture_gap` joins the existing terminal status set
+(`ok`, `fail`, `partial`, `rejected`, `no_changes`, `decomposed`, `retry`).
+
+### 17.4 Verifier Reliability — `verification_runs[]`
+
+To measure verifier flake, the AC verifier MAY be invoked N times on the same
+commit. Each invocation produces one `VerifierRun` record:
+
+```
+VERIFIER_RUNS[N]{run_id,verdict,prompt_hash,elapsed_ms,notes}:
+1,pass,a3f...,120,
+2,pass,a3f...,118,
+3,fail,a3f...,131,disagreement on AC#3
+```
+
+| Field         | Type   | Required | Notes                                          |
+|---------------|--------|----------|------------------------------------------------|
+| `run_id`      | int    | Yes      | Sequential 1..N                                |
+| `verdict`     | enum   | Yes      | `pass` \| `fail` \| `unrunnable`               |
+| `prompt_hash` | string | Yes      | SHA-256 of the verifier prompt                 |
+| `elapsed_ms`  | int    | Yes      | Wall-clock duration                            |
+| `notes`       | string | No       | Disagreement reason or model-output excerpt    |
+
+The derived SLI `verifier_agreement_rate = unanimous_runs / total_runs` is
+RECOMMENDED for any runner reporting multi-run verification.
+
+### 17.5 Artifact Quality — `artifact_quality`
+
+A static-analysis score over the *changed files only*, orthogonal to AC pass.
+
+```
+ARTIFACT_QUALITY[1]{language,lint_errors,type_errors,cyclomatic_max,score,analyzer}:
+python,3,0,12,0.82,ruff+mypy+radon
+```
+
+| Field            | Type   | Required | Notes                                        |
+|------------------|--------|----------|----------------------------------------------|
+| `language`       | string | Yes      | Primary language analyzed                    |
+| `lint_errors`    | int    | Yes      | Count of lint errors (≥ 0)                   |
+| `type_errors`    | int    | Yes      | Count of type errors (≥ 0)                   |
+| `cyclomatic_max` | int    | Yes      | Max cyclomatic complexity across changes     |
+| `score`          | float  | Yes      | Normalized 0..1                              |
+| `analyzer`       | string | Yes      | Tool that produced the score                 |
+
+Artifact quality is intentionally **independent** of any composite dispatch
+score. Runners MUST NOT silently fold it into existing aggregate scores;
+inclusion in aggregates requires an explicit, versioned schema change.
+
+### 17.6 Conformance Statement
+
+A runner declaring Axiom stratification compliance MUST publish a conformance
+statement listing, for each of §17.1–§17.5, one of: `implemented`,
+`extension`, or `omitted (reason)`. The statement is part of the runner's
+release artifact.
+
+## 18. Versioning
+
+This specification is versioned using semantic versioning. The current version is `0.6.0`. The version is not embedded in the file format; it is tracked by the specification document.
+
+### Changelog
+
+- **0.6.0** — §17 Orchestration & Complexity Stratification added (orchestration shape vocabulary, complexity tier vocabulary, `fixture_gap` status, `verification_runs[]`, `artifact_quality`). Inspired by Fabian Wesner's One-Shot Shop Challenge. Reference implementation: [zenprocess/pawbench](https://github.com/zenprocess/pawbench).
+- **0.5.0** — Universal column schema, S/D hierarchical rows, MCP resource URIs.

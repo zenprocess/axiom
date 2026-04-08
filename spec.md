@@ -476,8 +476,7 @@ An MCP server exposing Axiom resources declares them as standard MCP resources:
 > ([announcement](https://www.linkedin.com/posts/fabian-wesner_oneshotshop-share-7442096217976897536-SRI9/)),
 > which empirically showed that orchestration architecture beats model choice
 > (Team Mode 85% vs Sub-Agents 57% on the same model, 143 E2E tests).
-> The reference implementation is [zenprocess/pawbench](https://github.com/zenprocess/pawbench);
-> see Switchyard spec 009 for the operational mapping.
+> The reference implementation is [zenprocess/pawbench](https://github.com/zenprocess/pawbench).
 
 A dispatcher or benchmark is **Axiom-stratification-compliant** if it either
 implements the schemas in this section or documents in its conformance

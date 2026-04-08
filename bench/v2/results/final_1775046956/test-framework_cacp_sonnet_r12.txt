@@ -5,6 +5,6 @@ Two questions before I write the files:
    - **B)** Use `print` as you explicitly requested
 
 2. **Where should the files go?**
-   - **A)** `testlib/` package under `/home/vvladescu/orchestrator/axiom/` (framework.py + `__init__.py`)
+   - **A)** `testlib/` package under `/path/to/axiom/` (framework.py + `__init__.py`)
    - **B)** Single file `testlib.py` in the axiom root
    - **C)** Somewhere else (let me know the path)

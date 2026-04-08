@@ -1,4 +1,4 @@
-It seems the write permission was denied. Would you like me to try a different location, or can you approve writes to `/home/vvladescu/orchestrator/axiom/testlib.py`?
+It seems the write permission was denied. Would you like me to try a different location, or can you approve writes to `/path/to/axiom/testlib.py`?
 
 In the meantime, here's the complete framework — you can save it manually:
 
